@@ -5,9 +5,15 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.start.agent.Tool;
+import com.start.Main;
+import com.start.agent.PokeTool;
+import com.start.agent.SendPrivateTool;
 import com.start.agent.UserAffinityTool;
+import com.start.agent.UserAliasTool;
+import com.start.agent.VoiceTool;
 import com.start.agent.WeatherTool;
 import com.start.config.BotConfig;
+import com.start.repository.UserAliasRepository;
 import com.start.repository.UserAffinityRepository;
 import com.start.repository.UserProfileRepository;
 import org.slf4j.Logger;
@@ -82,6 +88,14 @@ public class BaiLianService {
 
     private final BehaviorAnalyzer behaviorAnalyzer = new BehaviorAnalyzer();
     private final UserProfileRepository profileRepo = new UserProfileRepository();
+    private final UserAliasRepository userAliasRepo = new UserAliasRepository();
+    private BotMoodService moodService;
+    private final GameStateService gameStateService = new GameStateService();
+    private Main botInstance;
+
+    public void setMoodService(BotMoodService moodService) { this.moodService = moodService; }
+    public void setBotInstance(Main bot) { this.botInstance = bot; }
+    public GameStateService getGameStateService() { return gameStateService; }
 
     private final String baiLianApiKey = BotConfig.getBaiLianApiKey();
     private final String baiLianBaseUrl = BotConfig.getBaiLianBaseUrl();
@@ -158,6 +172,8 @@ public class BaiLianService {
         }
     }
 
+    private record ToolResult(String name, String result) {}
+
     // ===== 公共方法 =====
 
     public void clearContext(String sessionId) {
@@ -210,7 +226,11 @@ public class BaiLianService {
      * @return AI生成的回复内容，若因限流等原因不回复则返回空字符串或兜底文本
      */
     public String generate(String sessionId, String userId, String userPrompt, String groupId, String nickname) {
-        logger.info("🧠 AI 调用: sessionId={}, prompt=[{}]", sessionId, userPrompt);
+        return generate(sessionId, userId, userPrompt, groupId, nickname, Collections.emptyList());
+    }
+
+    public String generate(String sessionId, String userId, String userPrompt, String groupId, String nickname, List<Long> atUserIds) {
+        logger.info("🧠 AI 调用: sessionId={}, prompt=[{}], ats={}", sessionId, userPrompt, atUserIds);
 
         String context = "";
         String agentToolContext = "";
@@ -291,24 +311,155 @@ public class BaiLianService {
     - 回答要语义明确，避免模糊隐喻或过度诗意
     - 不懂就说"不太清楚"
     - 在群里聊得自然，不强行插话
-    - 若对方QQ是3524398813（鸠寻），她是最好的朋友，回应要温柔
+    - 对私聊好友（白名单用户）回应要温柔友好
+    - @ 人必须用 [CQ:at,qq=QQ号] 格式，禁止写"@昵称"纯文本。"@"开头直接跟CQ码才是有效的
+    - 如果群里有人叫你（别称匹配），回应；如果有人用你不认识的别称说话，先 resolve_alias 查一下
     - 对话态度由好感度和用户画像决定：好感度＞50时逐渐友好，＞80时依赖，＜50时逐渐冷淡，＜25时厌恶
-    
-    工具使用规则：
-    - 如果用户询问天气，必须调用 weather_query 工具
-    - 如果用户查询好感度相关，必须调用 user_affinity 工具
-    - 调用工具后，基于工具结果用自然语言回复用户
-""";
+    - 群冷场时可以主动抛话题活跃气氛，简短有趣，不要强行插话
+
+    ## 工具调用（回复前必须先过一遍这个清单） ##
+
+    输出格式：
+    <tool_call>
+    <function=工具名>
+    <parameter=参数名>参数值</parameter>
+    </function>
+    </tool_call>
+    可以连续输出多个 <tool_call> 块，一次调用多个工具。
+
+    【工具清单与触发条件】逐一检查，匹配就调用：
+
+    1. manage_alias / record_alias — 记别称
+       参数：action=record_alias, target_user_id, alias_name, alias_type, set_by_user_id, group_id
+
+       什么时候调？用户说的话里有「给某人起名/介绍某人/说明身份」的意图：
+       - "他是XX" "她是XX" "这是XX" "这位是XX" "那个人是XX" "叫XX" "称呼他XX" "就是XX" → OBJECTIVE
+         target_user_id = 被@的人或被描述人的QQ，alias_name = XX，set_by_user_id = 说话人的QQ
+       - "我叫XX" "我是XX" "以后叫我XX" "喊我XX" "可以叫我XX" → SUBJECTIVE
+         target_user_id = 说话人自己的QQ，alias_name = XX
+       - "叫你XX" "糖果熊以后叫XX" "给你起名叫XX" → BOT_ALIAS
+         target_user_id = 糖果熊的QQ(356289140)，alias_name = XX
+       例：@小明 说"这个 是粉猫" → <parameter=action>record_alias</parameter><parameter=target_user_id>小明QQ</parameter><parameter=alias_name>粉猫</parameter><parameter=alias_type>OBJECTIVE</parameter><parameter=set_by_user_id>说话人QQ</parameter>
+
+    2. manage_alias / resolve_alias — 查别称是谁
+       参数：action=resolve_alias, alias_name, group_id
+       触发：有人问"XX是谁"，且【群内别称与所在地】里找不到该别称时才调用
+       如果别称表里已经有了，直接根据上表回答，不需要调工具
+
+    3. manage_alias / set_primary_location — 记主地点
+       参数：action=set_primary_location, target_user_id, location
+       触发："我在XX" "我家在XX" "住在XX"
+
+    4. get_weather — 查天气
+       参数：user_id, city
+       触发：问天气。规则：
+       - 用户明确说了城市 → city=用户说的城市
+       - 用户没说城市 → city=UNKNOWN（系统会自动用记忆中的主地点）
+       - 绝不要自己从上下文中猜城市填进去，系统会自动处理地点优先级
+
+    5. query_user_affection — 查好感度
+       参数：user_id, group_id
+       触发：问好感度/亲密度
+
+    6. send_private_msg — 发私聊
+       参数：user_id, message, group_id（非好友必填当前群号）
+       触发：谁是卧底给每个玩家发词语时用。每人只发一次，别重复发。
+
+    7. send_poke — 戳一戳
+       参数：user_id, group_id
+       ⚠️ 戳一戳不能替代@！叫人来玩游戏必须用 [CQ:at,qq=QQ号]，不能用戳。
+       戳只能偶尔用来逗一下正在聊天的人，不能用来叫人。
+
+    8. send_voice — AI语音
+       参数：group_id, text
+       触发：当有人说"说句话""发语音""用语音说XX"时调用。文字控制在10-30字。
+       或者游戏开始/结束等重要时刻自动发一条语音活跃气氛。
+
+    ⛔ 以上8个是唯一的工具！禁止自创其他工具名！
+
+    7. 谁是卧底流程（严格按以下步骤，不要省略）：
+       a. 等报名：有人明确说\"1\"\"我\"\"我要玩\"\"来\"才算报名。@你但没表态的不算。
+       b. 凑够3人后，等3秒没人新加入就自动开始，别再问\"还有人吗\"。
+       c. 开始后：选一个卧底，给每个玩家用send_private_msg各发一次词（平民相同词，卧底不同词）。
+          记录一个名单：玩家QQ → 词。发给一个人后标记\"已发\"，别重复发。
+       d. 公屏说\"词已私发，从XX开始，每人一句话描述\"。
+       e. 听一轮描述后发起投票。被投最多者出局。更新存活名单。
+       f. 出局≠卧底时继续下一轮。卧底被投出=游戏结束。
+       g. 游戏全程不要输出<tool_call>（发私聊除外）。用自然语言回复。
+
+    8. 猜数字：想好1-100的数，记住不换。群友猜，你说\"大了\"\"小了\"，猜对说\"恭喜\"。
+    9. 成语接龙：起头后记住尾字，检查下一个人首字是否匹配。""";
 
             String systemPrompt = baseSystemPrompt +
+                    (moodService != null ? "\n\n你现在的情绪：" + moodService.getMoodDescription() + "（情绪值" + moodService.getMood() + "）" : "") +
                     "\n\n【当前与你对话的是】" + nickname +
                     "\n【QQ号:】" + userId +
+                    (groupId != null ? "\n【当前群号】" + groupId : "") +
                     "\n\n这是你对该用户信息：" + context +
                     "你可以根据用户画像和好感度高低进行不同的会话风格";
 
             if (!knowledgeContext.isEmpty()) {
                 systemPrompt += "\n\n【参考信息】\n" + knowledgeContext;
             }
+            // 注入别称+所在地信息（用于称呼和天气查询）
+            Map<String, UserAliasRepository.AliasInfo> aliasInfoMap;
+            if (groupId != null) {
+                aliasInfoMap = userAliasRepo.getGroupAliasInfoMap(groupId);
+            } else {
+                aliasInfoMap = new java.util.LinkedHashMap<>();
+            }
+            if (!aliasInfoMap.containsKey(userId)) {
+                UserAliasRepository.AliasInfo info = new UserAliasRepository.AliasInfo();
+                userAliasRepo.getBestAlias(userId).ifPresent(a -> { info.bestAlias = a; info.aliases.add(a); });
+                userAliasRepo.getLocation(userId).ifPresent(l -> info.primaryLocation = l);
+                if (info.bestAlias != null) aliasInfoMap.put(userId, info);
+            }
+            if (!aliasInfoMap.isEmpty()) {
+                StringBuilder aliasCtx = new StringBuilder("\n\n【群内别称与所在地】");
+                aliasInfoMap.forEach((uid, info) -> {
+                    aliasCtx.append("\n").append(uid);
+                    // 只显示真正的别称（不同于QQ号）
+                    List<String> realAliases = info.aliases.stream()
+                            .filter(a -> !a.equals(uid))
+                            .toList();
+                    if (!realAliases.isEmpty()) {
+                        aliasCtx.append(" → ").append(String.join(" / ", realAliases));
+                    }
+                    String loc = info.primaryLocation != null ? info.primaryLocation : info.secondaryLocation;
+                    if (loc != null) {
+                        aliasCtx.append(" 📍").append(loc);
+                    }
+                });
+                aliasCtx.append("\n（要@某人时，必须用 [CQ:at,qq=QQ号] 格式。禁止写 @别称 这种纯文本，QQ收不到。例：[CQ:at,qq=1285989735] 粉喵）");
+                systemPrompt += aliasCtx.toString();
+            }
+
+            // 当前用户的所在地（用于天气默认值）
+            Optional<String> userLoc = userAliasRepo.getLocation(userId);
+            if (userLoc.isPresent()) {
+                systemPrompt += "\n\n当前用户所在地：" + userLoc.get() + "（查天气时若未指定城市则默认使用）";
+            }
+
+            // 注入当前消息 @ 的用户（排除糖果熊自己）
+            List<Long> otherAts = atUserIds.stream()
+                    .filter(q -> q != BOT_QQ)
+                    .toList();
+            if (!otherAts.isEmpty()) {
+                StringBuilder atCtx = new StringBuilder("\n\n【本条消息 @ 了以下用户（可用于 target_user_id）】");
+                for (Long atQq : otherAts) {
+                    atCtx.append("\n- QQ=").append(atQq);
+                }
+                systemPrompt += atCtx.toString();
+            }
+
+            // 注入游戏状态（代码层跟踪，AI 不用靠记忆）
+            if (groupId != null) {
+                GameStateService.SpyGame spy = gameStateService.getOrCreateSpy(groupId);
+                systemPrompt += spy.getDescription();
+                GameStateService.NumberGame num = gameStateService.getOrCreateNumber(groupId);
+                systemPrompt += num.getDescription();
+            }
+
             systemPrompt += publicGroupContext;
             systemPrompt += timeContext;
 
@@ -338,13 +489,16 @@ public class BaiLianService {
             requestBodyObj.put("model", modelName);
             requestBodyObj.put("messages", messages);
 
-            // 当前模型 (glm-5.1) 不兼容 OpenAI function calling，
-            // 会在 content 中输出 <tool_call> 文本而非 JSON tool_calls，
-            // 因此普通聊天不传 tools，避免用户收到工具调用原文。
-            // final List<Tool> availableTools = Arrays.asList(
-            //         new WeatherTool(),
-            //         new UserAffinityTool(userAffinityRepo)
-            // );
+            // 纯系统提示词引导，不传 OpenAI tools 数组
+            // 模型按提示词格式输出 <tool_call> 文本，由下方代码解析执行
+            final List<Tool> availableTools = Arrays.asList(
+                    new WeatherTool(userAliasRepo),
+                    new UserAffinityTool(userAffinityRepo),
+                    new UserAliasTool(userAliasRepo, String.valueOf(BotConfig.getBotQq())),
+                    new SendPrivateTool(botInstance),
+                    new PokeTool(botInstance),
+                    new VoiceTool(botInstance)
+            );
 
             String requestBody = objectMapper.writeValueAsString(requestBodyObj);
             logger.debug("请求 Gemini API (Model: {}): {}", modelName, requestBody);
@@ -412,13 +566,93 @@ public class BaiLianService {
 
             JsonNode messageNode = firstChoice.get("message");
             String reply = messageNode.path("content").asText().trim();
+            logger.debug("AI raw reply (first 200 chars): {}", reply.length() > 200 ? reply.substring(0, 200) + "..." : reply);
 
-            // 当前模型 (glm-5.1) 不支持 OpenAI function calling，
-            // 不传 tools，因此跳过工具调用处理。
-            // 若后续切换到支持 tool_calls 的模型，可将上方 tools 代码恢复。
+            // 解析 glm-5.1 文本格式的工具调用，支持一次多个 <tool_call> 块
+            if (reply.startsWith("<tool_call>") || reply.contains("<function=")) {
+                List<ToolResult> toolResults = new ArrayList<>();
+
+                // 按 </tool_call> 分割多个工具调用块
+                String[] blocks = reply.split("</tool_call>");
+                for (String block : blocks) {
+                    if (!block.contains("<function=")) continue;
+                    int funcStart = block.indexOf("<function=");
+                    int funcGt = block.indexOf(">", funcStart);
+                    if (funcGt < 0) continue;
+                    String toolName = block.substring(funcStart + 10, funcGt).trim();
+
+                    Map<String, String> params = new HashMap<>();
+                    int idx = 0;
+                    while (true) {
+                        int ps = block.indexOf("<parameter=", idx);
+                        if (ps < 0) break;
+                        int eq = block.indexOf(">", ps);
+                        if (eq < 0) break;
+                        String pn = block.substring(ps + 11, eq).trim();
+                        int end = block.indexOf("</parameter>", eq);
+                        if (end < 0) break;
+                        String pv = block.substring(eq + 1, end).trim();
+                        params.put(pn, pv);
+                        idx = end + 12;
+                    }
+
+                    Tool tool = availableTools.stream()
+                            .filter(t -> t.getName().equals(toolName))
+                            .findFirst().orElse(null);
+                    if (tool != null) {
+                        String result = tool.execute(new HashMap<>(params));
+                        logger.info("🔧 工具 [{}] params={} → {}", toolName, params, result);
+                        toolResults.add(new ToolResult(toolName, result));
+                    }
+                }
+
+                if (!toolResults.isEmpty()) {
+                    messages.add(Map.of("role", "assistant", "content", reply));
+                    StringBuilder toolFeedback = new StringBuilder("以下是对你工具调用的结果：\n");
+                    for (ToolResult tr : toolResults) {
+                        toolFeedback.append("[").append(tr.name).append("] ").append(tr.result).append("\n");
+                    }
+                    toolFeedback.append("\n请基于这些结果，用自然语言简短回复用户（10-25字）。");
+                    messages.add(Map.of("role", "user", "content", toolFeedback.toString()));
+
+                    Map<String, Object> secondBody = new HashMap<>();
+                    secondBody.put("model", modelName);
+                    secondBody.put("messages", messages);
+                    try {
+                        HttpRequest secondReq = HttpRequest.newBuilder()
+                                .uri(URI.create(url))
+                                .header("Authorization", "Bearer " + apiKey)
+                                .header("Content-Type", "application/json")
+                                .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(secondBody)))
+                                .timeout(Duration.ofMillis(this.bailianTimeoutMs))
+                                .build();
+                        HttpResponse<String> secondResp = httpClient.send(secondReq, HttpResponse.BodyHandlers.ofString());
+                        if (secondResp.statusCode() == 200) {
+                            JsonNode sr = objectMapper.readTree(secondResp.body());
+                            JsonNode sc = sr.path("choices");
+                            if (sc.isArray() && !sc.isEmpty()) {
+                                String newReply = sc.get(0).path("message").path("content").asText().trim();
+                                if (!newReply.isEmpty() && !newReply.startsWith("<tool_call>")) {
+                                    reply = newReply;
+                                }
+                            }
+                        }
+                    } catch (Exception e) {
+                        logger.warn("工具二次调用失败: {}", e.getMessage());
+                    }
+                    // 兜底：如果二次调用没有拿到有效回复，直接用工具结果
+                    if (reply.startsWith("<tool_call>") || reply.contains("<function=")) {
+                        reply = toolResults.stream()
+                                .map(tr -> tr.result)
+                                .reduce((a, b) -> a + "；" + b).orElse("嗯...");
+                    }
+                }
+            }
 
             if (!reply.isEmpty()) {
                 reply = reply.replaceAll("【.*?】", "").trim();
+                // 修复 AI 输出的畸形 CQ 码：去掉 [ 和 CQ: 之间的空格，] 前的空格
+                reply = reply.replaceAll("\\[\\s*CQ:", "[CQ:").replaceAll("\\s*\\]", "]");
             }
 
             history.add(new Message("assistant", reply));
@@ -659,48 +893,57 @@ public class BaiLianService {
         }
         reply = reply.trim();
 
-        if (reply.length() <= 25) {
-            return Arrays.asList(reply);
+        // 提取开头的 CQ 码，避免切分时截断
+        String cqPrefix = "";
+        java.util.regex.Matcher cqMatcher = java.util.regex.Pattern.compile("^(\\[CQ:[^\\]]+\\]\\s*)+").matcher(reply);
+        if (cqMatcher.find()) {
+            cqPrefix = cqMatcher.group();
+            reply = reply.substring(cqMatcher.end());
+        }
+
+        // 短消息直接返回（含 CQ 前缀仍短的话也不用切）
+        if (cqPrefix.length() + reply.length() <= 30) {
+            return Arrays.asList(cqPrefix + reply);
         }
 
         List<String> parts = new ArrayList<>();
         String[] sentences = reply.split("(?<=[。！？；])|\\n");
+        boolean first = true;
 
         for (String sent : sentences) {
             sent = sent.trim();
             if (sent.isEmpty()) continue;
 
-            if (sent.length() <= 25) {
-                parts.add(sent);
+            String full = first ? cqPrefix + sent : sent;
+            first = false;
+
+            if (full.length() <= 30) {
+                parts.add(full);
             } else {
-                String[] byComma = sent.split("(?<=[，、])");
+                String[] byComma = full.split("(?<=[，、])");
                 if (byComma.length > 1) {
                     for (String chunk : byComma) {
                         chunk = chunk.trim();
-                        if (!chunk.isEmpty()) {
-                            parts.add(chunk);
-                        }
+                        if (!chunk.isEmpty()) parts.add(chunk);
                     }
                 } else {
-                    for (int i = 0; i < sent.length(); i += 20) {
-                        parts.add(sent.substring(i, Math.min(i + 20, sent.length())));
-                    }
+                    parts.add(full); // 别硬切，保留完整
                 }
             }
         }
 
         final int MAX_PARTS = 5;
         if (parts.size() > MAX_PARTS) {
-            // 可选：在最后一段加省略号，表示还有内容
             List<String> limited = new ArrayList<>(parts.subList(0, MAX_PARTS - 1));
             String last = parts.get(MAX_PARTS - 1).trim();
             if (!last.endsWith("…") && !last.endsWith("...")) {
                 last += "…";
             }
+            last += "(内容较长，已截断)";
             limited.add(last);
             return limited;
         }
-        return parts;
+        return parts.isEmpty() ? Arrays.asList(cqPrefix + reply) : parts;
     }
 
     // ===== 主动插话逻辑 =====

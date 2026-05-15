@@ -113,6 +113,22 @@ public class MessageUtil {
     }
 
     /**
+     * 提取消息中的回复 ID（引用消息），无回复返回 null
+     */
+    public static Long extractReplyId(JsonNode messageNode) {
+        if (messageNode == null || !messageNode.isArray()) return null;
+        for (JsonNode seg : messageNode) {
+            if ("reply".equals(seg.path("type").asText())) {
+                String id = seg.path("data").path("id").asText();
+                if (!id.isEmpty()) {
+                    try { return Long.parseLong(id); } catch (NumberFormatException e) { return null; }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
      * 判断消息是否 @ 了指定的 QQ
      */
     public static boolean isAt(JsonNode messageNode, long targetQq) {

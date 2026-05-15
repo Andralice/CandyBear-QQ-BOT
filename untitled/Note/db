@@ -178,3 +178,48 @@ CREATE TABLE `user_profiles` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_user_group` (`user_id`, `group_id`) -- 每个用户在每个群有独立画像
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- 用户别称表
+CREATE TABLE user_aliases (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    target_user_id VARCHAR(50) NOT NULL COMMENT '被称呼的用户 QQ',
+    group_id VARCHAR(50) DEFAULT NULL COMMENT '群 ID，私聊为 NULL',
+    alias_name VARCHAR(100) NOT NULL COMMENT '别称',
+    alias_type ENUM('SUBJECTIVE', 'OBJECTIVE') NOT NULL COMMENT '主观/客观',
+    set_by_user_id VARCHAR(50) NOT NULL COMMENT '设置者 QQ',
+    usage_count INT DEFAULT 1 COMMENT '使用次数',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_target (target_user_id),
+    INDEX idx_target_type (target_user_id, alias_type),
+    UNIQUE KEY uk_alias (target_user_id, group_id, alias_name, alias_type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- 知识库命中日志表
+CREATE TABLE IF NOT EXISTS knowledge_hit_logs (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    knowledge_id BIGINT NOT NULL,
+    user_id VARCHAR(50) NOT NULL,
+    group_id VARCHAR(50),
+    question VARCHAR(500),
+    matched_keywords VARCHAR(500),
+    similarity_score DOUBLE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_knowledge (knowledge_id),
+    INDEX idx_created (created_at DESC)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- 用户好感度表
+CREATE TABLE IF NOT EXISTS user_affinity (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id VARCHAR(50) NOT NULL,
+    group_id VARCHAR(50) DEFAULT NULL,
+    affinity_score INT DEFAULT 50,
+    last_updated_message_id BIGINT DEFAULT 0,
+    message_count_snapshot INT DEFAULT 0,
+    reason_log TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_user_group (user_id, group_id),
+    INDEX idx_affinity (affinity_score)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

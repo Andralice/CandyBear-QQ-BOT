@@ -66,9 +66,9 @@ public class LuckHandler implements MessageHandler {
         } else if (luck >= 70) {
             reply =Atthis + "😊 运气不错哦～您今天的幸运值是 " + luck + "！";
         } else if (luck >= 40) {
-            reply =Atthis +"🙂 平平无奇的一天，幸运值：" + luck;
+            reply =Atthis +"🙂 平平无奇的一天，幸运值：" + luck + "。";
         } else {
-            reply =Atthis + "😞 今天小心点...您的幸运值只有 " + luck;
+            reply =Atthis + "😞 今天小心点...您的幸运值只有 " + luck + "。";
         }
 
         bot.sendReply(msg, reply);

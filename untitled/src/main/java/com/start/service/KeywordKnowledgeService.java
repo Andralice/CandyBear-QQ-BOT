@@ -14,6 +14,8 @@ import org.slf4j.Logger;
 import java.sql.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import org.slf4j.LoggerFactory;
 
@@ -57,6 +59,7 @@ public class KeywordKnowledgeService {
 
     private final HikariDataSource dataSource;
     private static final Logger logger = LoggerFactory.getLogger(KeywordKnowledgeService.class);
+    private static final ExecutorService logExecutor = Executors.newFixedThreadPool(2);
 
     private final Map<String, List<KnowledgeItem>> keywordCache;
     private final List<KnowledgeItem> fullCache;
@@ -396,7 +399,7 @@ public class KeywordKnowledgeService {
 
     private void logHit(long knowledgeId, String userId, String groupId,
                         String question, List<String> matchedKeywords, double similarityScore) {
-        new Thread(() -> {
+        logExecutor.submit(() -> {
             try (Connection conn = dataSource.getConnection()) {
                 String sql = "INSERT INTO knowledge_hit_logs " +
                         "(knowledge_id, user_id, group_id, question, matched_keywords, similarity_score) " +
@@ -414,7 +417,7 @@ public class KeywordKnowledgeService {
             } catch (Exception e) {
                 logger.error("记录命中日志失败", e);
             }
-        }).start();
+        });
     }
 
     private void updateHitCount(long knowledgeId) {

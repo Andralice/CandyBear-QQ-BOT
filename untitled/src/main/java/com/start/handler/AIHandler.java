@@ -2,6 +2,8 @@ package com.start.handler;
 
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.start.Main;
 import com.start.config.BotConfig;
 import com.start.service.BaiLianService;
@@ -9,6 +11,7 @@ import com.start.util.MessageUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.Random;
@@ -104,6 +107,8 @@ public class AIHandler implements MessageHandler {
                         sendSplitGroupReplies(bot, groupId, reply);
                         aiService.recordUserInteraction(String.valueOf(groupId), String.valueOf(userId), reply);
                         aiService.recordGroupContext(String.valueOf(groupId), String.valueOf(userId), "糖果熊", reply, "ai_reply");
+                    } else {
+                        bot.sendGroupReply(groupId, "刚刚走神了，再说一遍？");
                     }
                 }).start();
             } else {
@@ -112,8 +117,27 @@ public class AIHandler implements MessageHandler {
         }
     }
 
+    /** 提取回复上下文，若有引用消息则尝试获取原消息内容 */
+    private String buildReplyContext(JsonNode msg, Main bot) {
+        Long replyId = MessageUtil.extractReplyId(msg.path("message"));
+        if (replyId == null) return "";
+        try {
+            var params = new ObjectNode(JsonNodeFactory.instance);
+            params.put("message_id", replyId);
+            var future = bot.callOneBotApi("get_msg", params);
+            var resp = future.get(5, java.util.concurrent.TimeUnit.SECONDS);
+            if (resp != null && resp.has("data")) {
+                String repliedText = resp.path("data").path("raw_message").asText();
+                if (!repliedText.isEmpty()) {
+                    return "（对方正在回复这条消息：\"" + repliedText + "\"）";
+                }
+            }
+        } catch (Exception ignored) {}
+        return "";
+    }
+
     private void handlePrivateMessage(Main bot, JsonNode msg, long userId, String rawMessage, String plainText,String nickname) {
-        String prompt = extractPrompt(rawMessage, plainText);
+        String prompt = buildReplyContext(msg, bot) + extractPrompt(rawMessage, plainText);
         String sessionId = "private_" + userId;
 
         if (isClearCommand(prompt)) {
@@ -127,11 +151,12 @@ public class AIHandler implements MessageHandler {
             return;
         }
 
-        replyWithAI(bot, msg, sessionId, String.valueOf(userId), prompt, null,nickname);
+        replyWithAI(bot, msg, sessionId, String.valueOf(userId), prompt, null, nickname, Collections.emptyList());
     }
 
     private void handleExplicitAIRequest(Main bot, JsonNode msg, long userId, long groupId, String rawMessage, String plainText,String nickname) {
-        String prompt = extractPrompt(rawMessage, plainText);
+        String replyCtx = buildReplyContext(msg, bot);
+        String prompt = replyCtx.isEmpty() ? extractPrompt(rawMessage, plainText) : replyCtx + extractPrompt(rawMessage, plainText);
         String sessionId = "group_" + groupId + "_" + userId;
 
         if (isClearCommand(prompt)) {
@@ -145,7 +170,8 @@ public class AIHandler implements MessageHandler {
             return;
         }
 
-        replyWithAI(bot, msg, sessionId, String.valueOf(userId), prompt, String.valueOf(groupId),String.valueOf(nickname));
+        List<Long> ats = MessageUtil.extractAts(msg.path("message"));
+        replyWithAI(bot, msg, sessionId, String.valueOf(userId), prompt, String.valueOf(groupId), nickname, ats);
     }
 
     private boolean isExplicitTrigger(JsonNode msg, String rawMessage) {
@@ -166,16 +192,13 @@ public class AIHandler implements MessageHandler {
         return "#clear".equals(prompt) || "!clear".equals(prompt) || "！clear".equals(prompt);
     }
 
-    private void replyWithAI(Main bot, JsonNode originalMsg, String sessionId, String userId, String prompt, String groupId,String nickname) {
+    private void replyWithAI(Main bot, JsonNode originalMsg, String sessionId, String userId, String prompt, String groupId, String nickname, List<Long> atUserIds) {
         new Thread(() -> {
-            // 发送“思考中”提示
-//            bot.sendReply(originalMsg, "🤔 稍等...");
-
             // 调用 AI（内部已做频率限制）
-            String reply = aiService.generate(sessionId, userId, prompt, groupId,nickname);
+            String reply = aiService.generate(sessionId, userId, prompt, groupId, nickname, atUserIds);
 
             if (reply == null || reply.trim().isEmpty()) {
-                // 被频率限制或出错，不发后续
+                bot.sendReply(originalMsg, "稍等一下，我在走神...");
                 return;
             }
 

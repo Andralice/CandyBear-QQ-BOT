@@ -88,6 +88,9 @@ public class Main extends WebSocketClient {
     /** 用户画像服务，定期分析用户行为并更新画像标签。 */
     private UserPortraitService portraitService;
 
+    /** 糖果熊情绪系统。 */
+    private final BotMoodService moodService = new BotMoodService();
+
     /** 封装 OneBot WebSocket API 调用的服务，支持异步请求。 */
     private final OneBotWsService oneBotWsService;
 
@@ -127,6 +130,8 @@ public class Main extends WebSocketClient {
 
         // 初始化大模型服务
         this.baiLianService = new BaiLianService(this.keywordKnowledgeService, this.userAffinityRepo);
+        this.baiLianService.setMoodService(this.moodService);
+        this.baiLianService.setBotInstance(this);
         this.agentService = new AgentService(this.baiLianService, this.keywordKnowledgeService, this.userAffinityRepo);
 
         // 初始化事件处理器注册中心
@@ -282,6 +287,23 @@ public class Main extends WebSocketClient {
 
         } catch (Exception e) {
             logger.error("❌ 处理消息失败", e);
+            try {
+                String msgType = null;
+                long groupId = 0;
+                long userId = 0;
+                try {
+                    JsonNode event = MAPPER.readTree(message);
+                    msgType = event.path("message_type").asText();
+                    groupId = event.path("group_id").asLong();
+                    userId = event.path("user_id").asLong();
+                } catch (Exception ignored) {}
+                String fallback = "出了点小问题，等下再试～";
+                if ("group".equals(msgType) && groupId > 0) {
+                    sendGroupReply(groupId, fallback);
+                } else if ("private".equals(msgType) && userId > 0) {
+                    sendPrivateReply(userId, fallback);
+                }
+            } catch (Exception ignored) {}
         }
     }
 
@@ -370,18 +392,24 @@ public class Main extends WebSocketClient {
     }
 
     public void sendPrivateReply(long userId, String reply) {
+        sendPrivateReply(userId, 0, reply);
+    }
+
+    /** 带 group_id 的私聊，非好友需要 group_id 建立临时会话 */
+    public void sendPrivateReply(long userId, long groupId, String reply) {
         String traceId = "send_" + System.currentTimeMillis() + "_" + ThreadLocalRandom.current().nextInt(1000);
-        logger.debug("📤 [{}] 发送私聊回复: {}", traceId, reply);
+        logger.debug("📤 [{}] 发送私聊: {}", traceId, reply);
         try {
             ObjectNode action = MAPPER.createObjectNode();
             action.put("action", "send_private_msg");
             ObjectNode params = action.putObject("params");
             params.put("user_id", userId);
+            if (groupId > 0) params.put("group_id", groupId);
             params.put("message", reply);
             this.send(action.toString());
-            logger.debug("📤 已发送私聊回复: {}", reply);
+            logger.debug("📤 已发送私聊: {}", reply);
         } catch (Exception e) {
-            logger.error("❌ 发送私聊回复失败", e);
+            logger.error("❌ 发送私聊失败", e);
         }
     }
 

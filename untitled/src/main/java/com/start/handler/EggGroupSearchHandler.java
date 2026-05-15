@@ -129,14 +129,6 @@ public class EggGroupSearchHandler implements MessageHandler {
                 return;
             }
             
-            // 添加随机延迟，模拟人类操作
-            try {
-                long delay = 500 + (long)(Math.random() * 1000); // 0.5-1.5秒
-                Thread.sleep(delay);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-            
             // 2. 调用预测 API
             List<EggGroupDataCenter.PredictResult> results = dataCenter.predictEggRace(size, weight);
             

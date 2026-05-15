@@ -29,6 +29,6 @@ public class HelloHandler implements MessageHandler {
 
     @Override
     public void handle(JsonNode msg, Main bot) {
-        bot.sendReply(msg, "你好！我是 糖果熊~");
+        bot.sendReply(msg, "你好！我是糖果熊~");
     }
 }

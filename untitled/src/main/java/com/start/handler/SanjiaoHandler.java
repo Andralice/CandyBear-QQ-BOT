@@ -37,6 +37,7 @@ public class SanjiaoHandler implements MessageHandler {
         String plainText = MessageUtil.extractPlainText(message.path("message"));
 
         CompletableFuture<String> future = null;
+        String taskName = plainText;
 
         if ("特勤处".equals(plainText)) {
             future = screenshotService.takeScreenshot("kkrb-overview");
@@ -46,12 +47,11 @@ public class SanjiaoHandler implements MessageHandler {
             future = screenshotService.takeScreenshot("kkrb-overview-3");
         }
 
-        // 如果没有匹配命令，直接返回（不处理）
         if (future == null) {
             return;
         }
 
-        // 异步执行截图后续操作
+        final String finalTaskName = taskName;
         future.thenCompose(imagePath -> {
             try {
                 byte[] imageBytes = screenshotService.readAndCleanupImage(imagePath);
@@ -63,7 +63,7 @@ public class SanjiaoHandler implements MessageHandler {
                 throw new RuntimeException("读取截图文件失败", e);
             }
         }).exceptionally(ex -> {
-            String errorMsg = "❌ 特勤处截图失败";
+            String errorMsg = "❌ " + finalTaskName + "截图失败";
             Throwable cause = ex.getCause();
             if (cause != null && cause.getMessage() != null) {
                 String msg = cause.getMessage();

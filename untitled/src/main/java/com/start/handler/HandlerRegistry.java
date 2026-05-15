@@ -33,6 +33,7 @@ public class HandlerRegistry {
         handlers.add(new SanjiaoHandler());
         handlers.add(new DailyProfessionHandler());
         handlers.add(new DailyCpHandler());
+        handlers.add(new RankHandler());
         handlers.add(new EggGroupSearchHandler(dataCenter));
         handlers.add(new AgentHandler(agentService));
         handlers.add(merchantHandler);

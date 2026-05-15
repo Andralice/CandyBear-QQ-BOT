@@ -16,9 +16,9 @@ public class SpamDetector {
     // 窗口大小：保留最近 N 条消息用于检测
     private static final int WINDOW_SIZE = 5;
     // 触发条件：末尾连续相同内容出现 M 次
-    private static final int MIN_REPEAT_COUNT = 3;
+    private static final int MIN_REPEAT_COUNT = 5;
     // 最小消息长度：避免对过短或无意义消息进行检测（如 "."、" "）
-    private static final int MIN_MESSAGE_LENGTH = 1;
+    private static final int MIN_MESSAGE_LENGTH = 2;
 
     private final Map<String, Deque<MessageRecord>> groupMessages = new ConcurrentHashMap<>();
     private final Map<String, Long> lastTriggerTime = new ConcurrentHashMap<>();
@@ -61,7 +61,7 @@ public class SpamDetector {
                     String[] replies = {
                             "📢 打断施法！",
                             "🛑 禁止加一",
-                            "⚠️ 检测到重复内容，律行停止！"
+                            "⚠️ 检测到重复内容，立即停止！"
                     };
                     String reply = replies[new Random().nextInt(replies.length)];
                     bot.sendGroupReply(Long.parseLong(groupId), reply);
