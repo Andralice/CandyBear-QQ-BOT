@@ -195,6 +195,14 @@ public class DatabaseConfig {
             "ALTER TABLE long_term_memories ADD COLUMN IF NOT EXISTS keywords TEXT",
             "ALTER TABLE long_term_memories ADD COLUMN IF NOT EXISTS recall_count INT DEFAULT 0",
 
+            // 知识库黑名单
+            "CREATE TABLE IF NOT EXISTS knowledge_blacklist (" +
+                "id BIGINT AUTO_INCREMENT PRIMARY KEY," +
+                "pattern VARCHAR(500) NOT NULL COMMENT '被屏蔽的问题模式'," +
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
+                "UNIQUE KEY uk_pattern (pattern(200))" +
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
             // group_mood 表
             "CREATE TABLE IF NOT EXISTS group_mood (" +
                 "id BIGINT AUTO_INCREMENT PRIMARY KEY," +

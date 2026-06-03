@@ -123,6 +123,43 @@ public class UserAliasRepository extends BaseRepository {
         return Optional.ofNullable(r.isSuccess() ? r.getData() : null);
     }
 
+    /** 修改别称名（把旧别称改成新别称） */
+    public String updateAlias(String targetUserId, String groupId, String oldAlias, String newAlias) {
+        oldAlias = oldAlias.trim();
+        newAlias = newAlias.trim();
+        // 先检查新别称是否已被占用
+        String checkSql = groupId != null
+                ? "SELECT target_user_id FROM user_aliases WHERE alias_name=? AND group_id=? AND target_user_id!=? LIMIT 1"
+                : "SELECT target_user_id FROM user_aliases WHERE alias_name=? AND group_id IS NULL AND target_user_id!=? LIMIT 1";
+        try (Connection c = DatabaseConfig.getConnection();
+             PreparedStatement ps = c.prepareStatement(checkSql)) {
+            ps.setString(1, newAlias);
+            if (groupId != null) { ps.setString(2, groupId); ps.setString(3, targetUserId); }
+            else { ps.setString(2, targetUserId); }
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return "conflict:" + rs.getString("target_user_id");
+            }
+        } catch (SQLException e) { logger.error("检查别称冲突失败", e); return "error:查询失败"; }
+
+        int rows = executeUpdate(
+                "UPDATE user_aliases SET alias_name=? WHERE target_user_id=? AND alias_name=? AND (group_id=? OR group_id IS NULL)",
+                newAlias, targetUserId, oldAlias, groupId).getDataOrElse(0);
+        if (rows == 0) return "not_found:未找到别称「" + oldAlias + "」";
+        logger.info("✏️ 别称更新: {} {} → {}", targetUserId, oldAlias, newAlias);
+        return "ok";
+    }
+
+    /** 删除一个别称 */
+    public String deleteAlias(String targetUserId, String groupId, String aliasName) {
+        aliasName = aliasName.trim();
+        int rows = executeUpdate(
+                "DELETE FROM user_aliases WHERE target_user_id=? AND alias_name=? AND (group_id=? OR group_id IS NULL)",
+                targetUserId, aliasName, groupId).getDataOrElse(0);
+        if (rows == 0) return "not_found:未找到别称「" + aliasName + "」";
+        logger.info("🗑️ 别称删除: {} {} -> {}", targetUserId, groupId, aliasName);
+        return "ok";
+    }
+
     /** 获取群内所有别称+地点信息 */
     public Map<String, AliasInfo> getGroupAliasInfoMap(String groupId) {
         Map<String, AliasInfo> map = new LinkedHashMap<>();

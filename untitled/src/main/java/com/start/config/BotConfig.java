@@ -48,6 +48,8 @@ public class BotConfig {
     private static int ttsMaxRetries;
 
     private static int httpConnectTimeoutMs;
+    private static String webSearchUrl;
+    private static String webSearchBackend;
 
     private static final Pattern ENV_PATTERN = Pattern.compile("\\$\\{([^:}]+)(?::([^}]*))?\\}");
 
@@ -98,6 +100,8 @@ public class BotConfig {
             ttsMaxRetries = parseInt(resolve(props.getProperty("tts.max-retries", "2")), 2);
 
             httpConnectTimeoutMs = parseInt(resolve(props.getProperty("http.connect-timeout-ms", "10000")), 10000);
+            webSearchUrl = resolve(props.getProperty("web.search.url", "https://html.duckduckgo.com/html/"));
+            webSearchBackend = resolve(props.getProperty("web.search.backend", "bing"));
 
             logger.info("🤖 机器人 QQ: {}, 名字: {}", botQq, botName);
             logger.info("✅ WebSocket 地址: {}", wsUrl);
@@ -258,6 +262,14 @@ public class BotConfig {
 
     public static int getHttpConnectTimeoutMs() {
         return httpConnectTimeoutMs;
+    }
+
+    public static String getWebSearchUrl() {
+        return webSearchUrl;
+    }
+
+    public static String getWebSearchBackend() {
+        return webSearchBackend;
     }
 
     public static String getAt(long userId) {

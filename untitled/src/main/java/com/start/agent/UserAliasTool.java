@@ -25,7 +25,7 @@ public class UserAliasTool implements Tool {
 
     @Override
     public String getDescription() {
-        return "管理别称和地点。action: record_alias(记录别称), set_primary_location(设主地点), " +
+        return "管理别称和地点。action: record_alias(记别称), update_alias(改别称,参数old_alias+new_alias), delete_alias(删别称), set_primary_location(设主地点), " +
                "set_secondary_location(设次地点), resolve_alias(查别称对应谁), get_bot_aliases(查糖果熊的别称)。" +
                "当有人说'以后叫我XX'时用 record_alias SUBJECTIVE，" +
                "有人说'他叫XX'时用 record_alias OBJECTIVE，" +
@@ -55,6 +55,8 @@ public class UserAliasTool implements Tool {
         if (action == null) return "缺少 action 参数";
         return switch (action) {
             case "record_alias" -> doRecordAlias(args);
+            case "update_alias" -> doUpdateAlias(args);
+            case "delete_alias" -> doDeleteAlias(args);
             case "set_primary_location" -> doSetLocation(args, true);
             case "set_secondary_location" -> doSetLocation(args, false);
             case "resolve_alias" -> doResolve(args);
@@ -89,6 +91,43 @@ public class UserAliasTool implements Tool {
 
         String label = switch (type) { case "SUBJECTIVE" -> "主观"; case "OBJECTIVE" -> "客观"; default -> "糖果熊"; };
         return "已记录" + label + "别称：" + targetId + " → 「" + alias + "」";
+    }
+
+    private String doUpdateAlias(Map<String, Object> args) {
+        String targetId = (String) args.get("target_user_id");
+        String groupId = (String) args.get("group_id");
+        String oldAlias = (String) args.get("old_alias");
+        String newAlias = (String) args.get("new_alias");
+        String requesterId = (String) args.get("requester_user_id");
+        if (targetId == null || oldAlias == null || newAlias == null)
+            return "缺少参数 target_user_id/old_alias/new_alias";
+        if (requesterId != null && !requesterId.equals(targetId))
+            return "只有本人才能修改自己的别称哦~";
+        if ("null".equals(groupId)) groupId = null;
+
+        String result = aliasRepo.updateAlias(targetId, groupId, oldAlias, newAlias);
+        if (result.startsWith("conflict:"))
+            return "新别称「" + newAlias + "」已被占用，请换一个。";
+        if (result.startsWith("not_found:"))
+            return result.substring(10);
+        return "已将「" + oldAlias + "」改为「" + newAlias + "」";
+    }
+
+    private String doDeleteAlias(Map<String, Object> args) {
+        String targetId = (String) args.get("target_user_id");
+        String groupId = (String) args.get("group_id");
+        String alias = (String) args.get("alias_name");
+        String requesterId = (String) args.get("requester_user_id");
+        if (targetId == null || alias == null)
+            return "缺少参数 target_user_id/alias_name";
+        if (requesterId != null && !requesterId.equals(targetId))
+            return "只有本人才能删除自己的别称哦~";
+        if ("null".equals(groupId)) groupId = null;
+
+        String result = aliasRepo.deleteAlias(targetId, groupId, alias);
+        if (result.startsWith("not_found:"))
+            return result.substring(10);
+        return "已删除别称「" + alias + "」";
     }
 
     private String doSetLocation(Map<String, Object> args, boolean isPrimary) {

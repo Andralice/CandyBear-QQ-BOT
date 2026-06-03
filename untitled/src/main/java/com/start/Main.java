@@ -158,6 +158,9 @@ public class Main extends WebSocketClient {
         // 初始化事件处理器注册中心
         this.handlerRegistry = new HandlerRegistry(this.agentService, this.baiLianService, groupExecutor);
 
+        // 将远行商人处理器注入到 BaiLianService，供 TravelingMerchantTool 使用
+        this.baiLianService.setMerchantHandler(this.handlerRegistry.getMerchantHandler());
+
         // 设置 DashScope API Key（来自配置文件，不使用环境变量）
         if (BotConfig.getBaiLianApiKey() != null && !BotConfig.getBaiLianApiKey().isBlank()) {
             System.setProperty("dashscope.api-key", BotConfig.getBaiLianApiKey());

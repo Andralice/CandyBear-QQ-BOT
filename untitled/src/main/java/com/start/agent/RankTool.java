@@ -13,7 +13,9 @@ public class RankTool implements Tool {
 
     @Override public String getDescription() {
         return "查询群排行榜。action: help(查看有哪些榜), message(发言榜), luck(幸运榜), affinity(好感榜)。" +
-               "当有人问'有什么榜''排行榜怎么用'时用 help，指定具体类型时用对应 action。";
+               "当有人问'有什么榜''排行榜怎么用'时用 help，指定具体类型时用对应 action。" +
+               "注意：本群只有发言榜、幸运榜、好感榜三种，不存在'笨蛋榜''最笨榜'等其他榜。" +
+               "如果有人问'第一笨蛋是谁'之类的不存在的榜，直接回复没有这个榜，不要用其他榜代替。";
     }
 
     @Override

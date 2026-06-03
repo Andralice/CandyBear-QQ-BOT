@@ -56,7 +56,7 @@ public class KnowledgeBaseTool implements Tool {
                 !result.answer.trim().isEmpty() &&
                 result.similarityScore >= 0.3) {
 
-            return result.answer.trim();
+            return "[id=" + result.id + "] " + result.answer.trim();
         }
 
         return "未找到相关信息";

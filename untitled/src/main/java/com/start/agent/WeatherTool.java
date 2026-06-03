@@ -31,7 +31,7 @@ public class WeatherTool implements Tool {
 
     @Override
     public String getDescription() {
-        return "查询天气。用户明确说城市→直接用；用户没指定→city填UNKNOWN，系统自动用主地点。绝不要自己猜城市。";
+        return "查询天气。用户明确说城市→直接用；用户没指定→city填UNKNOWN，系统自动用主地点。days默认1，最多7天预报。绝不要自己猜城市。";
     }
 
     @Override
@@ -39,7 +39,8 @@ public class WeatherTool implements Tool {
         return Map.of("type", "object",
                 "properties", Map.of(
                         "city", Map.of("type", "string", "description", "城市名（中文或拼音），未指定填 UNKNOWN"),
-                        "user_id", Map.of("type", "string", "description", "当前用户 ID，用于查记忆中的地点")
+                        "user_id", Map.of("type", "string", "description", "当前用户 ID，用于查记忆中的地点"),
+                        "days", Map.of("type", "string", "description", "预报天数，默认1，最多7")
                 ),
                 "required", Arrays.asList("city"));
     }
@@ -48,6 +49,9 @@ public class WeatherTool implements Tool {
     public String execute(Map<String, Object> args) {
         String city = (String) args.get("city");
         String userId = (String) args.get("user_id");
+        int days = parseIntSafe((String) args.get("days"), 1);
+        if (days < 1) days = 1;
+        if (days > 7) days = 7;
 
         if (city == null || city.trim().isEmpty() || "UNKNOWN".equalsIgnoreCase(city.trim())) {
             if (userId != null && !userId.isEmpty()) {
@@ -105,7 +109,7 @@ public class WeatherTool implements Tool {
                     "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f" +
                     "&current=temperature_2m,weather_code,relative_humidity_2m,wind_speed_10m" +
                     "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code" +
-                    "&timezone=auto&forecast_days=1", lat, lon);
+                    "&timezone=auto&forecast_days=" + days, lat, lon);
 
             HttpRequest wReq = HttpRequest.newBuilder().uri(URI.create(wUrl))
                     .timeout(java.time.Duration.ofSeconds(10)).build();
@@ -127,12 +131,17 @@ public class WeatherTool implements Tool {
 
             JsonNode daily = w.path("daily");
             if (!daily.isMissingNode() && daily.path("time").isArray() && daily.path("time").size() > 0) {
-                double hi = daily.path("temperature_2m_max").get(0).asDouble();
-                double lo = daily.path("temperature_2m_min").get(0).asDouble();
-                int rp = daily.path("precipitation_probability_max").get(0).asInt();
-                int dc = daily.path("weather_code").get(0).asInt();
-                sb.append(String.format(" | 今日：%s，%.0f~%.0f°C，降雨概率%d%%",
-                        wmoDesc(dc), lo, hi, rp));
+                int dayCount = daily.path("time").size();
+                String[] dayLabels = {"今日","明日","后天","大后天"};
+                for (int i = 0; i < dayCount; i++) {
+                    double hi = daily.path("temperature_2m_max").get(i).asDouble();
+                    double lo = daily.path("temperature_2m_min").get(i).asDouble();
+                    int rp = daily.path("precipitation_probability_max").get(i).asInt();
+                    int dc = daily.path("weather_code").get(i).asInt();
+                    String label = i < dayLabels.length ? dayLabels[i] : daily.path("time").get(i).asText().substring(5);
+                    sb.append(String.format(" | %s：%s，%.0f~%.0f°C，降雨%d%%",
+                            label, wmoDesc(dc), lo, hi, rp));
+                }
             }
             return sb.toString();
 
@@ -141,6 +150,11 @@ public class WeatherTool implements Tool {
         } catch (Exception e) {
             return "解析天气数据出错。";
         }
+    }
+
+    private int parseIntSafe(String s, int def) {
+        if (s == null) return def;
+        try { return Integer.parseInt(s); } catch (NumberFormatException e) { return def; }
     }
 
     private String wmoDesc(int c) {

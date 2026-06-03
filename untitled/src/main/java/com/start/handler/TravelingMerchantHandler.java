@@ -339,6 +339,33 @@ public class TravelingMerchantHandler implements MessageHandler {
     }
 
     /**
+     * 供 Tool 调用的同步查询接口。
+     * 发送查询消息到目标群，返回 CompletableFuture（tool 会阻塞等待结果）。
+     */
+    public CompletableFuture<String> queryMerchantSync(Main bot) {
+        String key = "tool_" + System.currentTimeMillis();
+        PendingQuery query = new PendingQuery(0, 0);
+        pendingQueries.put(key, query);
+
+        String queryMessage = "[CQ:at,qq=" + TARGET_QQ + "] 远行商人";
+        bot.sendGroupReply(TARGET_GROUP_ID, queryMessage);
+        logger.info("📤 [Tool] 已发送远行商人查询消息到群 {}", TARGET_GROUP_ID);
+
+        return query.future
+                .orTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                .thenApply(responseJson -> {
+                    pendingQueries.remove(key);
+                    String text = extractText(responseJson);
+                    if (text == null || text.isEmpty()) return "🏪 远行商人暂无信息。";
+                    return "🏪 远行商人信息\n━━━━━━━━━━━━━━━\n" + convertMarkdownToPlainText(text);
+                })
+                .exceptionally(throwable -> {
+                    pendingQueries.remove(key);
+                    return "⏰ 远行商人查询超时，请稍后重试（直接发「远行商人」也可查询）。";
+                });
+    }
+
+    /**
      * 处理来自目标群的响应消息
      * @param message 收到的消息
      * @return 是否成功匹配到待处理的查询

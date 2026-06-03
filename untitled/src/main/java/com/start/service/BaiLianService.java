@@ -20,11 +20,17 @@ import com.start.agent.SendGroupTool;
 import com.start.agent.SendPrivateTool;
 import com.start.agent.SendStatusTool;
 import com.start.agent.UserAffinityTool;
+import com.start.agent.WebSearchTool;
+import com.start.agent.EggGroupSearchTool;
+import com.start.agent.SanjiaoTool;
+import com.start.agent.TravelingMerchantTool;
 import com.start.agent.KnowledgeBaseTool;
 import com.start.agent.LearnKnowledgeTool;
 import com.start.agent.UserAliasTool;
 import com.start.agent.VoiceTool;
 import com.start.agent.WeatherTool;
+import com.start.handler.TravelingMerchantHandler;
+import com.start.repository.EggGroupDataCenter;
 import com.start.config.BotConfig;
 import com.start.config.DatabaseConfig;
 import com.start.repository.LongTermMemoryRepository;
@@ -133,6 +139,10 @@ public class BaiLianService {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private final TtsService ttsService;
+    private TravelingMerchantHandler merchantHandler;
+    private final EggGroupDataCenter eggGroupDataCenter = new EggGroupDataCenter();
+
+    public void setMerchantHandler(TravelingMerchantHandler h) { this.merchantHandler = h; }
 
     public BaiLianService(KeywordKnowledgeService knowledgeService, UserAffinityRepository userAffinityRepo, TtsService ttsService) {
         this.knowledgeService = Objects.requireNonNull(knowledgeService, "knowledgeService cannot be null");
@@ -337,7 +347,7 @@ public class BaiLianService {
 
     原则：
     - 始终优先简短回复（两三句、50字内）。只有真的寥寥几句说不清楚时，才用 {"long":"内容"} 输出长内容。能用短句解决的问题绝不走长通道
-    - 消息太长需要分段时，自己决定在哪里切，各段之间放 |---| 即可
+    - 回复如果有不同层次（比如先吐槽、再讲道理、最后撒娇），用 |---| 把每层分开，每条各成一个简短消息。这样发出来有节奏感，像真人一句一句说，而不是一大段砸过去。不需要把 |---| 当成\"长消息切分工具\"——短消息也可以用，只要有情绪转折就切
     - 不懂就说不知道，别编。群里聊得飞起时别硬插嘴
     - @ 人用 [CQ:at,qq=QQ号] 格式
     - 好感度影响态度：高→亲近暖甜；低→礼貌但疏远
@@ -356,7 +366,7 @@ public class BaiLianService {
     - 用户让你记下/记住/查一下/搜一下 → 必须先调工具，等结果回来再回复
     - 禁止先回复"好的记下了""我知道了"然后不调工具
     - 工具返回空/无数据时，如实告诉用户，不要编理由
-    - 调工具前用 send_status 发一条简短状态: group_id当前所在群, message如"让我查一下~"或"翻翻记录喔"
+    - 调工具前用 send_status 发一条简短状态，语气要自然像真人聊天，不要说"让我"开头的话。好的例子：稍等我看一下、嗯等下、我翻翻、诶你等等—— 坏的例子：让我查一下、让我搜索、让我帮你看看
 
     【工具清单与触发条件】逐一检查，匹配就调用：
 
@@ -374,19 +384,27 @@ public class BaiLianService {
 
     2. manage_alias / resolve_alias — 查别称是谁
        参数：action=resolve_alias, alias_name, group_id
-       触发：有人问"XX是谁"，且【群内别称与所在地】里找不到该别称时才调用
-       如果别称表里已经有了，直接根据上表回答，不需要调工具
+       触发：有人问"XX是谁"
+
+    2b. manage_alias / update_alias — 改别称
+       参数：action=update_alias, target_user_id, old_alias, new_alias, group_id, requester_user_id
+       触发："XX改名叫YY了""以后别叫XX了叫YY"。requester_user_id 填发起修改的人的QQ，只有本人能改
+
+    2c. manage_alias / delete_alias — 删别称
+       参数：action=delete_alias, target_user_id, alias_name, group_id, requester_user_id
+       触发："XX不是他了""去掉这个别称""删掉XX"。requester_user_id 填发起删除的人的QQ，只有本人能删
 
     3. manage_alias / set_primary_location — 记主地点
        参数：action=set_primary_location, target_user_id, location
        触发："我在XX" "我家在XX" "住在XX"
 
     4. get_weather — 查天气
-       参数：user_id, city
+       参数：user_id, city, days(默认1,最多7)
        触发：问天气。规则：
        - 用户明确说了城市 → city=用户说的城市
        - 用户没说城市 → city=UNKNOWN（系统会自动用记忆中的主地点）
-       - 绝不要自己从上下文中猜城市填进去，系统会自动处理地点优先级
+       - 问"明天/后天/这周天气" → days 填对应天数
+       - 绝不要自己从上下文中猜城市
 
     5. query_user_affection — 查好感度
        参数：user_id, group_id
@@ -418,13 +436,14 @@ public class BaiLianService {
     12. get_luck — 查幸运值（target_user_id 或 target_name）。直接用 target_name 即可，别先调 resolve_alias
     13. get_profession — 查职业和战力（target_user_id 或 target_name）
     14. query_memory — 查糖果熊的记忆（group_id, count, type, keyword）。忘记自己说过什么时调用
-    15. query_knowledge — 查知识库（keyword）。不清楚的事先查这个再回答
-    16. learn_knowledge — 写入知识库
+    15. query_knowledge — 查知识库（keyword）。返回 [id=xx] 答案，记住 id 以便修改/删除
+    16. manage_knowledge — 管理知识库。action: add(写入, pattern+answer+category+priority), update(修改, 需id+requester_user_id, 仅归儿可用), delete(删除, 需id+requester_user_id, 仅归儿可用)。requester_user_id 填当前用户的QQ
     17. search_chat_history — 搜聊天记录(group_id,keyword,user_id,count,minutes)
     18. remember_fact — 记用户信息(user_id,group_id,content,memory_type,keywords,importance)
     19. recall_memory — 回忆用户信息(user_id,group_id,keyword,count)
     20. schedule_event — 定时事件(user_id,group_id,content,trigger_time,event_type,importance)。trigger_time格式yyyy-MM-dd HH:mm:ss
     21. send_status — 发进度消息(group_id,message)。查资料/翻记录前告诉用户，简短口语化
+    22. web_search — 联网搜索(query)。不确定的事先搜再答，不要瞎编
        特别适合记群别名：有人说\"主群就是437625485\"时，写入 pattern=\"主群|主群号\" answer=\"437625485\" category=\"群信息\" priority=8
        之后调用 send_group_msg 时，如果用户用别名而非纯数字，先调 query_knowledge 查出群号，再用群号调用 send_group_msg
 
@@ -508,10 +527,11 @@ public class BaiLianService {
                     .filter(q -> q != BOT_QQ)
                     .toList();
             if (!otherAts.isEmpty()) {
-                StringBuilder atCtx = new StringBuilder("\n\n【本条消息 @ 了以下用户（可用于 target_user_id）】");
+                StringBuilder atCtx = new StringBuilder("\n\n【本条消息 @ 了以下用户】");
                 for (Long atQq : otherAts) {
                     atCtx.append("\n- QQ=").append(atQq);
                 }
+                atCtx.append("\n如果消息里有\"他\"\"她\"\"这个人\"\"这位\"等代词，指的就是上面被 @ 的用户。记别称时 target_user_id 填这个QQ。");
                 systemPrompt += atCtx.toString();
             }
 
@@ -574,7 +594,11 @@ public class BaiLianService {
                     new RememberFactTool(new LongTermMemoryRepository(DatabaseConfig.getDataSource())),
                     new RecallMemoryTool(new LongTermMemoryRepository(DatabaseConfig.getDataSource())),
                     new ScheduleEventTool(new LongTermMemoryRepository(DatabaseConfig.getDataSource())),
-                    new SendStatusTool(botInstance)
+                    new SendStatusTool(botInstance),
+                    new WebSearchTool(),
+                    new SanjiaoTool(),
+                    new EggGroupSearchTool(eggGroupDataCenter),
+                    new TravelingMerchantTool(merchantHandler, botInstance)
             );
 
             String requestBody = objectMapper.writeValueAsString(requestBodyObj);
@@ -655,7 +679,6 @@ public class BaiLianService {
                 List<ToolResult> toolResults = new ArrayList<>();
 
             // 解析 JSON 格式的工具调用
-            if (reply.contains("\"name\"") || reply.contains("\"tool\"")) {
             if (reply.contains("\"name\"") || reply.contains("\"tool\"")) {
                 // 提取 JSON 对象
                 java.util.regex.Matcher jsonMatcher = java.util.regex.Pattern
@@ -768,34 +791,55 @@ public class BaiLianService {
                 nextBody.put("model", modelName);
                 nextBody.put("messages", messages);
                 nextBody.put("max_tokens", 1024);
-                try {
-                    HttpRequest nextReq = HttpRequest.newBuilder()
-                            .uri(URI.create(url))
-                            .header("Authorization", "Bearer " + apiKey)
-                            .header("Content-Type", "application/json")
-                            .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(nextBody)))
-                            .timeout(Duration.ofMillis(this.bailianTimeoutMs))
-                            .build();
-                    HttpResponse<String> nextResp = httpClient.send(nextReq, HttpResponse.BodyHandlers.ofString());
-                    if (nextResp.statusCode() == 200) {
-                        JsonNode sr = objectMapper.readTree(nextResp.body());
-                        JsonNode sc = sr.path("choices");
-                        if (sc.isArray() && !sc.isEmpty()) {
-                            String newReply = sc.get(0).path("message").path("content").asText().trim();
-                            if ("null".equals(newReply)) newReply = "";
-                            if (!newReply.isEmpty()) {
-                                reply = newReply;
-                                continue;
+
+                String newReply = null;
+                int toolRetryCount = 0;
+                while (toolRetryCount <= this.bailianMaxRetries) {
+                    try {
+                        HttpRequest nextReq = HttpRequest.newBuilder()
+                                .uri(URI.create(url))
+                                .header("Authorization", "Bearer " + apiKey)
+                                .header("Content-Type", "application/json")
+                                .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(nextBody)))
+                                .timeout(Duration.ofMillis(this.bailianTimeoutMs))
+                                .build();
+                        HttpResponse<String> nextResp = httpClient.send(nextReq, HttpResponse.BodyHandlers.ofString());
+                        if (nextResp.statusCode() == 200) {
+                            JsonNode sr = objectMapper.readTree(nextResp.body());
+                            JsonNode sc = sr.path("choices");
+                            if (sc.isArray() && !sc.isEmpty()) {
+                                newReply = sc.get(0).path("message").path("content").asText().trim();
+                                if ("null".equals(newReply)) newReply = "";
+                                if (!newReply.isEmpty()) {
+                                    break;
+                                }
                             }
                         }
+                        toolRetryCount++;
+                    } catch (java.net.http.HttpTimeoutException e) {
+                        toolRetryCount++;
+                        if (toolRetryCount > this.bailianMaxRetries) {
+                            logger.warn("工具第{}轮回调超时，已重试{}次", toolRound, this.bailianMaxRetries);
+                        } else {
+                            logger.warn("工具第{}轮回调第{}次超时，正在重试...", toolRound, toolRetryCount);
+                            Thread.sleep(1000 * toolRetryCount);
+                        }
+                    } catch (Exception e) {
+                        logger.warn("工具第{}轮回调失败: {}", toolRound, e.getMessage());
+                        break;
                     }
-                } catch (Exception e) {
-                    logger.warn("工具第{}轮调用失败: {}", toolRound, e.getMessage());
                 }
-                // LLM 调用失败或返回空 → 用工具结果兜底
-                reply = toolResults.stream()
+
+                if (newReply != null && !newReply.isEmpty()) {
+                    reply = newReply;
+                    continue;
+                }
+                // LLM 调用失败或返回空 → 过滤掉 send_status 结果，用其他结果生成兜底回复
+                String fallback = toolResults.stream()
+                        .filter(tr -> !"send_status".equals(tr.name))
                         .map(tr -> tr.result)
-                        .reduce((a, b) -> a + "；" + b).orElse("嗯...再问一次吧");
+                        .reduce((a, b) -> a + "；" + b).orElse("");
+                reply = fallback.isEmpty() ? "唔……查是查到了但是脑子有点转不过来，你再说一遍？" : fallback;
                 break;
             } else {
                 break;
@@ -1093,37 +1137,33 @@ public class BaiLianService {
             return Arrays.asList(cqPrefix + reply);
         }
 
+        // 只按句末标点拆分（不再按 \n 拆分，避免排行榜等结构化内容逐行切分刷屏）
+        String[] sentences = reply.split("(?<=[。！？；])");
         List<String> parts = new ArrayList<>();
-        String[] sentences = reply.split("(?<=[。！？；])|\\n");
+        StringBuilder current = new StringBuilder();
         boolean first = true;
 
         for (String sent : sentences) {
             sent = sent.trim();
             if (sent.isEmpty()) continue;
 
-            String full = first ? cqPrefix + sent : sent;
+            String candidate = first ? cqPrefix + sent : sent;
             first = false;
 
-            if (full.length() <= 60) {
-                parts.add(full);
+            // 累积到合理长度再切分，保持排行榜等结构化内容完整
+            if (current.length() + candidate.length() <= 600) {
+                if (current.length() > 0) current.append("\n");
+                current.append(candidate);
             } else {
-                // 按逗号拆分长句
-                String[] byComma = full.split("(?<=[，、])");
-                if (byComma.length > 1) {
-                    for (String chunk : byComma) {
-                        chunk = chunk.trim();
-                        if (!chunk.isEmpty()) parts.add(chunk);
-                    }
-                } else {
-                    parts.add(full);
-                }
+                if (current.length() > 0) parts.add(current.toString());
+                current = new StringBuilder(candidate);
             }
         }
+        if (current.length() > 0) parts.add(current.toString());
 
         final int MAX_PARTS = 10;
         if (parts.size() > MAX_PARTS) {
-            List<String> limited = new ArrayList<>(parts.subList(0, MAX_PARTS));
-            return limited;
+            return new ArrayList<>(parts.subList(0, MAX_PARTS));
         }
         return parts.isEmpty() ? Arrays.asList(cqPrefix + reply) : parts;
     }

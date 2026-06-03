@@ -51,6 +51,10 @@ public class HandlerRegistry {
         return merchantHandler.handleResponse(message);
     }
 
+    public TravelingMerchantHandler getMerchantHandler() {
+        return merchantHandler;
+    }
+
     public void dispatch(JsonNode message, Main bot) {
         for (MessageHandler handler : handlers) {
             if (handler.match(message)) {

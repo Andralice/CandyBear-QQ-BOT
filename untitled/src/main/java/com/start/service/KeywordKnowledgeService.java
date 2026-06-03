@@ -388,6 +388,7 @@ public class KeywordKnowledgeService {
 
         KnowledgeResult res = new KnowledgeResult();
         res.matchedItem = best.item;
+        res.id = best.item.id;
         res.answer = best.item.answer;
         res.similarityScore = best.score;
         res.matchedKeywords = new ArrayList<>(best.matchedKeywords);
@@ -432,7 +433,73 @@ public class KeywordKnowledgeService {
         }
     }
 
+    /** 检查是否在黑名单中 */
+    public String checkBlacklist(String pattern) {
+        if (pattern == null) return null;
+        String[] parts = pattern.split("\\|");
+        for (String p : parts) {
+            String trimmed = p.trim();
+            if (trimmed.isEmpty()) continue;
+            try (Connection conn = dataSource.getConnection();
+                 PreparedStatement ps = conn.prepareStatement(
+                         "SELECT pattern FROM knowledge_blacklist WHERE ? LIKE CONCAT('%', pattern, '%') LIMIT 1")) {
+                ps.setString(1, trimmed);
+                ResultSet rs = ps.executeQuery();
+                if (rs.next()) return rs.getString("pattern");
+            } catch (SQLException e) {
+                logger.error("检查黑名单失败", e);
+            }
+        }
+        return null;
+    }
+
+    /** 加入黑名单 */
+    public void addToBlacklist(String pattern) {
+        if (pattern == null) return;
+        String[] parts = pattern.split("\\|");
+        for (String p : parts) {
+            String trimmed = p.trim();
+            if (trimmed.isEmpty()) continue;
+            try (Connection conn = dataSource.getConnection();
+                 PreparedStatement ps = conn.prepareStatement(
+                         "INSERT IGNORE INTO knowledge_blacklist (pattern) VALUES (?)")) {
+                ps.setString(1, trimmed);
+                ps.executeUpdate();
+            } catch (SQLException e) {
+                logger.error("加入黑名单失败: {}", trimmed, e);
+            }
+        }
+    }
+
+    /** 从黑名单移除 */
+    public boolean removeFromBlacklist(String pattern) {
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "DELETE FROM knowledge_blacklist WHERE pattern=?")) {
+            ps.setString(1, pattern.trim());
+            return ps.executeUpdate() > 0;
+        } catch (SQLException e) {
+            logger.error("移除黑名单失败", e);
+            return false;
+        }
+    }
+
+    /** 获取黑名单列表 */
+    public List<String> getBlacklist() {
+        List<String> list = new ArrayList<>();
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT pattern FROM knowledge_blacklist ORDER BY id");
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) list.add(rs.getString("pattern"));
+        } catch (SQLException e) {
+            logger.error("查询黑名单失败", e);
+        }
+        return list;
+    }
+
     public boolean addKnowledge(String pattern, String answer, String category, int priority) {
+        String blocked = checkBlacklist(pattern);
+        if (blocked != null) return false; // 被黑名单拦截，返回 false 让调用方知道
         try (Connection conn = dataSource.getConnection()) {
             String keywords = extractKeywordsForStorage(pattern, answer);
             String sql = "INSERT INTO knowledge_base " +
@@ -451,6 +518,54 @@ public class KeywordKnowledgeService {
             return false;
         } finally {
             reloadKnowledgeBase(); // 自动刷新
+        }
+    }
+
+    /** 修改知识库条目 */
+    public boolean updateKnowledge(long id, String pattern, String answer, String category, int priority) {
+        try (Connection conn = dataSource.getConnection()) {
+            String sql = "UPDATE knowledge_base SET question_pattern=?, answer_template=?, category=?, priority=?, keywords=? WHERE id=?";
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, pattern);
+                ps.setString(2, answer);
+                ps.setString(3, category);
+                ps.setInt(4, priority);
+                ps.setString(5, extractKeywordsForStorage(pattern, answer));
+                ps.setLong(6, id);
+                int rows = ps.executeUpdate();
+                if (rows > 0) { reloadKnowledgeBase(); return true; }
+                return false;
+            }
+        } catch (SQLException e) {
+            logger.error("更新知识失败", e);
+            return false;
+        }
+    }
+
+    /** 删除知识库条目，自动将 pattern 加入黑名单 */
+    public boolean deleteKnowledge(long id) {
+        try (Connection conn = dataSource.getConnection()) {
+            // 先取出 pattern 以便加入黑名单
+            String pattern = null;
+            try (PreparedStatement ps = conn.prepareStatement("SELECT question_pattern FROM knowledge_base WHERE id=?")) {
+                ps.setLong(1, id);
+                ResultSet rs = ps.executeQuery();
+                if (rs.next()) pattern = rs.getString("question_pattern");
+            }
+            // 删除
+            try (PreparedStatement ps = conn.prepareStatement("DELETE FROM knowledge_base WHERE id=?")) {
+                ps.setLong(1, id);
+                int rows = ps.executeUpdate();
+                if (rows > 0) {
+                    reloadKnowledgeBase();
+                    if (pattern != null) addToBlacklist(pattern);
+                    return true;
+                }
+                return false;
+            }
+        } catch (SQLException e) {
+            logger.error("删除知识失败", e);
+            return false;
         }
     }
 
@@ -496,6 +611,7 @@ public class KeywordKnowledgeService {
 
     public static class KnowledgeResult {
         public KnowledgeItem matchedItem;
+        public long id;
         public String answer;
         public double similarityScore;
         public List<String> matchedKeywords;

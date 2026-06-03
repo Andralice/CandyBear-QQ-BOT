@@ -19,7 +19,7 @@ public class SendStatusTool implements Tool {
 
     @Override public String getDescription() {
         return "发送一条状态消息到群里，在需要花时间的操作前告诉用户你在干什么。" +
-               "比如准备查资料时说让我查一下稍等、准备搜聊天记录时说让我翻翻记录、正在回忆时说让我想想。" +
+               "语气要自然像真人，不要用让我开头。好的例子：稍等我看一下、嗯等下、我翻翻、诶你等等——、唔我想想。坏的例子：让我查一下、让我搜索。" +
                "参数：group_id(群号), message(状态消息，口语化、有糖果熊的风格，20字以内)";
     }
 
@@ -41,7 +41,7 @@ public class SendStatusTool implements Tool {
 
         try {
             botInstance.sendGroupReply(Long.parseLong(groupId), message.trim());
-            return "状态消息已发送: " + message;
+            return "ok";
         } catch (Exception e) {
             return "发送失败: " + e.getMessage();
         }
