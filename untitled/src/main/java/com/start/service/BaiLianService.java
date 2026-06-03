@@ -1325,7 +1325,7 @@ public class BaiLianService {
                     if (canReact(groupId)) {
                         recordReaction(groupId);
                         String cleanReply = normalizeForContext(thread.lastBotReply);
-                        String prompt = “你之前说：”” + cleanReply + “”\n对方现在说：”” + message + “”\n请用一句自然的话回应。”;
+                        String prompt = "你之前说：“" + cleanReply + "”\n对方现在说：“" + message + "”\n请用一句自然的话回应。";
                         logger.debug(" candyBear: 触发追问，用户 {}，群 {}，消息：{}", userId, groupId, message);
                         return Optional.of(Reaction.withAI(prompt));
                 }
@@ -1376,7 +1376,7 @@ public class BaiLianService {
                     if (canReact(groupId)) {
                         recordReaction(groupId);
                         String cleanReply = normalizeForContext(lastAi.get().content);
-                        String prompt = “你之前说：”” + cleanReply + “”\n另一个群友评论：”” + message + “”\n请友好地回应。”;
+                        String prompt = "你之前说：“" + cleanReply + "”\n另一个群友评论：“" + message + "”\n请友好地回应。";
                         return Optional.of(Reaction.withAI(prompt));
                     }
                 }
