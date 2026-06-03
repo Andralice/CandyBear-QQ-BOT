@@ -1208,6 +1208,7 @@ public class BaiLianService {
         if (reply.contains("|---|")) {
             return Arrays.stream(reply.split("\\|---\\|"))
                     .map(String::trim)
+                    .map(s -> s.replaceAll("\\n{2,}", "\n"))  // 清理段内残留空行
                     .filter(s -> !s.isEmpty())
                     .collect(java.util.stream.Collectors.toList());
         }
@@ -1296,6 +1297,15 @@ public class BaiLianService {
         return result.isEmpty() ? Arrays.asList(para) : result;
     }
 
+    /** 清理回复中的 |---| 和空行，用于构建上下文 prompt，避免把分隔符带入 LLM 对话 */
+    private String normalizeForContext(String rawReply) {
+        if (rawReply == null) return "";
+        return rawReply
+                .replace("|---|", "\n")
+                .replaceAll("\\n{2,}", "\n")
+                .trim();
+    }
+
     // ===== 主动插话逻辑 =====
 
     public Optional<Reaction> shouldReactToGroupMessage(String groupId, String userId, String nickname, String message, List<Long> ats) {
@@ -1314,7 +1324,8 @@ public class BaiLianService {
             if (isFollowUpMessage(message)) {
                     if (canReact(groupId)) {
                         recordReaction(groupId);
-                        String prompt = "你之前说：“" + thread.lastBotReply + "”\n对方现在说：“" + message + "”\n请用一句自然的话回应。";
+                        String cleanReply = normalizeForContext(thread.lastBotReply);
+                        String prompt = “你之前说：”” + cleanReply + “”\n对方现在说：”” + message + “”\n请用一句自然的话回应。”;
                         logger.debug(" candyBear: 触发追问，用户 {}，群 {}，消息：{}", userId, groupId, message);
                         return Optional.of(Reaction.withAI(prompt));
                 }
@@ -1364,7 +1375,8 @@ public class BaiLianService {
                 if (isResponseToAIMessage(message, lastAi.get().content)) {
                     if (canReact(groupId)) {
                         recordReaction(groupId);
-                        String prompt = "你之前说：“" + lastAi.get().content + "”\n另一个群友评论：“" + message + "”\n请友好地回应。";
+                        String cleanReply = normalizeForContext(lastAi.get().content);
+                        String prompt = “你之前说：”” + cleanReply + “”\n另一个群友评论：”” + message + “”\n请友好地回应。”;
                         return Optional.of(Reaction.withAI(prompt));
                     }
                 }
