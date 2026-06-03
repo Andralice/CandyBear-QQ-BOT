@@ -448,10 +448,17 @@ public class BaiLianService {
     18. remember_fact — 记用户信息(user_id,group_id,content,memory_type,keywords,importance)
     19. recall_memory — 回忆用户信息(user_id,group_id,keyword,count)
     20. schedule_event — 定时事件(user_id,group_id,content,trigger_time,event_type,importance)。trigger_time格式yyyy-MM-dd HH:mm:ss
-    21. send_status — 发进度消息(group_id,message)。查资料/翻记录前告诉用户，简短口语化
+    21. send_status — 发进度消息(message)。查资料/翻记录前告诉用户你正在做什么，简短口语化。私聊时自动发给当前用户，群里时自动发到当前群。⚠️私聊中不要传 group_id，群里不要传 user_id（除非确实需要跨会话通知）
     22. web_search — 联网搜索(query)。不确定的事先搜再答，不要瞎编
        特别适合记群别名：有人说\"主群就是437625485\"时，写入 pattern=\"主群|主群号\" answer=\"437625485\" category=\"群信息\" priority=8
        之后调用 send_group_msg 时，如果用户用别名而非纯数字，先调 query_knowledge 查出群号，再用群号调用 send_group_msg
+    23. delta_force_query — 三角洲行动截图（action=特勤处/脑机/密码）
+       参数：action。返回游戏截图。特勤处=当前最划算项目，脑机=可扫描物品，密码=五个地图密码门今日密码
+    24. lokowang_pet_query — 洛克王国宠物查询
+       参数：action=查蛋/查蛋组/能否生蛋/查进化/预测蛋/help，及对应参数 pet_name/pet1+pet2/size+weight
+       查蛋=查询宠物蛋组及配对，查蛋组=查询蛋组详情，能否生蛋=判断两只宠物能否生蛋，查进化=进化路径，预测蛋=根据身高体重预测种族
+    25. lokowang_merchant_query — 远行商人查询（无参数）
+       查询洛克王国远行商人当前刷了什么物资。需要等待约10-15秒收到返回信息。
 
     ## 谁是卧底流程（严格按以下步骤） ##
        【报名阶段】
@@ -600,7 +607,7 @@ public class BaiLianService {
                     new RememberFactTool(new LongTermMemoryRepository(DatabaseConfig.getDataSource())),
                     new RecallMemoryTool(new LongTermMemoryRepository(DatabaseConfig.getDataSource())),
                     new ScheduleEventTool(new LongTermMemoryRepository(DatabaseConfig.getDataSource())),
-                    new SendStatusTool(botInstance),
+                    new SendStatusTool(botInstance, groupId, userId),
                     new WebSearchTool(),
                     new SanjiaoTool(),
                     new EggGroupSearchTool(eggGroupDataCenter),
@@ -857,31 +864,106 @@ public class BaiLianService {
             reply = "嗯...让我想想怎么回呢——";
         }
 
-            if (!reply.isEmpty()) {
-                // 检测长回复 JSON: {"long":"内容..."}
-                if (reply.contains("\"long\"") && reply.contains("{")) {
-                    try {
-                        JsonNode longJson = objectMapper.readTree(reply);
-                        String longContent = longJson.path("long").asText();
-                        if (!longContent.isEmpty()) {
-                            reply = longContent;
-                            logger.debug("Long reply extracted: {} chars", reply.length());
+        // === long JSON 提取 + 重试（最多2次修正） ===
+        boolean isLongJsonAttempt = reply.contains("\"long\"") && reply.contains("{");
+        for (int longRetry = 0; longRetry < 3; longRetry++) {
+            if (reply.isEmpty()) break;
+
+            boolean extracted = false;
+            if (isLongJsonAttempt) {
+                try {
+                    JsonNode longJson = objectMapper.readTree(reply);
+                    String longContent = longJson.path("long").asText();
+                    if (!longContent.isEmpty()) {
+                        reply = longContent;
+                        extracted = true;
+                        logger.debug("Long reply extracted: {} chars", reply.length());
+                    }
+                } catch (Exception e) {
+                    // JSON 解析失败，用正则兜底提取
+                    logger.warn("Long reply JSON 解析失败，尝试正则提取");
+                    java.util.regex.Matcher m = java.util.regex.Pattern
+                            .compile("\"long\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")
+                            .matcher(reply);
+                    if (m.find()) {
+                        String val = m.group(1)
+                                .replace("\\n", "\n")
+                                .replace("\\t", "\t")
+                                .replace("\\\"", "\"")
+                                .replace("\\\\", "\\");
+                        if (!val.isEmpty()) {
+                            reply = val;
+                            extracted = true;
+                            logger.debug("正则提取 long 内容成功: {} chars", reply.length());
                         }
-                    } catch (Exception e) { /* 解析失败就当普通回复 */ }
+                    }
                 }
-                // 清理 AI 偶尔输出的 JSON 代码块和裸 JSON
+
+                if (extracted) {
+                    reply = reply.replaceAll("【.*?】", "").trim();
+                }
+            }
+
+            if (!isLongJsonAttempt || extracted) {
+                // 清理 AI 偶尔输出的 JSON 代码块和裸 JSON（long 提取成功后跳过此步）
                 reply = reply.replaceAll("```json\\s*\\{[^}]*\\}\\s*```", "");
                 reply = reply.replaceAll("```\\s*\\{[^}]*\\}\\s*```", "");
                 reply = reply.replaceAll("\\{\\s*\"[^\"]+\"\\s*:\\s*\"[^\"]*\"[^}]*\\}", "");
                 reply = reply.replaceAll("\\{\\s*\"[^\"]+\"\\s*:\\s*[^,}]+[^}]*\\}", "");
                 reply = reply.replaceAll("【.*?】", "").trim();
-                // 修复 AI 输出的畸形 CQ 码：去掉 [ 和 CQ: 之间的空格，] 前的空格
-                reply = reply.replaceAll("\\[\\s*CQ:", "[CQ:").replaceAll("\\s*\\]", "]");
-                // 如果清理后只剩空壳，给个兜底
-                if (reply.trim().isEmpty() || reply.trim().matches("[,\\s]+")) {
-                    reply = "嗯...再问一次吧";
-                }
             }
+
+            // 修复 AI 输出的畸形 CQ 码
+            reply = reply.replaceAll("\\[\\s*CQ:", "[CQ:").replaceAll("\\s*\\]", "]");
+
+            if (!reply.trim().isEmpty() && !reply.trim().matches("[,\\s]+")) {
+                break; // 有内容，不重试
+            }
+
+            // reply 为空，且是 long JSON 解析失败 → 重试
+            if (isLongJsonAttempt && !extracted && longRetry < 2) {
+                logger.warn("Long JSON 提取完全失败，第{}次重试AI...", longRetry + 1);
+                messages.add(Map.of("role", "assistant", "content", reply));
+                messages.add(Map.of("role", "user", "content",
+                        "你的上一条回复格式有误，无法解析。请直接用纯文本重新输出内容，不要用JSON包裹。不要输出```json代码块。"));
+                try {
+                    Map<String, Object> retryBody = new HashMap<>();
+                    retryBody.put("model", modelName);
+                    retryBody.put("messages", messages);
+                    retryBody.put("max_tokens", 1024);
+                    HttpRequest retryReq = HttpRequest.newBuilder()
+                            .uri(URI.create(url))
+                            .header("Authorization", "Bearer " + apiKey)
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(retryBody)))
+                            .timeout(Duration.ofMillis(this.bailianTimeoutMs))
+                            .build();
+                    HttpResponse<String> retryResp = httpClient.send(retryReq, HttpResponse.BodyHandlers.ofString());
+                    if (retryResp.statusCode() == 200) {
+                        JsonNode retryRoot = objectMapper.readTree(retryResp.body());
+                        JsonNode retryChoices = retryRoot.path("choices");
+                        if (retryChoices.isArray() && !retryChoices.isEmpty()) {
+                            String newReply = retryChoices.get(0).path("message").path("content").asText().trim();
+                            if ("null".equals(newReply)) newReply = "";
+                            if (!newReply.isEmpty()) {
+                                reply = newReply;
+                                isLongJsonAttempt = reply.contains("\"long\"") && reply.contains("{");
+                                continue;
+                            }
+                        }
+                    }
+                } catch (Exception retryEx) {
+                    logger.warn("Long JSON 重试调用失败: {}", retryEx.getMessage());
+                }
+                break; // 重试也失败了，退出
+            }
+            break;
+        }
+
+        // 最终兜底
+        if (reply.trim().isEmpty() || reply.trim().matches("[,\\s]+")) {
+            reply = "嗯...再问一次吧";
+        }
 
             history.add(new Message("assistant", reply));
 
@@ -1130,6 +1212,21 @@ public class BaiLianService {
                     .collect(java.util.stream.Collectors.toList());
         }
 
+        // 兜底：AI 没用 |---| 但有空行时，按空行切分段落
+        if (reply.contains("\n\n")) {
+            List<String> allParts = new ArrayList<>();
+            String[] paragraphs = reply.split("\\n\\s*\\n");
+            for (String para : paragraphs) {
+                para = para.trim();
+                if (para.isEmpty()) continue;
+                allParts.addAll(splitParagraphIntoSentences(para));
+            }
+            if (allParts.size() > 10) {
+                return new ArrayList<>(allParts.subList(0, 10));
+            }
+            return allParts.isEmpty() ? Arrays.asList(reply) : allParts;
+        }
+
         // 提取开头的 CQ 码，避免切分时截断
         String cqPrefix = "";
         java.util.regex.Matcher cqMatcher = java.util.regex.Pattern.compile("^(\\[CQ:[^\\]]+\\]\\s*)+").matcher(reply);
@@ -1144,7 +1241,7 @@ public class BaiLianService {
         }
 
         // 只按句末标点拆分（不再按 \n 拆分，避免排行榜等结构化内容逐行切分刷屏）
-        String[] sentences = reply.split("(?<=[。！？；])");
+        String[] sentences = reply.split("(?<=[。！？；~?!])");
         List<String> parts = new ArrayList<>();
         StringBuilder current = new StringBuilder();
         boolean first = true;
@@ -1172,6 +1269,31 @@ public class BaiLianService {
             return new ArrayList<>(parts.subList(0, MAX_PARTS));
         }
         return parts.isEmpty() ? Arrays.asList(cqPrefix + reply) : parts;
+    }
+
+    /** 将单个段落按句末标点切分为合理长度的消息片段 */
+    private List<String> splitParagraphIntoSentences(String para) {
+        List<String> result = new ArrayList<>();
+        // 短段落直接返回
+        if (para.length() <= 80) {
+            result.add(para);
+            return result;
+        }
+        String[] sentences = para.split("(?<=[。！？；~?!])");
+        StringBuilder current = new StringBuilder();
+        for (String sent : sentences) {
+            sent = sent.trim();
+            if (sent.isEmpty()) continue;
+            if (current.length() + sent.length() <= 600) {
+                if (current.length() > 0) current.append("\n");
+                current.append(sent);
+            } else {
+                if (current.length() > 0) result.add(current.toString());
+                current = new StringBuilder(sent);
+            }
+        }
+        if (current.length() > 0) result.add(current.toString());
+        return result.isEmpty() ? Arrays.asList(para) : result;
     }
 
     // ===== 主动插话逻辑 =====

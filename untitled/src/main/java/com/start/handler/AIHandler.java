@@ -16,6 +16,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.Random;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static com.start.util.MessageUtil.extractAts;
 
@@ -30,6 +31,8 @@ public class AIHandler implements MessageHandler {
     private final BaiLianService aiService;
     private final GroupSerialExecutor groupExecutor;
     private final Random random = new Random();
+    private final ConcurrentHashMap<String, Long> lastReactionTime = new ConcurrentHashMap<>();
+    private static final long USER_REACTION_COOLDOWN_MS = 2000;
 
     public AIHandler(BaiLianService aiService, GroupSerialExecutor groupExecutor) {
         this.aiService = aiService;
@@ -105,6 +108,15 @@ public class AIHandler implements MessageHandler {
         );
 
         if (reaction.isPresent()) {
+            // 同一用户2秒内冷却，避免连续短消息触发多次回复
+            String userKey = gid + "_" + userId;
+            long now = System.currentTimeMillis();
+            Long last = lastReactionTime.get(userKey);
+            if (last != null && now - last < USER_REACTION_COOLDOWN_MS) {
+                return;
+            }
+            lastReactionTime.put(userKey, now);
+
             BaiLianService.Reaction r = reaction.get();
             if (r.needsAI) {
                 groupExecutor.execute(gid, () -> {
@@ -215,7 +227,7 @@ public class AIHandler implements MessageHandler {
                 aiService.recordUserInteraction(groupId, userId, reply);
                 aiService.recordGroupContext(groupId, userId, senderNick, reply, "ai_reply");
             } else {
-                bot.sendReply(originalMsg, reply);
+                sendSplitPrivateReplies(bot, originalMsg, reply);
             }
         });
     }
@@ -238,6 +250,25 @@ public class AIHandler implements MessageHandler {
             }
 
             bot.sendGroupReply(groupId, msg);
+        }
+    }
+
+    /** 私聊同样拆分，避免一大段砸过去 */
+    private void sendSplitPrivateReplies(Main bot, JsonNode originalMsg, String fullReply) {
+        List<String> parts = aiService.splitIntoShortMessages(fullReply);
+        for (int i = 0; i < parts.size(); i++) {
+            String msg = parts.get(i).trim();
+            if (msg.isEmpty()) continue;
+
+            int delayMs = (i == 0) ? (random.nextInt(300) + 200) : (random.nextInt(1000) + 500);
+            try {
+                Thread.sleep(delayMs);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+
+            bot.sendReply(originalMsg, msg);
         }
     }
 
