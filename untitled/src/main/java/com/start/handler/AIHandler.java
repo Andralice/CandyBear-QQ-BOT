@@ -108,7 +108,7 @@ public class AIHandler implements MessageHandler {
             BaiLianService.Reaction r = reaction.get();
             if (r.needsAI) {
                 groupExecutor.execute(gid, () -> {
-                    String reply = aiService.generate("group_" + groupId + "_" + userId, String.valueOf(userId), r.prompt, gid, String.valueOf(nickname));
+                    String reply = aiService.generate("group_" + groupId + "_" + userId, String.valueOf(userId), r.prompt, gid, String.valueOf(nickname), ats);
                     if (!reply.trim().isEmpty() && !reply.equals("抱歉，刚才走神了...") && !reply.equals("嗯...再问一次吧")) {
                         sendSplitGroupReplies(bot, groupId, reply);
                         aiService.recordUserInteraction(gid, String.valueOf(userId), reply);

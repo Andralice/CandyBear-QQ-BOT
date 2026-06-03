@@ -197,6 +197,53 @@ public class MessageRepository extends BaseRepository {
         });
     }
     /**
+     * 搜索群聊历史消息，支持按关键词、用户、时间范围过滤。
+     */
+    public DatabaseResult<List<ChatMessage>> searchMessages(String groupId, String keyword, String userId, int minutes, int limit) {
+        return safeExecute(() -> {
+            StringBuilder sql = new StringBuilder("SELECT * FROM messages WHERE group_id = ? AND is_robot_reply = FALSE ");
+            List<Object> params = new ArrayList<>();
+            params.add(groupId);
+
+            if (keyword != null && !keyword.isBlank()) {
+                sql.append("AND content LIKE ? ");
+                params.add("%" + keyword + "%");
+            }
+            if (userId != null && !userId.isBlank()) {
+                sql.append("AND user_id = ? ");
+                params.add(userId);
+            }
+            if (minutes > 0) {
+                sql.append("AND created_at >= DATE_SUB(NOW(), INTERVAL ? MINUTE) ");
+                params.add(minutes);
+            }
+
+            sql.append("ORDER BY created_at DESC LIMIT ?");
+            params.add(limit);
+
+            Connection conn = null;
+            PreparedStatement pstmt = null;
+            ResultSet rs = null;
+            try {
+                conn = DatabaseConfig.getConnection();
+                pstmt = conn.prepareStatement(sql.toString());
+                for (int i = 0; i < params.size(); i++) {
+                    pstmt.setObject(i + 1, params.get(i));
+                }
+                rs = pstmt.executeQuery();
+                List<ChatMessage> messages = new ArrayList<>();
+                while (rs.next()) {
+                    ChatMessage msg = mapToChatMessage(rs);
+                    if (msg != null) messages.add(msg);
+                }
+                return messages;
+            } finally {
+                closeResources(conn, pstmt, rs);
+            }
+        });
+    }
+
+    /**
      * 统计群组消息数量
      */
     public DatabaseResult<Integer> countGroupMessages(String groupId) {

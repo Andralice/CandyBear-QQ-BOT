@@ -11,7 +11,7 @@ import java.util.Base64;
 import java.io.IOException;
 
 /**
- * 处理三角粥（Sanjiao）相关截图命令的 Handler
+ * 处理三角洲（Sanjiao）相关截图命令的 Handler
  * 触发关键词：包含 "截图" 且包含 "三角"、"sanjiao"、"kkrb" 等
  */
 public class SanjiaoHandler implements MessageHandler {

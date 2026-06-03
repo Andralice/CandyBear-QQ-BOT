@@ -40,7 +40,7 @@ public class BotMemoryService {
     /** 查询最近的记忆 */
     public String query(String groupId, int count, String typeFilter, String keyword) {
         Deque<MemoryEntry> q = groupMemory.get(groupId);
-        if (q == null || q.isEmpty()) return "暂无记忆记录";
+        if (q == null || q.isEmpty()) return "你还没有做过任何事，没有记忆记录。如实告诉用户即可，不要编理由。";
 
         List<MemoryEntry> list = new ArrayList<>(q);
         Collections.reverse(list); // 最新在前
@@ -54,7 +54,7 @@ public class BotMemoryService {
             shown++;
             if (count > 0 && shown >= count) break;
         }
-        if (shown == 0) sb.append("（无匹配记录）");
+        if (shown == 0) sb.append("（没有匹配的记录，如实告诉用户，不要编理由）");
         return sb.toString();
     }
 }

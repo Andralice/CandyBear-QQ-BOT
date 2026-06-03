@@ -11,9 +11,14 @@ import com.start.agent.MemoryTool;
 import com.start.agent.PokeTool;
 import com.start.agent.ProfessionTool;
 import com.start.agent.RankTool;
+import com.start.agent.RecallMemoryTool;
+import com.start.agent.RememberFactTool;
 import com.start.agent.ReminderTool;
+import com.start.agent.ScheduleEventTool;
+import com.start.agent.SearchHistoryTool;
 import com.start.agent.SendGroupTool;
 import com.start.agent.SendPrivateTool;
+import com.start.agent.SendStatusTool;
 import com.start.agent.UserAffinityTool;
 import com.start.agent.KnowledgeBaseTool;
 import com.start.agent.LearnKnowledgeTool;
@@ -21,6 +26,8 @@ import com.start.agent.UserAliasTool;
 import com.start.agent.VoiceTool;
 import com.start.agent.WeatherTool;
 import com.start.config.BotConfig;
+import com.start.config.DatabaseConfig;
+import com.start.repository.LongTermMemoryRepository;
 import com.start.repository.UserAliasRepository;
 import com.start.repository.UserAffinityRepository;
 import com.start.repository.UserProfileRepository;
@@ -345,6 +352,12 @@ public class BaiLianService {
     </tool_call>
     可以连续输出多个 <tool_call> 块，一次调用多个工具。
 
+    铁律：
+    - 用户让你记下/记住/查一下/搜一下 → 必须先调工具，等结果回来再回复
+    - 禁止先回复"好的记下了""我知道了"然后不调工具
+    - 工具返回空/无数据时，如实告诉用户，不要编理由
+    - 调工具前用 send_status 发一条简短状态: group_id当前所在群, message如"让我查一下~"或"翻翻记录喔"
+
     【工具清单与触发条件】逐一检查，匹配就调用：
 
     1. manage_alias / record_alias — 记别称
@@ -406,7 +419,12 @@ public class BaiLianService {
     13. get_profession — 查职业和战力（target_user_id 或 target_name）
     14. query_memory — 查糖果熊的记忆（group_id, count, type, keyword）。忘记自己说过什么时调用
     15. query_knowledge — 查知识库（keyword）。不清楚的事先查这个再回答
-    16. learn_knowledge — 写入知识库。门槛极高！只在以下情况用：群友明确说\"记住\"\"记一下\"教你；你被纠正了错误认知；发现知识库确实缺重要信息。普通聊天绝对不用
+    16. learn_knowledge — 写入知识库
+    17. search_chat_history — 搜聊天记录(group_id,keyword,user_id,count,minutes)
+    18. remember_fact — 记用户信息(user_id,group_id,content,memory_type,keywords,importance)
+    19. recall_memory — 回忆用户信息(user_id,group_id,keyword,count)
+    20. schedule_event — 定时事件(user_id,group_id,content,trigger_time,event_type,importance)。trigger_time格式yyyy-MM-dd HH:mm:ss
+    21. send_status — 发进度消息(group_id,message)。查资料/翻记录前告诉用户，简短口语化
        特别适合记群别名：有人说\"主群就是437625485\"时，写入 pattern=\"主群|主群号\" answer=\"437625485\" category=\"群信息\" priority=8
        之后调用 send_group_msg 时，如果用户用别名而非纯数字，先调 query_knowledge 查出群号，再用群号调用 send_group_msg
 
@@ -430,7 +448,7 @@ public class BaiLianService {
     9. 成语接龙：起头后记住尾字，检查下一个人首字是否匹配。""";
 
             String systemPrompt = baseSystemPrompt +
-                    (moodService != null ? "\n\n你现在的情绪：" + moodService.getMoodDescription() + "（情绪值" + moodService.getMood() + "）" : "") +
+                    (moodService != null ? "\n\n你现在的情绪：" + moodService.getMoodDescription(groupId != null ? groupId : "private_" + userId) + "（情绪值" + moodService.getMood(groupId != null ? groupId : "private_" + userId) + "）" : "") +
                     "\n\n【当前与你对话的是】" + nickname +
                     "\n【QQ号:】" + userId +
                     (groupId != null ? "\n【当前群号】" + groupId : "") +
@@ -551,7 +569,12 @@ public class BaiLianService {
                     new MemoryTool(botMemory),
                     new KnowledgeBaseTool(knowledgeService),
                     new LearnKnowledgeTool(knowledgeService),
-                    new SendGroupTool(botInstance)
+                    new SendGroupTool(botInstance),
+                    new SearchHistoryTool(),
+                    new RememberFactTool(new LongTermMemoryRepository(DatabaseConfig.getDataSource())),
+                    new RecallMemoryTool(new LongTermMemoryRepository(DatabaseConfig.getDataSource())),
+                    new ScheduleEventTool(new LongTermMemoryRepository(DatabaseConfig.getDataSource())),
+                    new SendStatusTool(botInstance)
             );
 
             String requestBody = objectMapper.writeValueAsString(requestBodyObj);
@@ -623,8 +646,16 @@ public class BaiLianService {
             if ("null".equals(reply) || messageNode.path("content").isNull()) reply = "";
             logger.debug("AI raw reply (first 200 chars): {}", reply.length() > 200 ? reply.substring(0, 200) + "..." : reply);
 
-            // 解析 JSON 格式的工具调用（Claude Haiku 等新模型输出）
-            List<ToolResult> toolResults = new ArrayList<>();
+            // === 多轮工具调用循环（最多6轮，支持 send_status 实时反馈进度）===
+            int toolRound = 0;
+            int maxToolRounds = 6;
+
+            while (toolRound < maxToolRounds) {
+                toolRound++;
+                List<ToolResult> toolResults = new ArrayList<>();
+
+            // 解析 JSON 格式的工具调用
+            if (reply.contains("\"name\"") || reply.contains("\"tool\"")) {
             if (reply.contains("\"name\"") || reply.contains("\"tool\"")) {
                 // 提取 JSON 对象
                 java.util.regex.Matcher jsonMatcher = java.util.regex.Pattern
@@ -717,50 +748,64 @@ public class BaiLianService {
                     }
                 }
 
-                if (!toolResults.isEmpty()) {
-                    messages.add(Map.of("role", "assistant", "content", reply));
-                    StringBuilder toolFeedback = new StringBuilder("以下是对你工具调用的结果：\n");
-                    for (ToolResult tr : toolResults) {
-                        toolFeedback.append("[").append(tr.name).append("] ").append(tr.result).append("\n");
-                    }
-                    toolFeedback.append("\n请基于这些结果，用自然语言简短回复用户（不要输出 JSON）。");
-                    messages.add(Map.of("role", "user", "content", toolFeedback.toString()));
+            }
 
-                    Map<String, Object> secondBody = new HashMap<>();
-                    secondBody.put("model", modelName);
-                    secondBody.put("messages", messages);
-                    secondBody.put("max_tokens", 1024);
-                    try {
-                        HttpRequest secondReq = HttpRequest.newBuilder()
-                                .uri(URI.create(url))
-                                .header("Authorization", "Bearer " + apiKey)
-                                .header("Content-Type", "application/json")
-                                .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(secondBody)))
-                                .timeout(Duration.ofMillis(this.bailianTimeoutMs))
-                                .build();
-                        HttpResponse<String> secondResp = httpClient.send(secondReq, HttpResponse.BodyHandlers.ofString());
-                        if (secondResp.statusCode() == 200) {
-                            JsonNode sr = objectMapper.readTree(secondResp.body());
-                            JsonNode sc = sr.path("choices");
-                            if (sc.isArray() && !sc.isEmpty()) {
-                                String newReply = sc.get(0).path("message").path("content").asText().trim();
-                                if ("null".equals(newReply)) newReply = "";
-                                if (!newReply.isEmpty() && !newReply.startsWith("<tool_call>")) {
-                                    reply = newReply;
-                                }
+            // 统一反馈：将工具结果喂回 LLM（JSON 和 XML 路径都走这里）
+            if (!toolResults.isEmpty()) {
+                messages.add(Map.of("role", "assistant", "content", reply));
+                StringBuilder toolFeedback = new StringBuilder("以下是对你工具调用的结果：\n");
+                for (ToolResult tr : toolResults) {
+                    toolFeedback.append("[").append(tr.name).append("] ").append(tr.result).append("\n");
+                }
+                if (toolRound < maxToolRounds) {
+                    toolFeedback.append("\n请基于这些结果继续。如果还需要调用其他工具，可以继续输出工具调用。否则直接用自然语言回复用户。");
+                } else {
+                    toolFeedback.append("\n已达最大轮次，请直接基于现有结果用自然语言回复用户。");
+                }
+                messages.add(Map.of("role", "user", "content", toolFeedback.toString()));
+
+                Map<String, Object> nextBody = new HashMap<>();
+                nextBody.put("model", modelName);
+                nextBody.put("messages", messages);
+                nextBody.put("max_tokens", 1024);
+                try {
+                    HttpRequest nextReq = HttpRequest.newBuilder()
+                            .uri(URI.create(url))
+                            .header("Authorization", "Bearer " + apiKey)
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(nextBody)))
+                            .timeout(Duration.ofMillis(this.bailianTimeoutMs))
+                            .build();
+                    HttpResponse<String> nextResp = httpClient.send(nextReq, HttpResponse.BodyHandlers.ofString());
+                    if (nextResp.statusCode() == 200) {
+                        JsonNode sr = objectMapper.readTree(nextResp.body());
+                        JsonNode sc = sr.path("choices");
+                        if (sc.isArray() && !sc.isEmpty()) {
+                            String newReply = sc.get(0).path("message").path("content").asText().trim();
+                            if ("null".equals(newReply)) newReply = "";
+                            if (!newReply.isEmpty()) {
+                                reply = newReply;
+                                continue;
                             }
                         }
-                    } catch (Exception e) {
-                        logger.warn("工具二次调用失败: {}", e.getMessage());
                     }
-                    // 兜底：如果二次调用没有拿到有效回复，直接用工具结果
-                    if (reply.startsWith("<tool_call>") || reply.contains("<function=")) {
-                        reply = toolResults.stream()
-                                .map(tr -> tr.result)
-                                .reduce((a, b) -> a + "；" + b).orElse("嗯...再问一次吧");
-                    }
+                } catch (Exception e) {
+                    logger.warn("工具第{}轮调用失败: {}", toolRound, e.getMessage());
                 }
+                // LLM 调用失败或返回空 → 用工具结果兜底
+                reply = toolResults.stream()
+                        .map(tr -> tr.result)
+                        .reduce((a, b) -> a + "；" + b).orElse("嗯...再问一次吧");
+                break;
+            } else {
+                break;
             }
+        } // end multi-round while
+
+        // 兜底：清理工具调用残留格式
+        if (reply.startsWith("<tool_call>") || reply.contains("<function=")) {
+            reply = "嗯...让我想想怎么回呢——";
+        }
 
             if (!reply.isEmpty()) {
                 // 检测长回复 JSON: {"long":"内容..."}
@@ -1090,7 +1135,7 @@ public class BaiLianService {
 
         long now = System.currentTimeMillis();
         String fullUserId = groupId + "_" + userId;
-        Long botQQ =356289140L;
+        boolean directedAtOther = ats != null && !ats.isEmpty() && !ats.contains(BOT_QQ);
         // ✅ 优先处理追问（不受安静性格影响）
         logger.debug(" candyBear: 尝试处理主动回复，用户 {}，群 {}，消息：{}，At：{}", userId, groupId, message, ats);
         UserThread thread = userThreads.get(fullUserId);
@@ -1098,19 +1143,17 @@ public class BaiLianService {
         if (thread != null && now - thread.lastInteraction < 120_000) {
             logger.debug("检查完毕，处于追问时间内");// 2分钟内
             logger.debug(" candyBear: 触发追问，用户 {}，群 {}，消息：{}", userId, groupId, message);
-            if(ats == null || ats.isEmpty()  || ats.contains(botQQ)) {
-                if (isFollowUpMessage(message)) {
+            if (isFollowUpMessage(message)) {
                     if (canReact(groupId)) {
                         recordReaction(groupId);
                         String prompt = "你之前说：“" + thread.lastBotReply + "”\n对方现在说：“" + message + "”\n请用一句自然的话回应。";
                         logger.debug(" candyBear: 触发追问，用户 {}，群 {}，消息：{}", userId, groupId, message);
                         return Optional.of(Reaction.withAI(prompt));
-                    }
                 }
             }
         }
 
-        // === 以下才是真正的“主动插话”，受性格和概率控制 ===
+        // === 以下才是真正的”主动插话”，受性格和概率控制 ===
         BehaviorAnalyzer.BehaviorAdvice advice = behaviorAnalyzer.getAdvice(groupId);
         double effectiveProbability = advice.adjustedProbability;
         logger.debug(" candyBear: 获取行为建议，用户 {}，群 {}，建议点数：{}", userId, groupId, effectiveProbability);

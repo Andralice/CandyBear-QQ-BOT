@@ -93,10 +93,11 @@ public class DatabaseConfig {
 
                 dataSource = new HikariDataSource(config);
 
-                // 测试连接池
+                // 测试连接池 + 自动迁移表结构
                 try (Connection conn = dataSource.getConnection()) {
                     logger.info("✅ 数据库连接池初始化成功");
                     logger.info("连接URL: {}", dbUrl);
+                    ensureTables(conn);
                     logger.info("连接池状态: {}", getPoolStatus());
                 }
 
@@ -161,6 +162,65 @@ public class DatabaseConfig {
         }
 
         return dataSource.getConnection();
+    }
+
+    /**
+     * 启动时自动建表和加列，幂等操作，重复执行不会出错。
+     */
+    private static void ensureTables(Connection conn) {
+        String[] migrations = {
+            // 核心表
+            "CREATE TABLE IF NOT EXISTS long_term_memories (" +
+                "id BIGINT AUTO_INCREMENT PRIMARY KEY," +
+                "user_id VARCHAR(50) NOT NULL," +
+                "group_id VARCHAR(50)," +
+                "source_message_id BIGINT," +
+                "content TEXT NOT NULL," +
+                "memory_type VARCHAR(20) DEFAULT 'fact'," +
+                "keywords TEXT," +
+                "importance INT DEFAULT 1," +
+                "vector_data JSON," +
+                "last_recalled TIMESTAMP NULL," +
+                "recall_count INT DEFAULT 0," +
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
+                "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+                "INDEX idx_ltm_user_group (user_id, group_id)," +
+                "INDEX idx_ltm_type (memory_type)," +
+                "INDEX idx_ltm_importance (importance DESC)" +
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            // 新增列（忽略已存在的错误）
+            "ALTER TABLE long_term_memories ADD COLUMN IF NOT EXISTS trigger_at DATETIME NULL",
+            "ALTER TABLE long_term_memories ADD COLUMN IF NOT EXISTS triggered BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE long_term_memories ADD COLUMN IF NOT EXISTS keywords TEXT",
+            "ALTER TABLE long_term_memories ADD COLUMN IF NOT EXISTS recall_count INT DEFAULT 0",
+
+            // group_mood 表
+            "CREATE TABLE IF NOT EXISTS group_mood (" +
+                "id BIGINT AUTO_INCREMENT PRIMARY KEY," +
+                "group_id VARCHAR(50) NOT NULL," +
+                "mood INT DEFAULT 50," +
+                "last_topic_throw_time BIGINT DEFAULT 0," +
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
+                "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+                "UNIQUE KEY uk_group_id (group_id)" +
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        };
+
+        for (String sql : migrations) {
+            try (java.sql.Statement stmt = conn.createStatement()) {
+                stmt.execute(sql);
+                logger.debug("迁移成功: {}", sql.substring(0, Math.min(60, sql.length())));
+            } catch (SQLException e) {
+                // MySQL 5.x 不支持 IF NOT EXISTS for columns，忽略 "Duplicate column" 错误
+                if (e.getMessage() != null && e.getMessage().contains("Duplicate column")) {
+                    logger.debug("列已存在，跳过: {}", sql.substring(0, Math.min(60, sql.length())));
+                } else {
+                    logger.warn("迁移跳过 ({}): {}", e.getMessage(), sql.substring(0, Math.min(60, sql.length())));
+                }
+            }
+        }
+        logger.info("数据库表结构迁移完成");
     }
 
     /**

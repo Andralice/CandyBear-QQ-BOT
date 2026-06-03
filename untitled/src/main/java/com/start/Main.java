@@ -8,7 +8,10 @@ import com.start.config.DatabaseConfig;
 import com.start.handler.CPTracker;
 import com.start.handler.HandlerRegistry;
 import com.start.repository.GroupMessageStatsRepository;
+import com.start.repository.GroupMoodRepository;
+import com.start.repository.LongTermMemoryRepository;
 import com.start.repository.MessageRepository;
+import com.start.model.LongTermMemory;
 import com.start.repository.UserAffinityRepository;
 import com.start.service.*;
 import org.java_websocket.client.WebSocketClient;
@@ -77,6 +80,9 @@ public class Main extends WebSocketClient {
     /** 用户亲密度存储仓库，用于个性化推荐与互动。 */
     private final UserAffinityRepository userAffinityRepo = new UserAffinityRepository();
 
+    /** 长期记忆存储仓库，用于定时事件触发。 */
+    private final LongTermMemoryRepository longTermMemoryRepo = new LongTermMemoryRepository(DatabaseConfig.getDataSource());
+
     /** 关键词知识库服务，支持基于关键词的快速问答匹配。 */
     private final KeywordKnowledgeService keywordKnowledgeService;
 
@@ -94,8 +100,8 @@ public class Main extends WebSocketClient {
     /** 用户画像服务，定期分析用户行为并更新画像标签。 */
     private UserPortraitService portraitService;
 
-    /** 糖果熊情绪系统。 */
-    private final BotMoodService moodService = new BotMoodService();
+    /** 糖果熊分群情绪系统，持久化到 group_mood 表。 */
+    private final BotMoodService moodService;
 
     /** 封装 OneBot WebSocket API 调用的服务，支持异步请求。 */
     private final OneBotWsService oneBotWsService;
@@ -133,6 +139,9 @@ public class Main extends WebSocketClient {
 
         // 初始化知识库服务（需数据源）
         this.keywordKnowledgeService = new KeywordKnowledgeService(DatabaseConfig.getDataSource());
+
+        // 初始化糖果熊分群情绪系统（需数据源）
+        this.moodService = new BotMoodService(new GroupMoodRepository(DatabaseConfig.getDataSource()));
 
         // 初始化 TTS 语音服务
         this.ttsService = new TtsService();
@@ -200,6 +209,45 @@ public class Main extends WebSocketClient {
         reminderService.setBotInstance(this); // 注入 Main 实例
         reminderService.setEnabled(true); // 默认开启，可通过命令控制
         logger.info("⏰ 私聊提醒服务已初始化");
+
+        // 启动定时事件检查线程（每10分钟检查一次到期的定时事件）
+        Thread eventCheckerThread = new Thread(() -> {
+            while (!Thread.currentThread().isInterrupted()) {
+                try {
+                    Thread.sleep(10 * 60 * 1000); // 10 分钟
+                    List<LongTermMemory> dueEvents = longTermMemoryRepo.findDueEvents();
+                    for (LongTermMemory event : dueEvents) {
+                        try {
+                            String prompt = "你之前记下了一个定时事件：\"" + event.getContent()
+                                    + "\"\n涉及用户：" + event.getUserId()
+                                    + "\n现在时间到了，请自然地提醒或祝福。";
+                            String reply = baiLianService.generate(
+                                    "event_" + event.getId(),
+                                    event.getUserId(),
+                                    prompt,
+                                    event.getGroupId(),
+                                    "糖果熊"
+                            );
+                            if (reply != null && !reply.trim().isEmpty()) {
+                                sendGroupReply(Long.parseLong(event.getGroupId()), reply);
+                            }
+                            longTermMemoryRepo.markTriggered(event.getId());
+                            logger.info("📅 定时事件已触发: {} -> {}", event.getContent(), event.getGroupId());
+                        } catch (Exception e) {
+                            logger.error("❌ 定时事件触发失败 id={}: {}", event.getId(), e.getMessage());
+                        }
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                } catch (Exception e) {
+                    logger.error("❌ 定时事件检查异常", e);
+                }
+            }
+        }, "EventChecker-Thread");
+        eventCheckerThread.setDaemon(true);
+        eventCheckerThread.start();
+        logger.info("📅 定时事件检查器已启动");
     }
 
     // ===== WebSocket 生命周期回调 =====
@@ -283,11 +331,7 @@ public class Main extends WebSocketClient {
                     logger.debug("🚫 忽略非白名单群消息 | group_id={}", groupId);
                 }
             } else if ("private".equals(messageType)) {
-                // 私聊黑名单检查
-                if (BotConfig.getPrivateBlacklist().contains(userId)) {
-                    isAllowed = false;
-                    logger.debug("🚫 黑名单用户私聊被拒 | user_id={}", userId);
-                } else if (!BotConfig.isPrivateWhitelistEnabled()) {
+                if (!BotConfig.isPrivateWhitelistEnabled()) {
                     isAllowed = true;
                     logger.debug("💬 接受私聊（白名单未启用）| user_id={}", userId);
                 } else {
