@@ -246,7 +246,8 @@ AI 可通过 `<tool_call>` XML 块动态调用以下 24 个工具：
 
 ```bash
 # 克隆项目
-git clone <repo-url> && cd untitled
+git clone <repo-url>
+cd A-QQ-bot-based-on-Java-and-NapCat/untitled
 
 # 构建 fat JAR
 mvn clean package -DskipTests
@@ -255,42 +256,41 @@ mvn clean package -DskipTests
 
 ### 5.3 配置文件
 
-在 `src/main/resources/application.properties` 中配置运行参数。敏感值通过环境变量注入：
-
-```properties
-# NapCat WebSocket 地址
-bot.ws-url=ws://127.0.0.1:3001
-
-# 机器人 QQ 号
-bot.qq=123456789
-
-# 允许的群 (逗号分隔)
-bot.allowed-groups=123456,789012
-
-# AI 对话模型
-bailian.api-key=${BAILIAN_API_KEY}
-bailian.base-url=https://api.scnet.cn/v1
-bailian.model=glm-5.1
-
-# AI Agent 模型
-agent.api-key=${AGENT_API_KEY}
-agent.base-url=https://api.scnet.cn/v1
-agent.model=gemini-3-flash
-
-# 数据库
-datasource.url=jdbc:mysql://localhost:3306/qq_bot
-datasource.username=${DB_USER}
-datasource.password=${DB_PASSWORD}
+```bash
+# 复制示例配置
+cp src/main/resources/application.properties.example src/main/resources/application.properties
 ```
+
+所有配置项支持 `${ENV_VAR:default}` 格式，敏感值建议通过环境变量注入。详见 [application.properties.example](untitled/src/main/resources/application.properties.example)。
+
+关键配置项：
+
+| 配置项 | 环境变量 | 说明 |
+|--------|----------|------|
+| `ws.url` | `NAPCT_WS_URL` | NapCat WebSocket 正反向地址 |
+| `onebot.access-token` | `ONEBOT_ACCESS_TOKEN` | OneBot access token |
+| `bailian.api-key` | `BAILIAN_API_KEY` | LLM API Key (OpenAI 兼容) |
+| `bailian.base-url` | `BAILIAN_BASE_URL` | LLM API 地址 |
+| `bailian.chat-model` | `BAILIAN_CHAT_MODEL` | 对话模型名 |
+| `bot.qq` | `BOT_QQ` | 机器人 QQ 号 |
+| `admin.qq` | `ADMIN_QQ` | 管理员 QQ 号 |
+| `allowed.groups` | `ALLOWED_GROUPS` | 允许的群号（逗号分隔） |
+| `target.group.id` | `TARGET_GROUP_ID` | 主目标群号 |
+| `database.url` | `DB_URL` | MySQL 连接地址 |
+| `database.user` | `DB_USER` | 数据库用户名 |
+| `database.password` | `DB_PASSWORD` | 数据库密码 |
 
 ### 5.4 本地运行
 
 ```bash
-# 确保环境变量已设置
-export BAILIAN_API_KEY=xxx
-export AGENT_API_KEY=xxx
+# 确保环境变量已设置（或在 application.properties 中直接填写）
+export BAILIAN_API_KEY=sk-your-key
+export DB_URL=jdbc:mysql://localhost:3306/candybear_db
 export DB_USER=root
-export DB_PASSWORD=xxx
+export DB_PASSWORD=your_password
+export BOT_QQ=你的机器人QQ号
+export ADMIN_QQ=你的QQ号
+export ALLOWED_GROUPS=群号1,群号2
 
 # 启动
 java -Xms256m -Xmx768m -jar target/untitled-1.0-SNAPSHOT.jar
@@ -300,53 +300,72 @@ java -Xms256m -Xmx768m -jar target/untitled-1.0-SNAPSHOT.jar
 
 ## 6. 配置参考
 
-### 6.1 环境变量
+### 6.1 环境变量一览
 
 | 变量 | 说明 | 必填 |
 |------|------|:---:|
-| `BAILIAN_API_KEY` | 日常对话模型 API Key | ✓ |
-| `AGENT_API_KEY` | Agent 模型 API Key | ✓ |
+| `BAILIAN_API_KEY` | LLM 对话模型 API Key | ✓ |
+| `DB_URL` | MySQL 数据库连接串 | ✓ |
 | `DB_USER` | 数据库用户名 | ✓ |
 | `DB_PASSWORD` | 数据库密码 | ✓ |
-| `SSH_KEY` | 部署 SSH 私钥路径 | 部署时 |
+| `BOT_QQ` | 机器人 QQ 号 | ✓ |
+| `NAPCT_WS_URL` | NapCat WebSocket 正反向地址 | ✓ |
+| `ONEBOT_ACCESS_TOKEN` | OneBot access token | ✓ |
+| `ADMIN_QQ` | 管理员 QQ（shell/知识库管理等权限） | 推荐 |
+| `TARGET_GROUP_ID` | 主目标群号 | — |
+| `ALLOWED_GROUPS` | 允许的群号列表 | — |
+| `ALLOWED_PRIVATE_USERS` | 允许私聊的用户 | — |
+| `BAILIAN_BASE_URL` | LLM API 地址 | — |
+| `BAILIAN_CHAT_MODEL` | 对话模型名 | — |
+| `AGENT_API_KEY` | Agent 模型 API Key | — |
+| `MERCHANT_API_KEY` | 远行商人 API Key | — |
 
 ### 6.2 关键参数
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `bot.allowed-groups` | — | 白名单群号列表 |
-| `bot.private-whitelist-enabled` | false | 是否启用私聊白名单 |
-| `USER_REACTION_COOLDOWN_MS` | 2000 | 同用户主动插话冷却 (ms) |
-| `MAX_QUEUE_MS` | 30000 | 排队超时丢弃阈值 |
+| `allowed.groups` | — | 白名单群号列表 |
+| `private.whitelist.enabled` | false | 是否启用私聊白名单 |
+| `bailian.timeout-ms` | 90000 | LLM 请求超时 (ms) |
+| `bailian.max-retries` | 2 | LLM 请求重试次数 |
+| `database.pool.max-size` | 10 | 数据库连接池大小 |
+| 同用户主动插话冷却 | 2 s | 防止连续刷屏 |
 | 群冷场检测 | 5 min | 无消息判定冷场 |
-| 追问窗口 | 2 min | 追问识别窗口 |
+| 追问识别窗口 | 2 min | 同一用户的下一条消息视为追问 |
 | 职业抽卡防刷 | 30 s | 同群最小间隔 |
 
 ---
 
 ## 7. 部署与运维
 
-### 7.1 一键部署
+### 7.1 部署到服务器
+
+项目提供 `deploy.sh` 自动化部署脚本（本地使用，不上传 GitHub）。你需要根据自己服务器信息创建：
 
 ```bash
+# 1. 设置服务器连接信息
+export DEPLOY_HOST=你的服务器IP
+export DEPLOY_USER=root
+
+# 2. 在服务器上创建 .env 文件
+# /opt/qq-bot/.env 包含所有环境变量
+
+# 3. 执行部署
 chmod +x deploy.sh && ./deploy.sh
 ```
 
-脚本执行流程：
-1. Maven 打包 (skip tests)
-2. 上传 JAR 至远程服务器 (`/opt/qq-bot/`)
-3. 停止旧实例 (screen)
-4. 替换 JAR (保留最近 3 个备份)
-5. 加载 `.env` 环境变量并启动 screen 会话
+脚本执行流程：Maven 打包 → 上传 JAR → 停止旧实例 → 替换 JAR（保留 3 个备份）→ 加载 .env 并启动 screen 会话。
 
 ### 7.2 远程服务器结构
 
 ```
 /opt/qq-bot/
-├── untitled-1.0-SNAPSHOT.jar      # 当前运行 JAR
+├── untitled-1.0-SNAPSHOT.jar       # 当前运行 JAR
 ├── untitled-1.0-SNAPSHOT.jar.bak.* # 历史备份 (保留 3 个)
-├── .env                            # 环境变量 (API Keys, DB 密码等)
-└── qq-bot.log                      # 运行日志
+├── .env                             # 环境变量 (API Keys, DB 密码等)
+├── watchdog.sh                      # 可选：看门狗自动重启脚本
+├── qq-bot.log                       # 运行日志
+└── watchdog.log                     # 看门狗日志
 ```
 
 ### 7.3 运维命令
@@ -438,18 +457,25 @@ public class MyTool implements Tool {
 ### 8.3 项目结构
 
 ```
-src/main/java/com/start/
-├── Main.java              # 入口 + WebSocket 生命周期
-├── config/
-│   ├── BotConfig.java     # 配置加载 (含环境变量替换)
-│   └── DatabaseConfig.java # 数据源配置
-├── handler/               # 消息处理器 (责任链节点)
-├── agent/                 # AI 工具实现 (Tool 接口)
-├── service/               # 核心业务服务
-├── repository/            # 数据访问层 (BaseRepository)
-├── model/                 # 数据模型
-├── vision/                # 图像渲染 (Java2D)
-└── util/                  # 工具类
+untitled/
+├── src/main/java/com/start/
+│   ├── Main.java              # 入口 + WebSocket 生命周期
+│   ├── config/
+│   │   ├── BotConfig.java     # 配置加载 (含环境变量替换)
+│   │   └── DatabaseConfig.java # 数据源配置
+│   ├── handler/               # 消息处理器 (责任链节点)
+│   ├── agent/                 # AI 工具实现 (Tool 接口)
+│   ├── service/               # 核心业务服务
+│   ├── repository/            # 数据访问层 (BaseRepository)
+│   ├── model/                 # 数据模型
+│   ├── vision/                # 图像渲染 (Java2D)
+│   └── util/                  # 工具类
+├── src/main/resources/
+│   ├── application.properties.example  # 配置模板
+│   ├── assets/fonts/          # HarmonyOS Sans 字体
+│   ├── assets/bg/             # 背景图
+│   └── logback.xml            # 日志配置
+└── pom.xml
 ```
 
 ### 8.4 调试
@@ -459,8 +485,9 @@ src/main/java/com/start/
 # com.start 包默认 DEBUG 级别
 # 查看完整 WebSocket 事件与 AI 调用链路
 
-# 本地调试时可将 NapCat 指向本地 WebSocket
-bot.ws-url=ws://127.0.0.1:3001
+# 本地调试时可将 NapCat WebSocket 指向本地
+# 在 application.properties 中设置:
+# ws.url=ws://127.0.0.1:5701/?access_token=your_token
 ```
 
 ---
