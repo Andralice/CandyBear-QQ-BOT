@@ -1,4 +1,9 @@
-# 糖果熊 (CandyBear) — 智能 QQ 群机器人
+# 🍬 糖果熊 (CandyBear) — 智能 QQ 群机器人
+
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Java](https://img.shields.io/badge/Java-17-ED8B00.svg)](https://adoptium.net/)
+[![Maven](https://img.shields.io/badge/Maven-3.6+-C71A36.svg)](https://maven.apache.org/)
+[![OneBot](https://img.shields.io/badge/OneBot-v11-black)](https://github.com/botuniverse/onebot-11)
 
 基于 Java 17 与 OneBot v11 协议的企业级智能 QQ 群机器人，集成双模型 LLM 对话、Agent 工具调用、用户画像分析、情绪感知与群互动生态。
 
@@ -246,7 +251,7 @@ AI 可通过 `<tool_call>` XML 块动态调用以下 24 个工具：
 
 ```bash
 # 克隆项目
-git clone <repo-url>
+git clone https://github.com/Andralice/A-QQ-bot-based-on-Java-and-NapCat.git
 cd A-QQ-bot-based-on-Java-and-NapCat/untitled
 
 # 构建 fat JAR
