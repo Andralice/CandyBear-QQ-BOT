@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(mvn clean *)",
-      "Bash(scp -i __TRACKED_VAR__/.ssh/id_ed25519 -o StrictHostKeyChecking=no target/untitled-1.0-SNAPSHOT.jar alice@154.8.213.134:/opt/qq-bot/untitled-1.0-SNAPSHOT.jar)",
-      "Bash(ssh -i __TRACKED_VAR__/.ssh/id_ed25519 -o StrictHostKeyChecking=no alice@154.8.213.134 'ps aux | grep '\\\\''java.*untitled'\\\\'' | grep -v grep | awk '\\\\''{print $2}'\\\\'' | while read p; do kill -9 $p 2>/dev/null; done; sleep 2; source /opt/qq-bot/.env; screen -dmS qq-bot bash -c '\\\\''source /opt/qq-bot/.env && java -Xms256m -Xmx768m -jar /opt/qq-bot/untitled-1.0-SNAPSHOT.jar > /opt/qq-bot/qq-bot.log 2>&1'\\\\''; sleep 10; tail -2 /opt/qq-bot/qq-bot.log')"
-    ]
-  }
-}

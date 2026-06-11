@@ -49,5 +49,25 @@ logs/
 .idea/
 
 ### Note files (may contain secrets) ###
-Note/.env*
-Note/env-config
+Note/
+
+### Deployment scripts (contain server info) ###
+deploy.sh
+watchdog.sh
+DEPLOY_README.md
+
+### Claude Code ###
+CLAUDE.md
+.claude/
+
+### JVM crash logs ###
+hs_err_pid*.log
+replay_pid*.log
+
+### Compiled class files (should not be in repo) ###
+com/
+
+### Misc junk files ###
+\[Help
+get.py
+egg_group_cache.json

@@ -4,25 +4,28 @@ import com.start.Main;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.*;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.Iterator;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 检测连续相同内容（刷屏）
+ * 检测连续相同内容（复读），检测到后糖果熊也跟一条加入复读。
  */
 public class SpamDetector {
     private static final Logger logger = LoggerFactory.getLogger(SpamDetector.class);
 
     // 窗口大小：保留最近 N 条消息用于检测
     private static final int WINDOW_SIZE = 5;
-    // 触发条件：末尾连续相同内容出现 M 次
+    // 触发条件：末尾连续相同内容出现 M 次（不含糖果熊自己）
     private static final int MIN_REPEAT_COUNT = 5;
     // 最小消息长度：避免对过短或无意义消息进行检测（如 "."、" "）
     private static final int MIN_MESSAGE_LENGTH = 2;
 
     private final Map<String, Deque<MessageRecord>> groupMessages = new ConcurrentHashMap<>();
     private final Map<String, Long> lastTriggerTime = new ConcurrentHashMap<>();
-    private static final long COOLDOWN_SECONDS = 5; // 触发后冷却时间（秒）
+    private static final long COOLDOWN_SECONDS = 10; // 复读后冷却时间（秒），防止糖果熊触发自己的下一轮复读
 
     private final Main bot;
 
@@ -31,11 +34,11 @@ public class SpamDetector {
     }
 
     /**
-     * 检查并中断连续相同的刷屏行为
+     * 检测复读，触发后糖果熊也跟一条加入复读。
      *
-     * @param groupId      群ID（字符串形式）
-     * @param userId       用户ID
-     * @param rawMessage   原始消息内容
+     * @param groupId    群ID
+     * @param userId     用户ID
+     * @param rawMessage 原始消息内容
      */
     public void checkAndInterrupt(String groupId, long userId, String rawMessage) {
         if (groupId == null || rawMessage == null) return;
@@ -58,14 +61,10 @@ public class SpamDetector {
                 Long last = lastTriggerTime.get(groupId);
                 if (last == null || now - last > COOLDOWN_SECONDS) {
                     lastTriggerTime.put(groupId, now);
-                    String[] replies = {
-                            "📢 打断施法！",
-                            "🛑 禁止加一",
-                            "⚠️ 检测到重复内容，立即停止！"
-                    };
-                    String reply = replies[new Random().nextInt(replies.length)];
-                    bot.sendGroupReply(Long.parseLong(groupId), reply);
-                    logger.info("🔄 群 {} 触发防刷屏（连续相同内容 {} 次）", groupId, MIN_REPEAT_COUNT);
+                    // 自己也加一复读，发原始消息（保留大小写）
+                    String repeatMsg = rawMessage.trim();
+                    bot.sendGroupReply(Long.parseLong(groupId), repeatMsg);
+                    logger.info("🔁 群 {} 复读加入: {}", groupId, repeatMsg);
                 }
             }
         }

@@ -18,6 +18,7 @@ public class BotConfig {
     private static final Logger logger = LoggerFactory.getLogger(BotConfig.class);
 
     private static long botQq;
+    private static long adminQq;
     private static String botName;
     private static boolean privateWhitelistEnabled = false;
     private static Set<Long> ALLOWED_GROUPS = Collections.emptySet();
@@ -76,6 +77,7 @@ public class BotConfig {
                 throw new RuntimeException("❌ 请配置 bot.qq");
             }
             botQq = Long.parseLong(resolve(qqStr.trim()));
+            adminQq = Long.parseLong(resolve(props.getProperty("admin.qq", "0").trim()));
             oneBotHttpBaseUrl = resolve(props.getProperty("onebot.http-base-url", "http://127.0.0.1:5700").trim());
             wsBaseUrl = resolve(props.getProperty("ws.base.url", "ws://127.0.0.1:5700").trim());
             wsUrl = resolve(props.getProperty("ws.url", wsBaseUrl).trim());
@@ -85,7 +87,7 @@ public class BotConfig {
             privateWhitelistEnabled = Boolean.parseBoolean(enabledStr);
             ALLOWED_GROUPS = parseLongSet(resolve(props.getProperty("allowed.groups", "")));
             ALLOWED_PRIVATE_USERS = parseLongSet(resolve(props.getProperty("allowed.private.users", "")));
-            PRIVATE_BLACKLIST = parseLongSet(resolve(props.getProperty("private.blacklist", "1285989735")));
+            PRIVATE_BLACKLIST = parseLongSet(resolve(props.getProperty("private.blacklist", "")));
 
             baiLianApiKey = resolve(props.getProperty("bailian.api-key", resolve(props.getProperty("dashscope.api-key", ""))).trim());
             baiLianBaseUrl = resolve(props.getProperty("bailian.base-url", "https://api.meai.cloud/v1/chat/completions").trim());
@@ -94,7 +96,7 @@ public class BotConfig {
             baiLianMaxRetries = parseInt(resolve(props.getProperty("bailian.max-retries", "2")), 2);
 
             agentApiKey = resolve(props.getProperty("agent.api-key", "").trim());
-            agentBaseUrl = resolve(props.getProperty("agent.base-url", "http://114.132.99.114:3000/v1/chat/completions").trim());
+            agentBaseUrl = resolve(props.getProperty("agent.base-url", "https://api.deepseek.com/v1/chat/completions").trim());
             agentModel = resolve(props.getProperty("agent.model", "gemini-3-flash").trim());
             agentTimeoutMs = parseInt(resolve(props.getProperty("agent.timeout-ms", "90000")), 90000);
             agentMaxRetries = parseInt(resolve(props.getProperty("agent.max-retries", "2")), 2);
@@ -113,8 +115,8 @@ public class BotConfig {
             if (merchantNotifyGroups.isEmpty()) {
                 merchantNotifyGroups = ALLOWED_GROUPS;
             }
-            merchantNotifyQqs = parseLongSet(resolve(props.getProperty("merchant.notify.qqs", "3524398813,3360232949")));
-            merchantHighValueItems = parseStringSet(resolve(props.getProperty("merchant.high-value-items", "国王球,炫彩蛋,首领血脉,棱镜球")));
+            merchantNotifyQqs = parseLongSet(resolve(props.getProperty("merchant.notify.qqs", "")));
+            merchantHighValueItems = parseStringSet(resolve(props.getProperty("merchant.high-value-items", "国王球,炫彩精灵蛋,首领血脉,棱镜球")));
 
             httpConnectTimeoutMs = parseInt(resolve(props.getProperty("http.connect-timeout-ms", "10000")), 10000);
             webSearchUrl = resolve(props.getProperty("web.search.url", "https://html.duckduckgo.com/html/"));
@@ -195,6 +197,10 @@ public class BotConfig {
 
     public static long getBotQq() {
         return botQq;
+    }
+
+    public static long getAdminQq() {
+        return adminQq;
     }
 
     public static String getBotName() {

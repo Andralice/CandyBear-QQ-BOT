@@ -1,0 +1,13 @@
+### IDE ###
+.idea/
+
+### OS ###
+.DS_Store
+Thumbs.db
+
+### Sensitive ###
+*.log
+.env*
+
+### Cache ###
+egg_group_cache.json

@@ -11,7 +11,13 @@ import com.start.repository.GroupMessageStatsRepository;
 import com.start.repository.GroupMoodRepository;
 import com.start.repository.LongTermMemoryRepository;
 import com.start.repository.MessageRepository;
+import com.start.repository.RecurringTaskRepository;
 import com.start.model.LongTermMemory;
+import com.start.model.RecurringTask;
+
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
 import com.start.repository.CandyBearLifeRepository;
 import com.start.repository.CandyBearScheduleRepository;
 import com.start.repository.UserAffinityRepository;
@@ -85,6 +91,9 @@ public class Main extends WebSocketClient {
     /** 长期记忆存储仓库，用于定时事件触发。 */
     private final LongTermMemoryRepository longTermMemoryRepo = new LongTermMemoryRepository(DatabaseConfig.getDataSource());
 
+    /** 周期任务存储仓库，用于工具联动（定时取出 prompt 发给 LLM 自由执行）。 */
+    private final RecurringTaskRepository recurringTaskRepo = new RecurringTaskRepository(DatabaseConfig.getDataSource());
+
     /** 关键词知识库服务，支持基于关键词的快速问答匹配。 */
     private final KeywordKnowledgeService keywordKnowledgeService;
 
@@ -157,8 +166,11 @@ public class Main extends WebSocketClient {
         // 初始化每群串行执行器（私聊4线程，排队30秒超时）
         GroupSerialExecutor groupExecutor = new GroupSerialExecutor(4, 30_000);
 
+        // 初始化服务器管理服务
+        ServerAdminService shellService = new ServerAdminService();
+
         // 初始化事件处理器注册中心
-        this.handlerRegistry = new HandlerRegistry(this.agentService, this.baiLianService, groupExecutor, this);
+        this.handlerRegistry = new HandlerRegistry(this.agentService, this.baiLianService, groupExecutor, this, shellService);
 
         // 设置 DashScope API Key（来自配置文件，不使用环境变量）
         if (BotConfig.getBaiLianApiKey() != null && !BotConfig.getBaiLianApiKey().isBlank()) {
@@ -279,6 +291,47 @@ public class Main extends WebSocketClient {
         eventCheckerThread.setDaemon(true);
         eventCheckerThread.start();
         logger.info("📅 定时事件检查器已启动");
+
+        // 启动周期任务调度线程（每 60 秒检查到期的 recurring_tasks，取出 prompt 发给 LLM 自由执行）
+        Thread recurringScheduler = new Thread(() -> {
+            while (!Thread.currentThread().isInterrupted()) {
+                try {
+                    Thread.sleep(60 * 1000);
+                    recurringTaskRepo.expireOldTasks();
+                    List<RecurringTask> dueTasks = recurringTaskRepo.findDueTasks();
+                    for (RecurringTask task : dueTasks) {
+                        try {
+                            logger.info("🔁 周期任务触发: {} (id={})", task.getTaskName(), task.getId());
+                            String sessionId = "recurring_" + task.getId() + "_" + System.currentTimeMillis();
+                            String reply = baiLianService.generate(
+                                    sessionId,
+                                    task.getUserId(),
+                                    task.getTriggerPrompt(),
+                                    task.getGroupId(),
+                                    "糖果熊"
+                            );
+                            if (reply != null && !reply.trim().isEmpty() && task.getGroupId() != null) {
+                                sendGroupReply(Long.parseLong(task.getGroupId()), reply);
+                            }
+
+                            // 计算下次触发时间
+                            LocalDateTime nextFire = computeNextFireFromCron(task.getCronExpr());
+                            recurringTaskRepo.markFired(task.getId(), nextFire);
+                        } catch (Exception e) {
+                            logger.error("❌ 周期任务执行失败 id={}: {}", task.getId(), e.getMessage());
+                        }
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                } catch (Exception e) {
+                    logger.error("❌ 周期任务调度异常", e);
+                }
+            }
+        }, "RecurringTask-Scheduler");
+        recurringScheduler.setDaemon(true);
+        recurringScheduler.start();
+        logger.info("🔁 周期任务调度器已启动");
     }
 
     // ===== WebSocket 生命周期回调 =====
@@ -595,12 +648,46 @@ public class Main extends WebSocketClient {
 
     /** 计算到下一个凌晨 3:00 的毫秒数 */
     private static long millisUntilNext3AM() {
-        java.time.LocalDateTime now = java.time.LocalDateTime.now();
-        java.time.LocalDateTime next = now.withHour(3).withMinute(0).withSecond(0).withNano(0);
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime next = now.withHour(3).withMinute(0).withSecond(0).withNano(0);
         if (!next.isAfter(now)) {
             next = next.plusDays(1);
         }
         return java.time.Duration.between(now, next).toMillis();
+    }
+
+    /** 从 cron 表达式计算下次触发时间。支持 "mm HH * * *"（每天）和 "mm HH * * D"（每周D）格式。 */
+    static LocalDateTime computeNextFireFromCron(String cronExpr) {
+        if (cronExpr == null) return null;
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime earliest = null;
+
+        for (String cron : cronExpr.split(";")) {
+            String[] fields = cron.trim().split("\\s+");
+            if (fields.length < 5) continue;
+            try {
+                int minute = Integer.parseInt(fields[0]);
+                int hour = Integer.parseInt(fields[1]);
+                int dayOfWeek = Integer.parseInt(fields[4]);
+
+                if (dayOfWeek == 0 || fields[4].equals("*")) {
+                    // 每天
+                    LocalDateTime candidate = LocalDateTime.of(LocalDate.now(),
+                            LocalTime.of(hour, minute));
+                    if (!candidate.isAfter(now)) candidate = candidate.plusDays(1);
+                    if (earliest == null || candidate.isBefore(earliest)) earliest = candidate;
+                } else {
+                    // 每周特定日 (1=Mon, 7=Sun)
+                    int todayDow = now.getDayOfWeek().getValue();
+                    int daysUntil = (dayOfWeek - todayDow + 7) % 7;
+                    LocalDateTime candidate = LocalDateTime.of(LocalDate.now().plusDays(daysUntil),
+                            LocalTime.of(hour, minute));
+                    if (!candidate.isAfter(now)) candidate = candidate.plusDays(7);
+                    if (earliest == null || candidate.isBefore(earliest)) earliest = candidate;
+                }
+            } catch (NumberFormatException ignored) {}
+        }
+        return earliest;
     }
 
 }

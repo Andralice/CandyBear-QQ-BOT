@@ -1,8 +1,5 @@
 package com.start.handler;
 
-import static com.start.handler.DailyProfessionHandler.drawForUser;
-import static com.start.handler.DailyProfessionHandler.getCombatPower;
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.start.Main;
 import com.start.config.DatabaseConfig;
@@ -129,8 +126,8 @@ public class RankHandler implements MessageHandler {
                     String uid = rs.getString("user_id");
                     try {
                         long id = Long.parseLong(uid);
-                        var p = drawForUser(id);
-                        int power = getCombatPower(id);
+                        var p = DailyProfessionHandler.drawForUser(id, groupId);
+                        int power = p.combatPower;
                         map.put(uid, new ProfessionScore(p.name, p.rarity, p.tier, power));
                     } catch (NumberFormatException ignored) {}
                 }
@@ -200,8 +197,8 @@ public class RankHandler implements MessageHandler {
             long uid = Long.parseLong(userId);
             luck = LuckUtil.getDailyLuck(uid);
             var spell = LuckUtil.getDailySpell(uid);
-            var p = DailyProfessionHandler.drawForUser(uid);
-            power = DailyProfessionHandler.getCombatPower(uid);
+            var p = DailyProfessionHandler.drawForUser(uid, gid);
+            power = p.combatPower;
             profession = "【" + p.rarity + "】" + p.name + "(" + p.tier + "阶)";
             // 好感度
             try (java.sql.Connection c = DatabaseConfig.getConnection();
@@ -280,7 +277,7 @@ public class RankHandler implements MessageHandler {
             try (java.sql.ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     String uid = rs.getString("user_id");
-                    try { map.put(uid, getCombatPower(Long.parseLong(uid))); }
+                    try { map.put(uid, DailyProfessionHandler.getCombatPower(Long.parseLong(uid), groupId)); }
                     catch (NumberFormatException ignored) {}
                 }
             }

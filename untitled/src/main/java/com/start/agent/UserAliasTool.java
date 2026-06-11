@@ -13,7 +13,7 @@ import java.util.*;
  * - get_bot_aliases: 查糖果熊自己的别称列表
  */
 public class UserAliasTool implements Tool {
-    private static final String SUPERUSER_QQ = "3524398813";
+    private static final String SUPERUSER_QQ = "0"; // 请在 application.properties 中设置 admin.qq
     private final UserAliasRepository aliasRepo;
     private final String botQq;
 

@@ -2,18 +2,24 @@ package com.start.handler;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.start.Main;
+import com.start.config.DatabaseConfig;
+import com.start.model.UserProfession;
+import com.start.repository.UserProfessionRepository;
+import com.start.util.LuckUtil;
+import com.start.util.SeedUtil;
 import com.start.vision.ImageRenderer;
 import com.start.vision.ProfessionCardTemplate;
 import com.start.vision.ProfessionData;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.sql.SQLException;
 import java.time.LocalDate;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 抽职业（图片渲染版 - 位阶系统）
+ * 抽职业（运势驱动位阶波动，DB 持久化有状态）
  */
 public class DailyProfessionHandler implements MessageHandler {
     private static final Logger logger = LoggerFactory.getLogger(DailyProfessionHandler.class);
@@ -22,186 +28,192 @@ public class DailyProfessionHandler implements MessageHandler {
             "今日职业", "抽职业", "我的职业", "今日命格", "抽命格", "抽取"
     );
 
-    // 职业体系：每个职业有多个位阶，位阶越高越稀有
-    private static final List<ProfessionEntry> PROFESSIONS = Arrays.asList(
-            // ===== 剑修一脉 =====
-            new ProfessionEntry("见习剑客", 1, "普通", "初握剑柄，剑道漫漫，还需勤学苦练", 100, 300),
-            new ProfessionEntry("御剑游侠", 2, "普通", "能御剑飞行，行走江湖，行侠仗义", 300, 800),
-            new ProfessionEntry("剑心通明", 3, "稀有", "剑心澄澈，万物皆可为剑，一剑破万法", 800, 2000),
-            new ProfessionEntry("剑道宗师", 4, "史诗", "开宗立派，剑道巅峰，一剑可断山河", 2000, 5000),
-            new ProfessionEntry("万剑归宗", 5, "传说", "万剑臣服，剑道至尊，一念之间剑开天门", 5000, 10000),
+    private static final UserProfessionRepository repo = new UserProfessionRepository(DatabaseConfig.getDataSource());
 
-            // ===== 法神一脉 =====
-            new ProfessionEntry("魔法学徒", 1, "普通", "初识元素，连火球术都未必能施展", 100, 300),
-            new ProfessionEntry("元素使", 2, "普通", "掌握四大元素，可召唤风雨雷电", 300, 800),
-            new ProfessionEntry("大魔导师", 3, "稀有", "魔力浩瀚，能施展禁咒级魔法", 800, 2000),
-            new ProfessionEntry("法神", 4, "史诗", "元素之主，一念可改写天地法则", 2000, 5000),
-            new ProfessionEntry("时空掌控者", 5, "传说", "超越时间空间，过去未来尽在掌控", 5000, 10000),
-
-            // ===== 刺客一脉 =====
-            new ProfessionEntry("潜行者", 1, "普通", "擅长隐匿，但还不够致命", 100, 300),
-            new ProfessionEntry("暗影猎手", 2, "普通", "如影随形，一击必杀的冷酷杀手", 300, 800),
-            new ProfessionEntry("夜刃大师", 3, "稀有", "黑夜即是主场，刀光过处无声无息", 800, 2000),
-            new ProfessionEntry("影舞者", 4, "史诗", "在刀尖上起舞，以暗影编织死亡之舞", 2000, 5000),
-            new ProfessionEntry("死亡领主", 5, "传说", "执掌生死，暗影中的至高主宰", 5000, 10000),
-
-            // ===== 丹道一脉 =====
-            new ProfessionEntry("采药童子", 1, "普通", "背着竹篓，在山间辨认各种灵草", 100, 300),
-            new ProfessionEntry("炼丹师", 2, "普通", "能炼制基础丹药，救死扶伤", 300, 800),
-            new ProfessionEntry("丹道大师", 3, "稀有", "丹火纯青，可炼九转金丹", 800, 2000),
-            new ProfessionEntry("丹圣", 4, "史诗", "一粒丹成，可起死回生，造化无穷", 2000, 5000),
-            new ProfessionEntry("造化丹尊", 5, "传说", "以天地为炉，炼万灵为丹，造化苍生", 5000, 10000),
-
-            // ===== 御兽一脉 =====
-            new ProfessionEntry("驯兽学徒", 1, "普通", "只能驯服鸡鸭鹅等普通禽兽", 100, 300),
-            new ProfessionEntry("御兽师", 2, "普通", "能与灵兽沟通，驾驭猛兽作战", 300, 800),
-            new ProfessionEntry("万兽之主", 3, "稀有", "万兽臣服，一声兽吼震天动地", 800, 2000),
-            new ProfessionEntry("龙骑统帅", 4, "史诗", "驾驭上古巨龙，俯瞰天下", 2000, 5000),
-            new ProfessionEntry("太古兽神", 5, "传说", "血脉返祖，化身太古凶兽，吞噬天地", 5000, 10000),
-
-            // ===== 佛修一脉 =====
-            new ProfessionEntry("沙弥", 1, "普通", "青灯古佛，诵读经文，感悟佛法", 100, 300),
-            new ProfessionEntry("苦行僧", 2, "普通", "以苦为乐，金身不灭，物理免疫", 300, 800),
-            new ProfessionEntry("罗汉", 3, "稀有", "十八罗汉转世，降妖伏魔", 800, 2000),
-            new ProfessionEntry("菩萨", 4, "史诗", "慈悲为怀，普度众生，佛法无边", 2000, 5000),
-            new ProfessionEntry("佛祖", 5, "传说", "如来神掌，五指山下定乾坤", 5000, 10000),
-
-            // ===== 符箓一脉 =====
-            new ProfessionEntry("画符小童", 1, "普通", "握着毛笔，照着师傅的样子画符", 100, 300),
-            new ProfessionEntry("符箓师", 2, "普通", "能绘制基础符箓，驱邪镇鬼", 300, 800),
-            new ProfessionEntry("天符大师", 3, "稀有", "笔落惊风雨，符成泣鬼神", 800, 2000),
-            new ProfessionEntry("符道圣手", 4, "史诗", "虚空画符，天地共鸣，万法不侵", 2000, 5000),
-            new ProfessionEntry("道祖", 5, "传说", "太上忘情，道法自然，一言可定天地规则", 5000, 10000),
-
-            // ===== 搞笑一脉 =====
-            new ProfessionEntry("摸鱼学徒", 1, "普通", "上班时间偷偷刷手机，技术有待提高", 100, 300),
-            new ProfessionEntry("躺平真人", 2, "普通", "只要我躺得够快，压力就追不上我", 300, 800),
-            new ProfessionEntry("社畜剑圣", 3, "稀有", "白天敲代码，晚上练剑法，时间管理大师", 800, 2000),
-            new ProfessionEntry("996符咒师", 4, "史诗", "用加班怨气驱动符箓，威力无穷", 2000, 5000),
-            new ProfessionEntry("带薪修仙者", 5, "传说", "上班时间偷偷修炼，下班直接飞升", 5000, 10000)
-    );
-
-    private final Map<String, ProfessionRecord> userProfessionCache = new ConcurrentHashMap<>();
+    private final Map<String, ProfessionResult> dailyCache = new ConcurrentHashMap<>();
     private final ImageRenderer renderer = ImageRenderer.getInstance();
 
     @Override
     public boolean match(JsonNode message) {
         if (!"group".equals(message.path("message_type").asText())) return false;
-        String rawMsg = message.path("raw_message").asText().trim();
-        return TRIGGERS.contains(rawMsg);
+        return TRIGGERS.contains(message.path("raw_message").asText().trim());
     }
 
     @Override
     public void handle(JsonNode message, Main bot) {
         String groupId = message.get("group_id").asText();
         long userId = message.get("user_id").asLong();
-        String cacheKey = groupId + ":" + userId;
-        String today = LocalDate.now().toString();
+        String cacheKey = groupId + ":" + userId + ":" + LocalDate.now();
 
-        ProfessionRecord record = userProfessionCache.get(cacheKey);
-        ProfessionEntry selected;
-        int combatPower;
-
-        if (record != null && today.equals(record.date) && record.date.equals(java.time.LocalDate.now().toString())) {
-            selected = record.professionEntry;
-            combatPower = record.combatPower;
-        } else {
-            // 使用确定性算法，和排行榜一致
-            selected = drawForUser(userId);
-            combatPower = getCombatPower(userId);
-            userProfessionCache.put(cacheKey, new ProfessionRecord(java.time.LocalDate.now().toString(), selected, combatPower));
+        ProfessionResult result = dailyCache.get(cacheKey);
+        if (result == null) {
+            result = drawForUser(userId, groupId);
+            dailyCache.put(cacheKey, result);
         }
 
-        // 准备数据并渲染
         ProfessionData data = new ProfessionData(
                 String.valueOf(userId),
-                selected.name,
-                selected.tier,
-                getTierName(selected.tier),
-                selected.description,
-                selected.rarity,
-                combatPower
+                result.name,
+                result.tier,
+                getTierName(result.tier),
+                result.description,
+                result.rarity,
+                result.combatPower
         );
-        
-        String base64 = renderer.renderToBase64(new ProfessionCardTemplate(), data);
 
+        String base64 = renderer.renderToBase64(new ProfessionCardTemplate(), data);
         if (base64 != null) {
             bot.sendGroupReply(Long.parseLong(groupId), "[CQ:image,file=base64://" + base64 + "]");
         } else {
-            // 降级处理
-            bot.sendGroupReply(Long.parseLong(groupId), 
-                    "✨ 你的天命职业是：【" + selected.rarity + "】" + 
-                    selected.name + "（" + getTierName(selected.tier) + "）战力值：" + combatPower);
+            bot.sendGroupReply(Long.parseLong(groupId),
+                    "✨ " + result.changeDesc + "\n【" + result.rarity + "】" +
+                    result.name + "（" + getTierName(result.tier) + "）战力：" + result.combatPower);
         }
 
-        logger.info("👤 群 {} 用户 {} 抽到职业: {} {}阶 [{}] 战力:{}", 
-                groupId, userId, selected.name, selected.tier, selected.rarity, combatPower);
+        logger.info("👤 群{} 用户{} 职业={} {}阶 [{}] 战力={} 运势={} {}",
+                groupId, userId, result.name, result.tier, result.rarity,
+                result.combatPower, result.todayLuck, result.changeDesc);
     }
+
+    // ===== 核心逻辑：运势驱动位阶波动 =====
+
+    /** 为用户抽取今日职业（有状态，运势驱动）。供 Handler、Tool、Rank 共用。 */
+    public static ProfessionResult drawForUser(long userId, String groupId) {
+        int luck = LuckUtil.getDailyLuck(userId);
+        UserProfession p;
+        try {
+            p = repo.findOrCreate(userId, groupId);
+        } catch (SQLException e) {
+            logger.error("加载职业失败 userId={}", userId, e);
+            // fallback：新号初始状态
+            return fallbackResult(userId, luck);
+        }
+
+        // 今日已抽取过，直接返回当前值，保证同一天内多次查询结果一致
+        if (p.getUpdatedAt() != null && p.getUpdatedAt().toLocalDate().equals(LocalDate.now())) {
+            String desc = descriptionFor(p.getProfessionPath(), p.getTier());
+            return new ProfessionResult(p.getProfessionName(), p.getTier(), p.getRarity(),
+                    desc, p.getCombatPower(), luck, "➡️ 今日已抽取");
+        }
+
+        int oldTier = p.getTier();
+        int newTier = computeNewTier(oldTier, luck, p.getStreakGood(), p.getStreakBad());
+
+        // 更新连击
+        int streakGood = newTier > oldTier ? p.getStreakGood() + 1 : 0;
+        int streakBad = newTier < oldTier ? p.getStreakBad() + 1 : 0;
+
+        // 脉系内的职业名
+        String name = UserProfessionRepository.ProfessionPath.entryName(p.getProfessionPath(), newTier);
+        String rarity = UserProfessionRepository.ProfessionPath.rarityForTier(newTier);
+        int power = UserProfessionRepository.ProfessionPath.randomPower(newTier, userId, groupId);
+        String description = descriptionFor(p.getProfessionPath(), newTier);
+
+        String changeDesc;
+        if (newTier > oldTier) {
+            changeDesc = streakGood >= 3 ? "🔥 三连升！运势爆棚！" : "⬆️ 运势旺盛，位阶提升！";
+        } else if (newTier < oldTier) {
+            changeDesc = streakBad >= 3 ? "💀 三连降…诸事不宜！" : "⬇️ 运势低迷，位阶滑落…";
+        } else {
+            changeDesc = "➡️ 今日运势平稳，修为巩固中";
+        }
+
+        // 持久化
+        p.setProfessionName(name);
+        p.setTier(newTier);
+        p.setRarity(rarity);
+        p.setCombatPower(power);
+        p.setStreakGood(streakGood);
+        p.setStreakBad(streakBad);
+        try {
+            repo.update(p);
+        } catch (SQLException e) {
+            logger.error("更新职业失败 userId={}", userId, e);
+        }
+
+        return new ProfessionResult(name, newTier, rarity, description, power, luck, changeDesc);
+    }
+
+    /** 今日战力（供 Rank 等外部调用） */
+    public static int getCombatPower(long userId, String groupId) {
+        return drawForUser(userId, groupId).combatPower;
+    }
+
+    // ===== 位阶波动算法 =====
 
     /**
-     * 计算战力值（在同阶范围内随机）
+     * 基于运势计算新位阶。
+     * 运势 >= 80: 升阶概率 40%（含 10% 跳2阶），不降
+     * 运势 >= 60: 升阶 20%，保持 75%，降阶 5%
+     * 运势 >= 40: 升阶 10%，保持 80%，降阶 10%
+     * 运势 >= 20: 升阶 5%，保持 75%，降阶 20%
+     * 运势 <  20: 升阶 0%，保持 60%，降阶 40%（含 10% 跳降2阶）
+     * 连续好运 3+ 天 → 升阶加权 +10%
+     * 连续霉运 3+ 天 → 降阶加权 +10%
      */
-    private int calculateCombatPower(ProfessionEntry entry) {
-        Random rand = new Random();
-        return entry.minPower + rand.nextInt(entry.maxPower - entry.minPower + 1);
+    static int computeNewTier(int currentTier, int luck, int streakGood, int streakBad) {
+        String today = LocalDate.now().toString();
+        long seed = SeedUtil.seed(String.valueOf(currentTier), "drift", today, String.valueOf(luck));
+        Random rng = new Random(seed);
+        int roll = rng.nextInt(100);
+
+        int upChance = 0, downChance = 0, jumpUp = 0, jumpDown = 0;
+
+        if (luck >= 80) {
+            upChance = 30; jumpUp = 10; downChance = 0;
+        } else if (luck >= 60) {
+            upChance = 15; jumpUp = 5; downChance = 5;
+        } else if (luck >= 40) {
+            upChance = 10; jumpUp = 0; downChance = 10;
+        } else if (luck >= 20) {
+            upChance = 5; jumpUp = 0; downChance = 20;
+        } else {
+            upChance = 0; jumpUp = 0; downChance = 30; jumpDown = 10;
+        }
+
+        // 连击加成
+        if (streakGood >= 3) { upChance += 10; }
+        if (streakBad >= 3) { downChance += 10; }
+
+        int stayChance = 100 - upChance - jumpUp - downChance - jumpDown;
+
+        int delta;
+        int sum = 0;
+        if (roll < (sum += jumpUp)) delta = 2;
+        else if (roll < (sum += upChance)) delta = 1;
+        else if (roll < (sum += stayChance)) delta = 0;
+        else if (roll < (sum += downChance)) delta = -1;
+        else if (roll < (sum += jumpDown)) delta = -2;
+        else delta = 0;
+
+        return Math.max(1, Math.min(5, currentTier + delta));
     }
 
-    /**
-     * 根据稀有度权重随机抽取（高阶更难抽）
-     */
-    private ProfessionEntry drawByWeightedRandom() {
-        Random rand = new Random();
-        double roll = rand.nextDouble() * 100;
+    // ===== 辅助 =====
 
-        double cumulative = 0;
-        cumulative += 3;  if (roll < cumulative) return drawByTier(5, rand);
-        cumulative += 10; if (roll < cumulative) return drawByTier(4, rand);
-        cumulative += 27; if (roll < cumulative) return drawByTier(3, rand);
-        cumulative += 60; return drawByTier(rand.nextInt(2) + 1, rand);
+    private static ProfessionResult fallbackResult(long userId, int luck) {
+        return new ProfessionResult("见习剑客", 1, "普通", "初握剑柄，剑道漫漫", 150, luck, "初次踏入修行之路");
     }
 
-    /** 确定性抽取（用户+日期种子），供排行榜使用 */
-    public static ProfessionEntry drawForUser(long userId) {
-        String today = java.time.LocalDate.now().toString();
-        int tierSeed = ("profession-" + userId + "-" + today).hashCode();
-        Random tierRand = new Random(tierSeed);
-        double roll = tierRand.nextDouble() * 100;
-
-        // 职业选取用独立种子，断开与 nextDouble() 的 LCG 序列相关性
-        int pickSeed = ("pick-" + userId + "-" + today).hashCode();
-        Random pickRand = new Random(pickSeed);
-
-        double cumulative = 0;
-        cumulative += 3;  if (roll < cumulative) return drawByTier(5, pickRand);
-        cumulative += 10; if (roll < cumulative) return drawByTier(4, pickRand);
-        cumulative += 27; if (roll < cumulative) return drawByTier(3, pickRand);
-        cumulative += 60; return drawByTier(tierRand.nextInt(2) + 1, pickRand);
+    private static String descriptionFor(String path, int tier) {
+        String[][] descs = {
+            {"初握剑柄，剑道漫漫", "御剑飞行，行走江湖", "剑心澄澈，万物为剑", "开宗立派，剑道巅峰", "万剑臣服，剑道至尊"},
+            {"初识元素，连火球术都未必能施展", "掌握四大元素，召唤风雨雷电", "魔力浩瀚，能施展禁咒", "元素之主，一念改天地", "超越时空，掌控一切"},
+            {"擅长隐匿，但还不够致命", "如影随形，一击必杀", "黑夜主场，刀光无声", "刀尖起舞，死亡之舞", "执掌生死，暗影主宰"},
+            {"背着竹篓，辨认灵草", "炼制基础丹药，救死扶伤", "丹火纯青，可炼九转金丹", "一粒丹成，起死回生", "以天地为炉，造化苍生"},
+            {"只能驯服鸡鸭鹅", "能与灵兽沟通，驾驭猛兽", "万兽臣服，震天动地", "驾驭上古巨龙", "化身太古凶兽"},
+            {"青灯古佛，诵读经文", "以苦为乐，金身不灭", "十八罗汉转世", "慈悲为怀，普度众生", "如来神掌定乾坤"},
+            {"握着毛笔，照着画符", "绘制基础符箓，驱邪镇鬼", "笔落惊风雨，符成泣鬼神", "虚空画符，天地共鸣", "太上忘情，道法自然"},
+            {"上班偷刷手机", "躺平就是胜利", "白天写码晚上练剑", "加班怨气驱动符箓", "上班修炼下班飞升"}
+        };
+        int pi = 0;
+        for (int i = 0; i < UserProfessionRepository.ProfessionPath.PATHS.length; i++) {
+            if (UserProfessionRepository.ProfessionPath.PATHS[i].equals(path)) { pi = i; break; }
+        }
+        return descs[pi][Math.min(tier, 5) - 1];
     }
 
-    /** 获取用户的今日战力（确定性） */
-    public static int getCombatPower(long userId) {
-        ProfessionEntry p = drawForUser(userId);
-        String today = java.time.LocalDate.now().toString();
-        long powerSeed = ("power-" + userId + "-" + today).hashCode() & 0xFFFFFFFFL;
-        Random rand = new Random(powerSeed);
-        return p.minPower + rand.nextInt(p.maxPower - p.minPower + 1);
-    }
-
-    /**
-     * 从指定位阶中随机抽取
-     */
-    private static ProfessionEntry drawByTier(int targetTier, Random rand) {
-        List<ProfessionEntry> tierProfessions = PROFESSIONS.stream()
-                .filter(p -> p.tier == targetTier)
-                .toList();
-        if (tierProfessions.isEmpty()) return PROFESSIONS.get(0);
-        return tierProfessions.get(rand.nextInt(tierProfessions.size()));
-    }
-
-    /**
-     * 位阶名称转换
-     */
-    private String getTierName(int tier) {
+    static String getTierName(int tier) {
         return switch (tier) {
             case 1 -> "一阶·初窥门径";
             case 2 -> "二阶·登堂入室";
@@ -212,36 +224,26 @@ public class DailyProfessionHandler implements MessageHandler {
         };
     }
 
-    private static class ProfessionRecord {
-        final String date;
-        final ProfessionEntry professionEntry;
-        final int combatPower;
+    // ===== 返回类型 =====
 
-        ProfessionRecord(String date, ProfessionEntry professionEntry, int combatPower) {
-            this.date = date;
-            this.professionEntry = professionEntry;
-            this.combatPower = combatPower;
-        }
-    }
-
-    /**
-     * 职业条目内部类
-     */
-    public static class ProfessionEntry {
+    public static class ProfessionResult {
         public final String name;
         public final int tier;
         public final String rarity;
         public final String description;
-        public final int minPower;
-        public final int maxPower;
+        public final int combatPower;
+        public final int todayLuck;
+        public final String changeDesc;
 
-        public ProfessionEntry(String name, int tier, String rarity, String description, int minPower, int maxPower) {
+        ProfessionResult(String name, int tier, String rarity, String description,
+                         int combatPower, int todayLuck, String changeDesc) {
             this.name = name;
             this.tier = tier;
             this.rarity = rarity;
             this.description = description;
-            this.minPower = minPower;
-            this.maxPower = maxPower;
+            this.combatPower = combatPower;
+            this.todayLuck = todayLuck;
+            this.changeDesc = changeDesc;
         }
     }
 }

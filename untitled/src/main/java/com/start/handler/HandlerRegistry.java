@@ -8,6 +8,7 @@ import com.start.service.AgentService;
 import com.start.service.BaiLianService;
 import com.start.service.GroupSerialExecutor;
 import com.start.service.MerchantApiService;
+import com.start.service.ServerAdminService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,7 +27,7 @@ public class HandlerRegistry {
     private final MerchantApiService merchantApiService;
     private final AgentService agentService;
 
-    public HandlerRegistry(AgentService agentService, BaiLianService baiLianService, GroupSerialExecutor groupExecutor, Main bot) {
+    public HandlerRegistry(AgentService agentService, BaiLianService baiLianService, GroupSerialExecutor groupExecutor, Main bot, ServerAdminService shellService) {
         this.agentService = agentService;
 
         // 远行商人：数据库 + API
@@ -38,7 +39,9 @@ public class HandlerRegistry {
         // 注入到 BaiLianService 供 Agent Tool 使用
         baiLianService.setMerchantApiService(merchantApiService);
         baiLianService.setMerchantRepo(merchantRepo);
+        baiLianService.setShellService(shellService);
 
+        handlers.add(new ShellHandler(shellService));
         handlers.add(new HelloHandler());
         handlers.add(new LuckHandler());
         handlers.add(new JokeHandler());

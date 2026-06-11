@@ -501,6 +501,17 @@ public class KeywordKnowledgeService {
         String blocked = checkBlacklist(pattern);
         if (blocked != null) return false; // 被黑名单拦截，返回 false 让调用方知道
         try (Connection conn = dataSource.getConnection()) {
+            // 先去重检查：pattern 已存在则跳过
+            String checkSql = "SELECT COUNT(*) FROM knowledge_base WHERE question_pattern = ?";
+            try (PreparedStatement ps = conn.prepareStatement(checkSql)) {
+                ps.setString(1, pattern);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next() && rs.getInt(1) > 0) {
+                        logger.debug("知识已存在，跳过: {}", pattern);
+                        return false;
+                    }
+                }
+            }
             String keywords = extractKeywordsForStorage(pattern, answer);
             String sql = "INSERT INTO knowledge_base " +
                     "(question_pattern, answer_template, category, priority, keywords) " +
@@ -571,10 +582,8 @@ public class KeywordKnowledgeService {
         };
 
         for (String[] s : seeds) {
-            try {
-                addKnowledge(s[0], s[1], s[2], Integer.parseInt(s[3]));
-            } catch (Exception e) {
-                // 已存在则跳过
+            boolean added = addKnowledge(s[0], s[1], s[2], Integer.parseInt(s[3]));
+            if (!added) {
                 logger.debug("种子知识已存在，跳过: {}", s[0]);
             }
         }

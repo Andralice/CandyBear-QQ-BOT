@@ -16,14 +16,14 @@ public class LearnKnowledgeTool implements Tool {
         this.knowledgeService = knowledgeService;
     }
 
-    private static final String ADMIN_QQ = "3524398813";
+    private static final String ADMIN_QQ = "0"; // 请在 application.properties 中设置 admin.qq
 
     @Override public String getName() { return "manage_knowledge"; }
 
     @Override
     public String getDescription() {
         return "管理知识库。action: add(写入), update(修改), delete(删除,自动加黑名单), blacklist_list(查看黑名单), blacklist_remove(移除黑名单,仅管理员)。" +
-               "update/delete/blacklist_remove 只有管理员(3524398813)可用。被黑名单拦截的内容无法写入。";
+               "update/delete/blacklist_remove 只有管理员可用。被黑名单拦截的内容无法写入。";
     }
 
     @Override

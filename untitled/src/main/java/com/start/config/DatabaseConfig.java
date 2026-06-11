@@ -203,6 +203,21 @@ public class DatabaseConfig {
                 "UNIQUE KEY uk_pattern (pattern(200))" +
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 
+            // 知识库主表
+            "CREATE TABLE IF NOT EXISTS knowledge_base (" +
+                "id BIGINT AUTO_INCREMENT PRIMARY KEY," +
+                "question_pattern TEXT NOT NULL," +
+                "answer_template TEXT NOT NULL," +
+                "category VARCHAR(100)," +
+                "priority INT DEFAULT 5," +
+                "keywords TEXT," +
+                "hit_count INT DEFAULT 0," +
+                "last_hit TIMESTAMP NULL," +
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
+                "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+                "UNIQUE KEY uk_question_pattern (question_pattern(300))" +
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
             // group_mood 表
             "CREATE TABLE IF NOT EXISTS group_mood (" +
                 "id BIGINT AUTO_INCREMENT PRIMARY KEY," +
@@ -293,6 +308,41 @@ public class DatabaseConfig {
                 "health_note TEXT DEFAULT '轻微心脏问题，不需每天上学'," +
                 "updated_at DATE NOT NULL," +
                 "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            // 周期任务（工具联动）：LLM 存入 prompt，调度线程到时取出发给 LLM 自由执行
+            "CREATE TABLE IF NOT EXISTS recurring_tasks (" +
+                "id BIGINT AUTO_INCREMENT PRIMARY KEY," +
+                "user_id VARCHAR(50) NOT NULL," +
+                "group_id VARCHAR(50)," +
+                "task_name VARCHAR(100)," +
+                "cron_expr VARCHAR(100) NOT NULL," +
+                "trigger_prompt TEXT NOT NULL," +
+                "expire_days INT DEFAULT 7," +
+                "enabled BOOLEAN DEFAULT TRUE," +
+                "last_fired_at TIMESTAMP NULL," +
+                "next_fire_at TIMESTAMP NULL," +
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
+                "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+                "INDEX idx_rt_next_fire (next_fire_at)," +
+                "INDEX idx_rt_user_group (user_id, group_id)" +
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            // 用户职业（有状态，运势驱动位阶波动）
+            "CREATE TABLE IF NOT EXISTS user_professions (" +
+                "id BIGINT AUTO_INCREMENT PRIMARY KEY," +
+                "user_id BIGINT NOT NULL," +
+                "group_id VARCHAR(50) NOT NULL," +
+                "profession_path VARCHAR(20) NOT NULL," +
+                "profession_name VARCHAR(50) NOT NULL," +
+                "tier INT DEFAULT 1," +
+                "rarity VARCHAR(10) DEFAULT '普通'," +
+                "combat_power INT DEFAULT 100," +
+                "streak_good INT DEFAULT 0," +
+                "streak_bad INT DEFAULT 0," +
+                "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
+                "UNIQUE KEY uk_user_group (user_id, group_id)" +
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
         };
 

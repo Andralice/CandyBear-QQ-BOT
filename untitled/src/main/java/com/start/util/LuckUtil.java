@@ -9,15 +9,15 @@ import java.util.*;
 public class LuckUtil {
 
     public static int getDailyLuck(long userId) {
-        String seedStr = userId + "-" + LocalDate.now();
-        return new Random(seedStr.hashCode()).nextInt(101);
+        long seed = SeedUtil.seed(String.valueOf(userId), "luck", LocalDate.now().toString());
+        return new Random(seed).nextInt(101);
     }
 
     /** 获取今日魔咒：宜做 + 忌做的事 */
     public static DailySpell getDailySpell(long userId) {
         int luck = getDailyLuck(userId);
-        String seedStr = userId + "-spell-" + LocalDate.now();
-        Random rng = new Random(seedStr.hashCode());
+        long seed = SeedUtil.seed(String.valueOf(userId), "spell", LocalDate.now().toString());
+        Random rng = new Random(seed);
 
         String[] doList = {"摸鱼", "表白", "氪金", "吃火锅", "睡懒觉", "打游戏",
                 "出门散步", "看书", "听歌", "喝奶茶", "追番", "写代码",

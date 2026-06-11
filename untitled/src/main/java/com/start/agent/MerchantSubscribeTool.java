@@ -26,7 +26,7 @@ public class MerchantSubscribeTool implements Tool {
     @Override
     public String getDescription() {
         return "管理远行商人订阅提醒。subscribe=订阅, unsubscribe=取消, view=查看当前群的订阅列表。" +
-               "用户没指定商品时默认「棱镜球,炫彩蛋,国王球」，并询问是否需要添加其他。用户没指定通知方式时默认 at。";
+               "用户没指定商品时默认「棱镜球,炫彩精灵蛋,国王球」，并询问是否需要添加其他。用户没指定通知方式时默认 at。";
     }
 
     @Override
@@ -35,7 +35,7 @@ public class MerchantSubscribeTool implements Tool {
             "action", Map.of("type", "string", "description", "subscribe / unsubscribe / view", "enum", List.of("subscribe", "unsubscribe", "view")),
             "group_id", Map.of("type", "number", "description", "群号。view 时不传表示查全部群"),
             "user_id", Map.of("type", "number", "description", "用户 QQ 号，subscribe/unsubscribe 时必填"),
-            "keywords", Map.of("type", "string", "description", "关注的关键词，逗号分隔。空字符串=全部商品。未指定默认「棱镜球,炫彩蛋,国王球」"),
+            "keywords", Map.of("type", "string", "description", "关注的关键词，逗号分隔。空字符串=全部商品。未指定默认「棱镜球,炫彩精灵蛋,国王球」"),
             "notify_type", Map.of("type", "string", "description", "通知方式：at（群内@）或 pm（私聊），默认 at", "enum", List.of("at", "pm"))
         ), "required", List.of("action"));
     }
@@ -87,7 +87,7 @@ public class MerchantSubscribeTool implements Tool {
 
         String keywords = String.valueOf(args.getOrDefault("keywords", ""));
         if (keywords.isEmpty()) {
-            keywords = "棱镜球,炫彩蛋,国王球";
+            keywords = "棱镜球,炫彩精灵蛋,国王球";
         }
         String notifyType = isPrivate ? "pm" : String.valueOf(args.getOrDefault("notify_type", "at"));
         boolean matchAll = "全部".equals(keywords.trim());

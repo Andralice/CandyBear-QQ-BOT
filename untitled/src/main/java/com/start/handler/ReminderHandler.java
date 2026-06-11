@@ -27,7 +27,7 @@ public class ReminderHandler implements MessageHandler {
      * 管理员 QQ 号白名单（建议后续从配置读取）
      */
     private static final Set<Long> ADMIN_USERS = Set.of(
-            3524398813L   // ← 请替换为你的 QQ 号
+            0L   // ← 请替换为你的 QQ 号，或通过 admin.qq 配置
     );
 
     /**
