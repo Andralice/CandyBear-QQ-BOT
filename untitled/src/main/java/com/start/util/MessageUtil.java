@@ -5,7 +5,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 
@@ -134,5 +137,63 @@ public class MessageUtil {
     public static boolean isAt(JsonNode messageNode, long targetQq) {
         List<Long> ats = extractAts(messageNode);
         return ats.contains(targetQq);
+    }
+
+    // ---- 图片 / 链接 / 分享提取 ----
+
+    /**
+     * 提取消息中的图片信息（url, file, file_size）
+     */
+    public static List<Map<String, String>> extractImages(JsonNode messageNode) {
+        List<Map<String, String>> images = new ArrayList<>();
+        if (messageNode == null || !messageNode.isArray()) return images;
+        for (JsonNode seg : messageNode) {
+            if (!"image".equals(seg.path("type").asText())) continue;
+            JsonNode data = seg.path("data");
+            if (data == null || !data.isObject()) continue;
+            String url = data.path("url").asText("");
+            if (url.isEmpty()) continue;
+            Map<String, String> info = new HashMap<>();
+            info.put("url", url);
+            info.put("file", data.path("file").asText(""));
+            info.put("file_size", data.path("file_size").asText(""));
+            images.add(info);
+        }
+        return images;
+    }
+
+    /**
+     * 从纯文本中提取所有 http/https URL
+     */
+    public static List<String> extractUrls(String text) {
+        List<String> urls = new ArrayList<>();
+        if (text == null || text.isEmpty()) return urls;
+        Pattern p = Pattern.compile("https?://[\\w\\-./?=&%+#;~@,:!$'()*]+[\\w/]", Pattern.CASE_INSENSITIVE);
+        Matcher m = p.matcher(text);
+        while (m.find()) {
+            urls.add(m.group());
+        }
+        return urls;
+    }
+
+    /**
+     * 提取消息中的分享卡片（type=="share"），含 url/title/content
+     */
+    public static List<Map<String, String>> extractShares(JsonNode messageNode) {
+        List<Map<String, String>> shares = new ArrayList<>();
+        if (messageNode == null || !messageNode.isArray()) return shares;
+        for (JsonNode seg : messageNode) {
+            if (!"share".equals(seg.path("type").asText())) continue;
+            JsonNode data = seg.path("data");
+            if (data == null || !data.isObject()) continue;
+            String url = data.path("url").asText("");
+            if (url.isEmpty()) continue;
+            Map<String, String> info = new HashMap<>();
+            info.put("url", url);
+            info.put("title", data.path("title").asText(""));
+            info.put("content", data.path("content").asText(""));
+            shares.add(info);
+        }
+        return shares;
     }
 }

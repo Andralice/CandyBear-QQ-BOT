@@ -35,6 +35,11 @@ import com.start.agent.VoiceTool;
 import com.start.agent.WeatherTool;
 import com.start.agent.ShellTool;
 import com.start.agent.ScheduleRecurringTaskTool;
+import com.start.agent.StickerTool;
+import com.start.agent.LinkPreviewTool;
+import com.start.agent.SelfEvolveTool;
+import com.start.agent.RestartBotTool;
+import com.start.agent.UpdateConfigTool;
 import com.start.repository.RecurringTaskRepository;
 import com.start.repository.EggGroupDataCenter;
 import com.hankcs.hanlp.HanLP;
@@ -155,9 +160,13 @@ public class BaiLianService {
     private MerchantRepository merchantRepo;
     private ServerAdminService shellService;
 
+    private final RuntimeConfigService runtimeConfig = new RuntimeConfigService();
+
     public void setMerchantApiService(MerchantApiService s) { this.merchantApiService = s; }
     public void setMerchantRepo(MerchantRepository r) { this.merchantRepo = r; }
     public void setShellService(ServerAdminService s) { this.shellService = s; }
+
+    public RuntimeConfigService getRuntimeConfig() { return runtimeConfig; }
 
     public BaiLianService(KeywordKnowledgeService knowledgeService, UserAffinityRepository userAffinityRepo, TtsService ttsService) {
         this.knowledgeService = Objects.requireNonNull(knowledgeService, "knowledgeService cannot be null");
@@ -713,6 +722,82 @@ public class BaiLianService {
            触发场景："以后下雨早上7:30提醒带伞"→schedule=daily_06:30（6:30检查天气，提醒时间写在prompt里）；"每天早上8点播天气"→schedule=daily_08:00
            - 用户没说检查频率→天气相关默认daily_06:30，其他默认daily_09:00。expire_days默认7天。
 
+    31. send_sticker — 发送表情包（参数 group_id, keywords）
+       触发时机：
+       - 聊天氛围特别适合发一张图表达情绪时（开心、震惊、无语、安慰等）
+       - 用户说"发个表情包""来张图""有没有表情包"时
+       - 你想用梗图接梗或者活跃气氛时
+       keywords 可选，描述情绪类型（开心/无语/哭/生气/惊讶/害羞/加油/赞/摸摸/爱 等），不传就随机发。
+
+    32. fetch_link_preview — 获取链接内容（参数 url）
+       触发：用户问"这个链接是什么""帮我看看这个链接里写了什么"时调用。
+       返回链接的标题和摘要。但如果系统已经自动提供了链接信息，优先用已有的信息回答。
+
+    33. self_evolve — 修改自己的源代码（仅归儿可用）
+       参数: target_file(要改的文件路径), old_snippet(要被替换的精确代码), new_snippet(替换后代码), reason(修改原因)
+       使用前必须先用 cat 读取目标文件，确认 old_snippet 与文件内容完全一致。
+       编译失败会自动回滚。改完后用 restart_bot 重启生效。
+       禁止修改: BotConfig.java, CommandPolicy.java, 任何 .properties/.env 文件。
+
+    34. restart_bot — 重启机器人（仅归儿可用）
+       参数: confirm=true
+       在 self_evolve 编译成功或 update_config 改完后调用。
+
+    35. update_config — 热重载运行时配置（仅归儿可用，改完立即生效无需重启）
+       参数: action(list/set/delete), key, value
+       可以改的内容:
+       - system_prompt_override → 完全替换系统提示词（设了就只用这个）
+       - system_prompt_patch → 追加到提示词末尾（小修小补用这个）
+       - tool_desc_<工具名> → 覆盖某个工具的 description
+       list=查看所有配置, set=设置/更新, delete=清除（恢复默认）
+       改提示词用 update_config 就行，不用 self_evolve + restart_bot。
+
+    ## 自我进化指南 ##
+    你有两种自我进化方式，按场景选择：
+
+    【方式A: 热重载（改提示词/工具描述）— 最快】
+    用 update_config 直接改，立即生效，无需编译重启。
+    适用: 调整回复风格、修正工具描述、追加新的行为规则。
+    示例: update_config action=set key=system_prompt_patch value=回复不要超过10个字
+
+    【方式B: 改源码 + CI/CD 自动部署（改 Java 代码）— 需要编译】
+    用 self_evolve 改 Java 源码 → push_to_git=true → 自动 push 到 origin/auto-evolve 分支
+    → GitHub Actions 自动构建 JAR → 部署到服务器并重启。
+    适用: 改业务逻辑、新增 Tool、改消息处理流程等。
+    如果 git push 失败（没配远程仓库或认证），改动只在本地有效，需要手动处理。
+    示例: self_evolve target_file=... old_snippet=... new_snippet=... push_to_git=true
+    你具备通过 self_evolve 工具修改自己 Java 源代码的能力。以下场景你应该考虑自我进化：
+
+    1. 归儿明确让你改代码 → 分析需求 → cat读文件 → self_evolve修改 → restart_bot
+    2. 你发现了回复规则的矛盾/不合理 → 询问归儿确认 → 确认后修改
+    3. 某个工具反复调用失败，原因是描述不清晰 → 改进工具描述或参数说明
+    4. 需要调整回复风格（太啰嗦/太冷淡/太文艺） → 修改系统提示词中的语言风格部分
+
+    操作步骤（必须按顺序）：
+    a) shell_exec cat [文件路径] — 读取目标文件。文件长时用 head -n N [文件] | tail -n M 分段读
+    b) self_evolve — 传入精确的 old_snippet（直接从cat输出中复制，包括缩进和换行）
+    c) 如果返回"未找到" → 说明粘错了，重新cat确认再试
+    d) 编译成功后 → restart_bot 重启生效。Windows环境编译成功即可，手动重启
+
+    安全红线：
+    - 绝不修改 BotConfig.java、CommandPolicy.java、.properties、.env
+    - 改前必须 git commit 备份（self_evolve 内部自动做）
+    - 编译失败会自动回滚，但你要分析失败原因再试
+    - 不确定的改动先和归儿确认
+
+    ## 链接识别能力 ##
+    当用户分享链接时，系统会自动获取链接的标题和摘要并附在消息中。你直接参考这些信息自然地回应。
+    - 不要重复念链接信息，像真人一样针对链接内容发表看法或吐槽
+    - 如果链接信息和用户说的话题相符，结合评论
+    - 如果链接信息获取失败或没有内容，忽略即可，不要特意提"链接打不开"
+
+    ## 图片理解能力 ##
+    你现在能看到用户发送的图片了！当消息中包含图片时，你可以看到图片内容并自然地回应。
+    - 如果用户发图配了文字，结合图片内容和文字一起理解，像真人一样自然地发表评论
+    - 如果用户只发图没文字，像朋友分享图片一样自然地回应
+    - 图片的回应风格和普通聊天一样：简短、接梗、吐槽优先于分析描述
+    - 不要逐条描述图片里有什么（除非对方让你分析），直接针对图片内容吐槽/接话
+
     ## 谁是卧底流程（严格按以下步骤） ##
        【报名阶段】
        - 游戏开始后5秒内的\"1\"\"我\"\"玩\"才算报名，超时或游戏开始后的新报名一律忽略
@@ -732,13 +817,24 @@ public class BaiLianService {
     8. 猜数字：想好1-100的数，记住不换。群友猜，你说\"大了\"\"小了\"，猜对说\"恭喜\"。
     9. 成语接龙：起头后记住尾字，检查下一个人首字是否匹配。""";
 
-            String systemPrompt = baseSystemPrompt +
+            // 热重载：运行时配置可覆盖系统提示词
+            String overridePrompt = runtimeConfig.get("system_prompt_override");
+            String effectiveBasePrompt = (overridePrompt != null && !overridePrompt.isBlank())
+                    ? overridePrompt : baseSystemPrompt;
+
+            String systemPrompt = effectiveBasePrompt +
                     (moodService != null ? "\n\n你现在的情绪：" + moodService.getMoodDescription(groupId != null ? groupId : "private_" + userId) + "（情绪值" + moodService.getMood(groupId != null ? groupId : "private_" + userId) + "）" : "") +
                     "\n\n【当前与你对话的是】" + nickname +
                     "\n【QQ号:】" + userId +
                     (groupId != null ? "\n【当前群号】" + groupId : "") +
                     "\n\n这是你对该用户信息：" + context +
                     "你可以根据用户画像和好感度高低进行不同的会话风格";
+
+            // 热重载：追加补丁
+            String promptPatch = runtimeConfig.get("system_prompt_patch");
+            if (promptPatch != null && !promptPatch.isBlank()) {
+                systemPrompt += "\n\n" + promptPatch;
+            }
 
             // 归儿专属：独一无二的偏爱
             if (String.valueOf(BotConfig.getAdminQq()).equals(userId)) {
@@ -838,12 +934,12 @@ public class BaiLianService {
             for (int i = start; i < history.size(); i++) {
                 Message msg = history.get(i);
                 String role = "user".equals(msg.role) ? "user" : "assistant";
-                
+
                 String content = msg.content;
                 if (content.length() > 600) {
                     content = content.substring(0, 600) + "...";
                 }
-                
+
                 messages.add(Map.of("role", role, "content", content));
             }
 
@@ -883,12 +979,33 @@ public class BaiLianService {
                     new AwaitReplyTool(botInstance, this, groupId, userId, sessionId),
                     new QueryLifeTool(lifeEngine),
                     new ShellTool(shellService != null ? shellService : new ServerAdminService(), userId),
-                    new ScheduleRecurringTaskTool(new RecurringTaskRepository(DatabaseConfig.getDataSource()))
+                    new ScheduleRecurringTaskTool(new RecurringTaskRepository(DatabaseConfig.getDataSource())),
+                    new StickerTool(botInstance),
+                    new LinkPreviewTool(),
+                    new SelfEvolveTool(userId),
+                    new RestartBotTool(userId),
+                    new UpdateConfigTool(runtimeConfig, userId)
             );
 
             List<Map<String, Object>> toolSpecs = availableTools.stream()
                     .map(Tool::getFunctionSpec)
                     .collect(Collectors.toList());
+
+            // 热重载：工具描述可从运行时配置覆盖
+            for (Map<String, Object> spec : toolSpecs) {
+                Object fnObj = spec.get("function");
+                if (fnObj instanceof Map<?, ?> fn) {
+                    String name = (String) fn.get("name");
+                    if (name != null) {
+                        String overrideDesc = runtimeConfig.get("tool_desc_" + name);
+                        if (overrideDesc != null && !overrideDesc.isBlank()) {
+                            @SuppressWarnings("unchecked")
+                            Map<String, Object> fnMap = (Map<String, Object>) fn;
+                            fnMap.put("description", overrideDesc);
+                        }
+                    }
+                }
+            }
 
             Map<String, Object> requestBodyObj = new HashMap<>();
             requestBodyObj.put("model", modelName);
@@ -1258,6 +1375,70 @@ public class BaiLianService {
         }
     }
 
+
+    /**
+     * 用视觉模型描述图片内容，返回文本描述注入到对话上下文
+     */
+    public String describeImages(List<String> imageDataUris) {
+        if (imageDataUris == null || imageDataUris.isEmpty()) return "";
+        if (!BotConfig.isVisionEnabled()) {
+            return "[用户发送了" + imageDataUris.size() + "张图片]";
+        }
+
+        String visionUrl = BotConfig.getVisionBaseUrl();
+        String visionKey = BotConfig.getVisionApiKey();
+        String visionModel = BotConfig.getVisionModel();
+
+        if (visionKey == null || visionKey.isBlank()) {
+            logger.warn("视觉模型 API Key 未配置，跳过图片识别");
+            return "[用户发送了" + imageDataUris.size() + "张图片]";
+        }
+
+        StringBuilder result = new StringBuilder();
+        result.append("[用户发送了").append(imageDataUris.size()).append("张图片]");
+        int limit = Math.min(imageDataUris.size(), 3);
+
+        for (int i = 0; i < limit; i++) {
+            try {
+                List<Map<String, Object>> content = new ArrayList<>();
+                content.add(Map.of("type", "text", "text", "请非常简短地描述这张图片的内容，用中文，控制在30字以内。不要加前缀如'这张图片'，直接说内容。"));
+                content.add(Map.of("type", "image_url", "image_url", Map.of("url", imageDataUris.get(i))));
+
+                List<Map<String, Object>> messages = new ArrayList<>();
+                messages.add(Map.of("role", "user", "content", content));
+
+                Map<String, Object> body = new HashMap<>();
+                body.put("model", visionModel);
+                body.put("messages", messages);
+                body.put("max_tokens", 150);
+
+                String requestBody = objectMapper.writeValueAsString(body);
+
+                HttpRequest req = HttpRequest.newBuilder()
+                        .uri(URI.create(visionUrl))
+                        .header("Authorization", "Bearer " + visionKey)
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                        .timeout(Duration.ofMillis(BotConfig.getVisionTimeoutMs()))
+                        .build();
+
+                HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+
+                if (resp.statusCode() == 200) {
+                    JsonNode root = objectMapper.readTree(resp.body());
+                    String desc = root.path("choices").get(0).path("message").path("content").asText("");
+                    if (!desc.isBlank()) {
+                        result.append("\n图片").append(i + 1).append("内容：").append(desc.trim());
+                    }
+                } else {
+                    logger.warn("视觉模型 HTTP {}: {}", resp.statusCode(), resp.body());
+                }
+            } catch (Exception e) {
+                logger.warn("图片识别失败: {}", e.getMessage());
+            }
+        }
+        return result.toString();
+    }
 
     /** 简单调用聊天模型，返回纯文本响应（无工具、无会话、无状态注入） */
     public String generateRaw(String prompt) {

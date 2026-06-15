@@ -1,0 +1,53 @@
+name: Auto Deploy
+
+on:
+  push:
+    branches: [auto-evolve]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Maven Package
+        run: mvn package -DskipTests -q
+
+      - name: Deploy to Server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: root
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          source: "target/untitled-1.0-SNAPSHOT.jar"
+          target: "/opt/qq-bot/"
+          strip_components: 1
+          overwrite: true
+
+      - name: Restart Bot
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: root
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd /opt/qq-bot
+            cp untitled-1.0-SNAPSHOT.jar untitled-1.0-SNAPSHOT.jar.bak.$(date +%Y%m%d_%H%M%S)
+            if screen -list | grep -q "qq-bot"; then
+              screen -S qq-bot -X quit
+              sleep 2
+            fi
+            pkill -f untitled-1.0-SNAPSHOT.jar || true
+            sleep 1
+            source .env 2>/dev/null || true
+            screen -S qq-bot -d -m java -Xms256m -Xmx768m -jar untitled-1.0-SNAPSHOT.jar
+            sleep 2
+            screen -list | grep qq-bot && echo "DEPLOY OK" || echo "DEPLOY FAILED"

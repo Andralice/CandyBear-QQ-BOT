@@ -344,6 +344,14 @@ public class DatabaseConfig {
                 "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
                 "UNIQUE KEY uk_user_group (user_id, group_id)" +
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            // 运行时配置（热重载提示词、工具描述等，无需重启）
+            "CREATE TABLE IF NOT EXISTS bot_config (" +
+                "config_key VARCHAR(128) PRIMARY KEY," +
+                "config_value TEXT NOT NULL," +
+                "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+                "updated_by VARCHAR(32) DEFAULT 'system'" +
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
         };
 
         for (String sql : migrations) {

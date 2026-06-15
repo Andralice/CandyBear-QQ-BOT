@@ -41,6 +41,12 @@ public class BotConfig {
     private static int agentTimeoutMs;
     private static int agentMaxRetries;
 
+    private static String visionApiKey;
+    private static String visionBaseUrl;
+    private static String visionModel;
+    private static int visionTimeoutMs;
+    private static boolean visionEnabled;
+
     private static String ttsBaseUrl;
     private static String ttsDefaultVoice;
     private static String ttsAudioFormat;
@@ -100,6 +106,12 @@ public class BotConfig {
             agentModel = resolve(props.getProperty("agent.model", "gemini-3-flash").trim());
             agentTimeoutMs = parseInt(resolve(props.getProperty("agent.timeout-ms", "90000")), 90000);
             agentMaxRetries = parseInt(resolve(props.getProperty("agent.max-retries", "2")), 2);
+
+            visionEnabled = Boolean.parseBoolean(resolve(props.getProperty("vision.enabled", "true")));
+            visionApiKey = resolve(props.getProperty("vision.api-key", baiLianApiKey).trim());
+            visionBaseUrl = resolve(props.getProperty("vision.base-url", baiLianBaseUrl).trim());
+            visionModel = resolve(props.getProperty("vision.model", "qwen-vl-max").trim());
+            visionTimeoutMs = parseInt(resolve(props.getProperty("vision.timeout-ms", "60000")), 60000);
 
             ttsBaseUrl = resolve(props.getProperty("tts.base-url", "http://127.0.0.1:8765").trim());
             ttsDefaultVoice = resolve(props.getProperty("tts.default-voice", "tangguoxiong").trim());
@@ -277,6 +289,12 @@ public class BotConfig {
     public static int getAgentMaxRetries() {
         return agentMaxRetries;
     }
+
+    public static boolean isVisionEnabled() { return visionEnabled; }
+    public static String getVisionApiKey() { return visionApiKey; }
+    public static String getVisionBaseUrl() { return visionBaseUrl; }
+    public static String getVisionModel() { return visionModel; }
+    public static int getVisionTimeoutMs() { return visionTimeoutMs; }
 
     public static String getTtsBaseUrl() {
         return ttsBaseUrl;

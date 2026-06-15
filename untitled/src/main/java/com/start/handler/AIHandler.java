@@ -8,12 +8,16 @@ import com.start.Main;
 import com.start.config.BotConfig;
 import com.start.service.BaiLianService;
 import com.start.service.GroupSerialExecutor;
+import com.start.service.LinkPreviewService;
 import com.start.util.MessageUtil;
+import com.start.vision.ImageUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
@@ -76,9 +80,22 @@ public class AIHandler implements MessageHandler {
             senderNick = msg.path("sender").path("nickname").asText();
         }
 
+        // 提取图片信息（只在 WebSocket 线程提取 URL，下载在 executor 内完成）
+        List<Map<String, String>> imageInfos = MessageUtil.extractImages(msg.path("message"));
+
+        // 提取链接（分享卡片 + 纯文本 URL）
+        List<String> linksToFetch = new ArrayList<>();
+        for (Map<String, String> share : MessageUtil.extractShares(msg.path("message"))) {
+            String url = share.get("url");
+            if (url != null && !url.isEmpty()) {
+                linksToFetch.add(url);
+            }
+        }
+        linksToFetch.addAll(MessageUtil.extractUrls(rawMessage));
+
         // 私聊
         if ("private".equals(messageType)) {
-            handlePrivateMessage(bot, msg, userId, rawMessage, plainText, nickname);
+            handlePrivateMessage(bot, msg, userId, rawMessage, plainText, nickname, imageInfos, linksToFetch);
             return;
         }
 
@@ -95,7 +112,7 @@ public class AIHandler implements MessageHandler {
         // 明确触发（#ai / !ai / @）
         if (isExplicitTrigger(msg, rawMessage)) {
             aiService.cancelPendingAwait(gid, String.valueOf(userId));
-            handleExplicitAIRequest(bot, msg, userId, groupId, rawMessage, plainText, nickname);
+            handleExplicitAIRequest(bot, msg, userId, groupId, rawMessage, plainText, nickname, imageInfos, linksToFetch);
             return;
         }
 
@@ -121,7 +138,13 @@ public class AIHandler implements MessageHandler {
             BaiLianService.Reaction r = reaction.get();
             if (r.needsAI) {
                 groupExecutor.execute(gid, () -> {
-                    String reply = aiService.generate("group_" + groupId + "_" + userId, String.valueOf(userId), r.prompt, gid, String.valueOf(nickname), ats);
+                    List<String> imageDataUris = downloadImages(imageInfos);
+                    String imageDesc = aiService.describeImages(imageDataUris);
+                    String linkContext = buildLinkContext(linksToFetch);
+                    String fullPrompt = r.prompt;
+                    if (!imageDesc.isEmpty()) fullPrompt = fullPrompt + "\n\n" + imageDesc;
+                    if (!linkContext.isEmpty()) fullPrompt = fullPrompt + "\n\n" + linkContext;
+                    String reply = aiService.generate("group_" + groupId + "_" + userId, String.valueOf(userId), fullPrompt, gid, String.valueOf(nickname), ats);
                     if (!reply.trim().isEmpty() && !reply.equals("抱歉，刚才走神了...") && !reply.equals("嗯...再问一次吧")) {
                         sendSplitGroupReplies(bot, groupId, reply);
                         aiService.recordUserInteraction(gid, String.valueOf(userId), reply);
@@ -154,7 +177,7 @@ public class AIHandler implements MessageHandler {
         return "";
     }
 
-    private void handlePrivateMessage(Main bot, JsonNode msg, long userId, String rawMessage, String plainText, String nickname) {
+    private void handlePrivateMessage(Main bot, JsonNode msg, long userId, String rawMessage, String plainText, String nickname, List<Map<String, String>> imageInfos, List<String> linksToFetch) {
         String prompt = buildReplyContext(msg, bot) + extractPrompt(rawMessage, plainText);
         String sessionId = "private_" + userId;
 
@@ -169,10 +192,10 @@ public class AIHandler implements MessageHandler {
             return;
         }
 
-        replyWithAI(bot, msg, sessionId, String.valueOf(userId), prompt, null, nickname, Collections.emptyList());
+        replyWithAI(bot, msg, sessionId, String.valueOf(userId), prompt, null, nickname, Collections.emptyList(), imageInfos, linksToFetch);
     }
 
-    private void handleExplicitAIRequest(Main bot, JsonNode msg, long userId, long groupId, String rawMessage, String plainText, String nickname) {
+    private void handleExplicitAIRequest(Main bot, JsonNode msg, long userId, long groupId, String rawMessage, String plainText, String nickname, List<Map<String, String>> imageInfos, List<String> linksToFetch) {
         String replyCtx = buildReplyContext(msg, bot);
         String prompt = replyCtx.isEmpty() ? extractPrompt(rawMessage, plainText) : replyCtx + extractPrompt(rawMessage, plainText);
         String sessionId = "group_" + groupId + "_" + userId;
@@ -189,7 +212,7 @@ public class AIHandler implements MessageHandler {
         }
 
         List<Long> ats = MessageUtil.extractAts(msg.path("message"));
-        replyWithAI(bot, msg, sessionId, String.valueOf(userId), prompt, String.valueOf(groupId), nickname, ats);
+        replyWithAI(bot, msg, sessionId, String.valueOf(userId), prompt, String.valueOf(groupId), nickname, ats, imageInfos, linksToFetch);
     }
 
     private boolean isExplicitTrigger(JsonNode msg, String rawMessage) {
@@ -210,9 +233,15 @@ public class AIHandler implements MessageHandler {
         return "#clear".equals(prompt) || "!clear".equals(prompt) || "！clear".equals(prompt);
     }
 
-    private void replyWithAI(Main bot, JsonNode originalMsg, String sessionId, String userId, String prompt, String groupId, String nickname, List<Long> atUserIds) {
+    private void replyWithAI(Main bot, JsonNode originalMsg, String sessionId, String userId, String prompt, String groupId, String nickname, List<Long> atUserIds, List<Map<String, String>> imageInfos, List<String> linksToFetch) {
         groupExecutor.execute(groupId, () -> {
-            String reply = aiService.generate(sessionId, userId, prompt, groupId, nickname, atUserIds);
+            List<String> imageDataUris = downloadImages(imageInfos);
+            String imageDesc = aiService.describeImages(imageDataUris);
+            String linkContext = buildLinkContext(linksToFetch);
+            String fullPrompt = prompt;
+            if (!imageDesc.isEmpty()) fullPrompt = fullPrompt + "\n\n" + imageDesc;
+            if (!linkContext.isEmpty()) fullPrompt = fullPrompt + "\n\n" + linkContext;
+            String reply = aiService.generate(sessionId, userId, fullPrompt, groupId, nickname, atUserIds);
 
             if (reply == null || reply.trim().isEmpty()) {
                 bot.sendReply(originalMsg, "稍等一下，我在走神...");
@@ -252,6 +281,35 @@ public class AIHandler implements MessageHandler {
 
             bot.sendGroupReply(groupId, msg);
         }
+    }
+
+    /** 获取链接预览上下文，失败则返回空 */
+    private String buildLinkContext(List<String> linksToFetch) {
+        if (linksToFetch == null || linksToFetch.isEmpty()) return "";
+        LinkPreviewService lps = new LinkPreviewService();
+        StringBuilder sb = new StringBuilder();
+        int limit = Math.min(linksToFetch.size(), 3);
+        for (int i = 0; i < limit; i++) {
+            String preview = lps.fetchPreview(linksToFetch.get(i));
+            if (preview != null && !preview.isEmpty()) {
+                sb.append(preview).append("\n");
+            }
+        }
+        return sb.toString().trim();
+    }
+
+    /** 下载图片并转为 base64 data URI，失败则跳过 */
+    private List<String> downloadImages(List<Map<String, String>> imageInfos) {
+        List<String> uris = new ArrayList<>();
+        if (imageInfos == null || imageInfos.isEmpty()) return uris;
+        int limit = Math.min(imageInfos.size(), 3);
+        for (int i = 0; i < limit; i++) {
+            String url = imageInfos.get(i).get("url");
+            if (url == null || url.isEmpty()) continue;
+            String dataUri = ImageUtils.downloadImageAsBase64DataUri(url);
+            if (dataUri != null) uris.add(dataUri);
+        }
+        return uris;
     }
 
     /** 私聊同样拆分，避免一大段砸过去 */

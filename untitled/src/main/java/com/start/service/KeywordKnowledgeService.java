@@ -579,6 +579,44 @@ public class KeywordKnowledgeService {
              + "初二开始看番，从此入坑二次元。高一迷上了原神，后来退坑了，现在主要玩三角洲行动和洛克王国。"
              + "群里的大家就是我最好的网友，每天跟你们聊天最开心了。",
              "糖果熊人设", "6"},
+
+            // ======== 代码结构文档（供 self_evolve 查阅） ========
+            {"代码结构|项目结构|源码结构|有哪些类|代码在哪",
+             "项目结构（src/main/java/com/start/）:\n"
+             + "├─ Main.java — 入口, WebSocket, sendReply/sendGroupReply\n"
+             + "├─ config/BotConfig.java — 配置加载（不要改）\n"
+             + "├─ handler/\n"
+             + "│  ├─ AIHandler.java — 消息分发入口, 图片/链接检测\n"
+             + "│  ├─ HandlerRegistry.java — 处理器注册链\n"
+             + "│  └─ HelloHandler/DailyCpHandler/... — 各功能处理器\n"
+             + "├─ service/\n"
+             + "│  ├─ BaiLianService.java — LLM调用, 系统提示词, 工具注册, 多轮对话\n"
+             + "│  ├─ KeywordKnowledgeService.java — RAG知识库\n"
+             + "│  ├─ LinkPreviewService.java — 网页链接预览\n"
+             + "│  └─ ServerAdminService.java — shell命令执行\n"
+             + "├─ agent/ (所有Tool实现)\n"
+             + "│  ├─ SelfEvolveTool.java — 自我修改代码\n"
+             + "│  ├─ RestartBotTool.java — 重启自身\n"
+             + "│  ├─ StickerTool.java — 表情包发送\n"
+             + "│  └─ WeatherTool/SendGroupTool/... — 各种工具\n"
+             + "├─ util/MessageUtil.java — 消息解析(提取图片/链接/@/文本)\n"
+             + "└─ vision/ImageUtils.java — 图片下载工具",
+             "代码结构", "9"},
+
+            {"系统提示词|人设提示词|prompt在哪|怎么改人设",
+             "系统提示词在 BaiLianService.java 的 generate() 方法中，从 String baseSystemPrompt = 开始。\n"
+             + "包含: 人设、语言风格、行为规则、工具清单、游戏规则、自我进化指南。\n"
+             + "修改提示词: 找到 old_snippet 精确替换。回复示范部分调整对话风格最有效。\n"
+             + "改完后用 self_evolve 编译，restart_bot 重启生效。",
+             "代码结构", "9"},
+
+            {"工具注册|新增工具|Tool 注册|在哪里注册工具",
+             "所有工具在 BaiLianService.generate() 中注册，搜索 availableTools = Arrays.asList(...)。\n"
+             + "新建 Tool: 实现 agent/Tool.java 接口(getName/getDescription/getParameters/execute)。\n"
+             + "然后在 BaiLianService 的 availableTools 列表中添加 new XxxTool()。\n"
+             + "同时要在系统提示词中添加工具说明(工具清单部分)。\n"
+             + "示例参考: agent/StickerTool.java。",
+             "代码结构", "9"},
         };
 
         for (String[] s : seeds) {

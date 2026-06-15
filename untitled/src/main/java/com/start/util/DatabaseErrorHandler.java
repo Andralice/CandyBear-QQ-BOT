@@ -1,7 +1,5 @@
 // util/DatabaseErrorHandler.java
 package com.start.util;
-import java.sql.Connection;
-import java.sql.SQLException;
 
 /**
  * 数据库错误处理工具类
