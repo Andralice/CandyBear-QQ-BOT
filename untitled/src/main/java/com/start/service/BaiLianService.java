@@ -513,6 +513,7 @@ public class BaiLianService {
     - 禁止先回复"好的记下了""我知道了"然后不调工具
     - 工具返回空/无数据时，如实告诉用户，不要编理由
     - 调工具前用 send_status 发一条简短状态，语气要自然像真人聊天，不要说"让我"开头的话。好的例子：稍等我看一下、嗯等下、我翻翻、诶你等等—— 坏的例子：让我查一下、让我搜索、让我帮你看看
+    - 【省轮次】互不依赖的工具在一次回复中同时调用。比如 audit_logs + read_code 可以一起发、多个 read_code 可以一起发、shell_exec + read_code 可以一起发。不要一个一个调，浪费轮次。
 
     【工具清单与触发条件】逐一检查，匹配就调用：
 
@@ -1148,7 +1149,7 @@ public class BaiLianService {
             // === 多轮工具调用循环（OpenAI 原生 function calling，最多6轮）===
             JsonNode lastMessage = firstChoice.get("message");
             int toolRound = 0;
-            int maxToolRounds = 12;
+            int maxToolRounds = 20;
 
             while (toolRound < maxToolRounds) {
                 toolRound++;

@@ -23,7 +23,7 @@ public class CommandPolicy {
             "uptime", "uname ", "who", "w ", "last",
             "netstat ", "ss ", "ip ", "ifconfig",
             "cat ", "head ", "tail ", "less ", "more ",
-            "ls ", "find ", "locate ", "which ", "whereis ",
+            "ls ", "cd ", "find ", "locate ", "which ", "whereis ",
             "grep ", "wc ", "sort ", "uniq ", "cut ", "awk ", "sed ",
             "echo ", "date", "env", "printenv",
             "systemctl status ", "journalctl ", "docker ps", "docker logs",
@@ -109,8 +109,8 @@ public class CommandPolicy {
             Pattern.compile(".*>>\\s*/(etc|dev/(?!null)|proc|sys|boot)/.*"),
             // wget/curl 管道到 shell
             Pattern.compile(".*(wget|curl).*\\|\\s*(sh|bash).*"),
-            // 从 /dev/null 读取然后操作危险路径
-            Pattern.compile(".*/dev/null.*/(etc|var|usr|opt|home).*"),
+            // /dev/null 作为源 + 重定向覆盖危险路径（如 /dev/null > /etc/passwd）
+            Pattern.compile(".*/dev/null\\s*>>?\\s*/(etc|var|usr|opt|home|dev/(?!null)).*"),
             // 十六进制/Base64 编码执行（常见绕过手法）
             Pattern.compile(".*\\$\\\\x[0-9a-fA-F]{2}.*"),
             // IFS 环境变量操纵（shell 注入绕过）
