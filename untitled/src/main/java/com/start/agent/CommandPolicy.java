@@ -28,8 +28,9 @@ public class CommandPolicy {
             "echo ", "date", "env", "printenv",
             "systemctl status ", "journalctl ", "docker ps", "docker logs",
             "git log", "git diff", "git status", "git branch", "git show",
-            "git remote ", "git config ",
+            "git remote ", "git config ", "git ",
             "pgrep ", "pidof ",
+            "pwd",
             "curl ", "wget ",
             "file ", "stat ", "md5sum ", "sha",
             "java -version", "mvn --version", "node --version", "python --version",
@@ -168,8 +169,10 @@ public class CommandPolicy {
         if (cmd.contains("chmod") && cmd.contains("777") && cmd.contains("/")) {
             return Verdict.DENY;
         }
-        // 重定向覆盖（通用的 > 检测，排除 echo 和 /dev/null 等无害情况）
-        if (cmd.matches(".*[^e]\\s*>\\s*/.*") && !cmd.startsWith("echo ") && !cmd.matches(".*>\\s*/dev/null(\\s|$).*")) {
+        // 重定向覆盖检测：> /path 可能覆盖文件，但排除 echo 前缀和重定向到 /dev/null 的情况
+        boolean redirectsToRealPath = cmd.matches(".*[^e]\\s*>\\s*/.*");
+        boolean redirectsToDevNull = cmd.contains(">/dev/null") || cmd.contains("> /dev/null");
+        if (redirectsToRealPath && !cmd.startsWith("echo ") && !redirectsToDevNull) {
             return Verdict.DENY;
         }
 
