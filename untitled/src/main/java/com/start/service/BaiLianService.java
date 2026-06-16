@@ -672,7 +672,7 @@ public class BaiLianService {
     20. schedule_event — 定时事件(user_id,group_id,content,trigger_time,event_type,importance)。trigger_time格式yyyy-MM-dd HH:mm:ss
        触发：用户提到未来的某个时间点会发生的事，比如"下周五我生日""明天下午3点开会""月底要交作业"。
        把这些事件记录下来，到时间了糖果熊可以主动提起。event_type: birthday/meeting/deadline/other
-    21. send_status — 发进度消息(message)。查资料/翻记录前告诉用户你正在做什么，简短口语化。私聊时自动发给当前用户，群里时自动发到当前群。⚠️私聊中不要传 group_id，群里不要传 user_id（除非确实需要跨会话通知）
+    21. send_status — 发进度消息(message)。查资料/翻记录前告诉用户你正在做什么，简短口语化。自动发到当前会话（群聊发群、私聊发私聊），不接受其他参数。
     22. web_search — 联网搜索(query)。不确定的事先搜再答，不要瞎编
        特别适合记群别名：有人说\"主群就是437625485\"时，写入 pattern=\"主群|主群号\" answer=\"437625485\" category=\"群信息\" priority=8
        之后调用 send_group_msg 时，如果用户用别名而非纯数字，先调 query_knowledge 查出群号，再用群号调用 send_group_msg
