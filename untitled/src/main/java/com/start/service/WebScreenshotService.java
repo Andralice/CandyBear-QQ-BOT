@@ -54,6 +54,8 @@ public class WebScreenshotService {
                 String jarDir = getJarDirectory();
                 ProcessBuilder pb = new ProcessBuilder(PYTHON_EXECUTABLE, SCRIPT_NAME, taskName, outputPath);
                 pb.directory(new File(jarDir)); // 在脚本所在目录执行
+                // 指定 Playwright 浏览器路径（Java 以 root 跑，浏览器在 alice 目录下）
+                pb.environment().put("PLAYWRIGHT_BROWSERS_PATH", "/home/alice/.cache/ms-playwright");
 
                 Process process = pb.start();
 

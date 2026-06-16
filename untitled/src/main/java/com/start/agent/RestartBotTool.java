@@ -89,11 +89,11 @@ public class RestartBotTool implements Tool {
                             .waitFor(2, TimeUnit.SECONDS);
                     Thread.sleep(1000);
 
-                    // 启动新 screen
+                    // 启动新 screen（bash -c 包裹确保重定向在 screen 内部生效）
                     new ProcessBuilder("bash", "-c",
                             "cd " + jarDir + " && " +
                             "source .env 2>/dev/null || true; " +
-                            "screen -S qq-bot -d -m java -Xms256m -Xmx768m -jar " + jarName + " > qq-bot.log 2>&1")
+                            "screen -S qq-bot -d -m bash -c 'java -Xms256m -Xmx768m -jar " + jarName + " >> qq-bot.log 2>&1'")
                             .start();
 
                     logger.info("重启信号已发送");
