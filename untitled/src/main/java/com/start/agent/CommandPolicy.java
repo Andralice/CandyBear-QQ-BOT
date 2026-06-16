@@ -103,10 +103,10 @@ public class CommandPolicy {
             Pattern.compile(".*&&\\s*(sh|bash|reboot|poweroff|shutdown|rm|dd|mkfs|chmod|chown).*"),
             // || 后接危险命令
             Pattern.compile(".*\\|\\|\\s*(sh|bash|reboot|poweroff|shutdown|rm|dd).*"),
-            // 重定向覆盖关键路径
-            Pattern.compile(".*>\\s*/(etc|dev|proc|sys|boot)/.*"),
-            // 追加重定向到关键路径
-            Pattern.compile(".*>>\\s*/(etc|dev|proc|sys|boot)/.*"),
+            // 重定向覆盖关键路径（/dev/null 除外，它只是丢弃输出）
+            Pattern.compile(".*>\\s*/(etc|dev/(?!null)|proc|sys|boot)/.*"),
+            // 追加重定向到关键路径（/dev/null 除外）
+            Pattern.compile(".*>>\\s*/(etc|dev/(?!null)|proc|sys|boot)/.*"),
             // wget/curl 管道到 shell
             Pattern.compile(".*(wget|curl).*\\|\\s*(sh|bash).*"),
             // 从 /dev/null 读取然后操作危险路径
@@ -168,8 +168,8 @@ public class CommandPolicy {
         if (cmd.contains("chmod") && cmd.contains("777") && cmd.contains("/")) {
             return Verdict.DENY;
         }
-        // 重定向覆盖（通用的 > 检测，排除 echo 等无害情况）
-        if (cmd.matches(".*[^e]\\s*>\\s*/.*") && !cmd.startsWith("echo ")) {
+        // 重定向覆盖（通用的 > 检测，排除 echo 和 /dev/null 等无害情况）
+        if (cmd.matches(".*[^e]\\s*>\\s*/.*") && !cmd.startsWith("echo ") && !cmd.matches(".*>\\s*/dev/null(\\s|$).*")) {
             return Verdict.DENY;
         }
 

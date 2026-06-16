@@ -117,6 +117,9 @@ public class Main extends WebSocketClient {
     /** 封装 OneBot WebSocket API 调用的服务，支持异步请求。 */
     private final OneBotWsService oneBotWsService;
 
+    /** 自动异常监控服务 —— 定时扫描日志 ERROR，触发 LLM 自审自修。 */
+    private final ErrorMonitorService errorMonitorService;
+
     // ===== 异步请求管理 =====
 
     /**
@@ -162,6 +165,9 @@ public class Main extends WebSocketClient {
         this.baiLianService.setMoodService(this.moodService);
         this.baiLianService.setBotInstance(this);
         this.agentService = new AgentService(this.baiLianService, this.keywordKnowledgeService, this.userAffinityRepo);
+
+        // 初始化自动异常监控
+        this.errorMonitorService = new ErrorMonitorService(this.baiLianService);
 
         // 初始化每群串行执行器（私聊4线程，排队30秒超时）
         GroupSerialExecutor groupExecutor = new GroupSerialExecutor(4, 30_000);
@@ -332,6 +338,11 @@ public class Main extends WebSocketClient {
         recurringScheduler.setDaemon(true);
         recurringScheduler.start();
         logger.info("🔁 周期任务调度器已启动");
+
+        // 启动自动异常监控（每5分钟扫日志 ERROR，触发 AI 自审）
+        this.errorMonitorService.setBotInstance(this);
+        this.errorMonitorService.start();
+        logger.info("🔍 异常自动监控已启动");
     }
 
     // ===== WebSocket 生命周期回调 =====

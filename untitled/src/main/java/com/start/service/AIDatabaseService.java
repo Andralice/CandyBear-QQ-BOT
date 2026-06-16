@@ -52,7 +52,7 @@ public class AIDatabaseService {
             logger.debug("记录用户消息成功");
 
         } catch (Exception e) {
-            logger.warn("记录用户消息异常: ");
+            logger.warn("记录用户消息异常: {}", e.getMessage());
         }
     }
 

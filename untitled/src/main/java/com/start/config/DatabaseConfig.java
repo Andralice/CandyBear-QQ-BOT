@@ -169,6 +169,39 @@ public class DatabaseConfig {
      */
     private static void ensureTables(Connection conn) {
         String[] migrations = {
+            // 消息记录表（search_chat_history 等工具依赖）
+            "CREATE TABLE IF NOT EXISTS messages (" +
+                "id BIGINT AUTO_INCREMENT PRIMARY KEY," +
+                "session_id VARCHAR(100) NOT NULL," +
+                "user_id VARCHAR(50) NOT NULL," +
+                "content TEXT NOT NULL," +
+                "is_robot_reply BOOLEAN DEFAULT FALSE," +
+                "is_private BOOLEAN DEFAULT FALSE," +
+                "group_id VARCHAR(50)," +
+                "reply_to_id BIGINT," +
+                "topics TEXT," +
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
+                "INDEX idx_msg_group (group_id)," +
+                "INDEX idx_msg_user (user_id)," +
+                "INDEX idx_msg_created (created_at DESC)," +
+                "INDEX idx_msg_session (session_id)" +
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            // 主动回复决策日志表
+            "CREATE TABLE IF NOT EXISTS active_reply_logs (" +
+                "id BIGINT AUTO_INCREMENT PRIMARY KEY," +
+                "group_id VARCHAR(50) NOT NULL," +
+                "user_id VARCHAR(50) NOT NULL," +
+                "message_content TEXT," +
+                "decision VARCHAR(20)," +
+                "decision_reason TEXT," +
+                "confidence DOUBLE DEFAULT 0.5," +
+                "replied_content TEXT," +
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
+                "INDEX idx_arl_group (group_id)," +
+                "INDEX idx_arl_decision (decision)" +
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
             // 核心表
             "CREATE TABLE IF NOT EXISTS long_term_memories (" +
                 "id BIGINT AUTO_INCREMENT PRIMARY KEY," +
@@ -189,11 +222,11 @@ public class DatabaseConfig {
                 "INDEX idx_ltm_importance (importance DESC)" +
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 
-            // 新增列（忽略已存在的错误）
-            "ALTER TABLE long_term_memories ADD COLUMN IF NOT EXISTS trigger_at DATETIME NULL",
-            "ALTER TABLE long_term_memories ADD COLUMN IF NOT EXISTS triggered BOOLEAN DEFAULT FALSE",
-            "ALTER TABLE long_term_memories ADD COLUMN IF NOT EXISTS keywords TEXT",
-            "ALTER TABLE long_term_memories ADD COLUMN IF NOT EXISTS recall_count INT DEFAULT 0",
+            // 新增列（MySQL 不支持 ADD COLUMN IF NOT EXISTS，去掉该语法，重复执行时异常被 catch 处理）
+            "ALTER TABLE long_term_memories ADD COLUMN trigger_at DATETIME NULL",
+            "ALTER TABLE long_term_memories ADD COLUMN triggered BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE long_term_memories ADD COLUMN keywords TEXT",
+            "ALTER TABLE long_term_memories ADD COLUMN recall_count INT DEFAULT 0",
 
             // 知识库黑名单
             "CREATE TABLE IF NOT EXISTS knowledge_blacklist (" +
@@ -305,7 +338,7 @@ public class DatabaseConfig {
                 "recent_problem TEXT," +
                 "current_goal TEXT," +
                 "location VARCHAR(100) DEFAULT '北京海淀'," +
-                "health_note TEXT DEFAULT '轻微心脏问题，不需每天上学'," +
+                "health_note VARCHAR(500) DEFAULT '轻微心脏问题，不需每天上学'," +
                 "updated_at DATE NOT NULL," +
                 "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
@@ -351,6 +384,19 @@ public class DatabaseConfig {
                 "config_value TEXT NOT NULL," +
                 "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
                 "updated_by VARCHAR(32) DEFAULT 'system'" +
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            // 自我进化记录表
+            "CREATE TABLE IF NOT EXISTS evolution_records (" +
+                "id BIGINT AUTO_INCREMENT PRIMARY KEY," +
+                "target_file VARCHAR(255) NOT NULL," +
+                "reason VARCHAR(500)," +
+                "result VARCHAR(20) NOT NULL COMMENT 'success / compile_fail / test_fail / package_fail / rollback / error'," +
+                "error_message TEXT," +
+                "git_pushed BOOLEAN DEFAULT FALSE," +
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
+                "INDEX idx_er_result (result)," +
+                "INDEX idx_er_created (created_at DESC)" +
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
         };
 

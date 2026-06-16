@@ -61,6 +61,10 @@ public class BotConfig {
     private static Set<Long> merchantNotifyQqs;
     private static Set<String> merchantHighValueItems;
 
+    private static String auditApiKey;
+    private static String auditBaseUrl;
+    private static String auditModel;
+    private static int auditTimeoutMs;
     private static int httpConnectTimeoutMs;
     private static String webSearchUrl;
     private static String webSearchBackend;
@@ -96,14 +100,14 @@ public class BotConfig {
             PRIVATE_BLACKLIST = parseLongSet(resolve(props.getProperty("private.blacklist", "")));
 
             baiLianApiKey = resolve(props.getProperty("bailian.api-key", resolve(props.getProperty("dashscope.api-key", ""))).trim());
-            baiLianBaseUrl = resolve(props.getProperty("bailian.base-url", "https://api.meai.cloud/v1/chat/completions").trim());
-            baiLianChatModel = resolve(props.getProperty("bailian.chat-model", "glm-5.1").trim());
+            baiLianBaseUrl = resolve(props.getProperty("bailian.base-url", "https://api.deepseek.com/v1/chat/completions").trim());
+            baiLianChatModel = resolve(props.getProperty("bailian.chat-model", "deepseek-v4-pro").trim());
             baiLianTimeoutMs = parseInt(resolve(props.getProperty("bailian.timeout-ms", "90000")), 90000);
             baiLianMaxRetries = parseInt(resolve(props.getProperty("bailian.max-retries", "2")), 2);
 
             agentApiKey = resolve(props.getProperty("agent.api-key", "").trim());
             agentBaseUrl = resolve(props.getProperty("agent.base-url", "https://api.deepseek.com/v1/chat/completions").trim());
-            agentModel = resolve(props.getProperty("agent.model", "gemini-3-flash").trim());
+            agentModel = resolve(props.getProperty("agent.model", "deepseek-v4-pro").trim());
             agentTimeoutMs = parseInt(resolve(props.getProperty("agent.timeout-ms", "90000")), 90000);
             agentMaxRetries = parseInt(resolve(props.getProperty("agent.max-retries", "2")), 2);
 
@@ -133,6 +137,11 @@ public class BotConfig {
             httpConnectTimeoutMs = parseInt(resolve(props.getProperty("http.connect-timeout-ms", "10000")), 10000);
             webSearchUrl = resolve(props.getProperty("web.search.url", "https://html.duckduckgo.com/html/"));
             webSearchBackend = resolve(props.getProperty("web.search.backend", "bing"));
+
+            auditApiKey = resolve(props.getProperty("audit.api-key", "").trim());
+            auditBaseUrl = resolve(props.getProperty("audit.base-url", "https://api.mytokenland.com/v1/chat/completions").trim());
+            auditModel = resolve(props.getProperty("audit.model", "claude-sonnet-4-6").trim());
+            auditTimeoutMs = parseInt(resolve(props.getProperty("audit.timeout-ms", "30000")), 30000);
 
             logger.info("🤖 机器人 QQ: {}, 名字: {}", botQq, botName);
             logger.info("✅ WebSocket 地址: {}", wsUrl);
@@ -343,6 +352,11 @@ public class BotConfig {
     public static Set<Long> getMerchantNotifyQqs() { return merchantNotifyQqs; }
 
     public static Set<String> getMerchantHighValueItems() { return merchantHighValueItems; }
+
+    public static String getAuditApiKey() { return auditApiKey; }
+    public static String getAuditBaseUrl() { return auditBaseUrl; }
+    public static String getAuditModel() { return auditModel; }
+    public static int getAuditTimeoutMs() { return auditTimeoutMs; }
 
     public static String getAt(long userId) {
         return "[CQ:at,qq=" + userId + "]";
