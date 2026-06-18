@@ -52,6 +52,8 @@ public class WebScreenshotService {
             try {
                 // ✅ 获取 JAR 所在目录（即 screenshot.py 所在目录）
                 String jarDir = getJarDirectory();
+                // 清理旧的 debug 文件，避免 root 覆盖不了 alice 的导致 Permission denied
+                try { Runtime.getRuntime().exec(new String[]{"bash", "-c", "rm -f /tmp/debug-*.png"}).waitFor(2, java.util.concurrent.TimeUnit.SECONDS); } catch (Exception ignored) {}
                 ProcessBuilder pb = new ProcessBuilder(PYTHON_EXECUTABLE, SCRIPT_NAME, taskName, outputPath);
                 pb.directory(new File(jarDir)); // 在脚本所在目录执行
                 // 指定 Playwright 浏览器路径（Java 以 root 跑，浏览器在 alice 目录下）

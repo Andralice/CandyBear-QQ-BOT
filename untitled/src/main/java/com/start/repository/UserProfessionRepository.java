@@ -1,8 +1,10 @@
 package com.start.repository;
 
+import com.start.model.ProfessionDailyLog;
 import com.start.model.UserProfession;
 
 import javax.sql.DataSource;
+import java.time.LocalDate;
 import java.sql.*;
 
 public class UserProfessionRepository {
@@ -25,6 +27,7 @@ public class UserProfessionRepository {
         fresh.setProfessionName(ProfessionPath.entryName(fresh.getProfessionPath(), 1));
         fresh.setTier(1);
         fresh.setRarity("普通");
+        fresh.setBestTier(1);
         fresh.setCombatPower(ProfessionPath.randomPower(1, userId, groupId));
         insert(fresh);
         return fresh;
@@ -44,7 +47,7 @@ public class UserProfessionRepository {
     }
 
     public void insert(UserProfession p) throws SQLException {
-        String sql = "INSERT INTO user_professions (user_id, group_id, profession_path, profession_name, tier, rarity, combat_power, streak_good, streak_bad) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        String sql = "INSERT INTO user_professions (user_id, group_id, profession_path, profession_name, tier, rarity, combat_power, streak_good, streak_bad, best_tier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             ps.setLong(1, p.getUserId());
@@ -56,6 +59,7 @@ public class UserProfessionRepository {
             ps.setInt(7, p.getCombatPower());
             ps.setInt(8, p.getStreakGood());
             ps.setInt(9, p.getStreakBad());
+            ps.setInt(10, p.getBestTier());
             ps.executeUpdate();
             try (ResultSet keys = ps.getGeneratedKeys()) {
                 if (keys.next()) p.setId(keys.getLong(1));
@@ -64,7 +68,7 @@ public class UserProfessionRepository {
     }
 
     public void update(UserProfession p) throws SQLException {
-        String sql = "UPDATE user_professions SET profession_path=?, profession_name=?, tier=?, rarity=?, combat_power=?, streak_good=?, streak_bad=?, updated_at=NOW() WHERE id=?";
+        String sql = "UPDATE user_professions SET profession_path=?, profession_name=?, tier=?, rarity=?, combat_power=?, streak_good=?, streak_bad=?, best_tier=?, updated_at=NOW() WHERE id=?";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, p.getProfessionPath());
@@ -74,7 +78,8 @@ public class UserProfessionRepository {
             ps.setInt(5, p.getCombatPower());
             ps.setInt(6, p.getStreakGood());
             ps.setInt(7, p.getStreakBad());
-            ps.setLong(8, p.getId());
+            ps.setInt(8, p.getBestTier());
+            ps.setLong(9, p.getId());
             ps.executeUpdate();
         }
     }
@@ -91,10 +96,109 @@ public class UserProfessionRepository {
         p.setCombatPower(rs.getInt("combat_power"));
         p.setStreakGood(rs.getInt("streak_good"));
         p.setStreakBad(rs.getInt("streak_bad"));
+        p.setBestTier(rs.getInt("best_tier"));
         Timestamp ua = rs.getTimestamp("updated_at");
         if (ua != null) p.setUpdatedAt(ua.toLocalDateTime());
         p.setCreatedAt(rs.getTimestamp("created_at").toLocalDateTime());
         return p;
+    }
+
+    /** 查询用户在群内的战力排名（1-based，战力越高排名越前） */
+    public int getGroupRank(long userId, String groupId) {
+        String sql = "SELECT COUNT(*) + 1 FROM user_professions WHERE group_id = ? AND user_id != ? AND combat_power > (SELECT combat_power FROM user_professions WHERE user_id = ? AND group_id = ?)";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, groupId);
+            ps.setLong(2, userId);
+            ps.setLong(3, userId);
+            ps.setString(4, groupId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getInt(1);
+            }
+        } catch (SQLException e) {
+            // ignore, return 0
+        }
+        return 0;
+    }
+
+    /** 获取群内总参与人数 */
+    public int getGroupTotal(String groupId) {
+        String sql = "SELECT COUNT(*) FROM user_professions WHERE group_id = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, groupId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getInt(1);
+            }
+        } catch (SQLException ignored) {}
+        return 0;
+    }
+
+    // ── 每日变动日志 ──
+
+    public void upsertDailyLog(ProfessionDailyLog log) {
+        String sql = "INSERT INTO profession_daily_logs (user_id, group_id, log_date, profession_path, profession_name, tier, rarity, yesterday_power, base_power, power_from_luck, power_from_pk, final_power, luck_value, change_summary) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE base_power=VALUES(base_power), power_from_luck=VALUES(power_from_luck), power_from_pk=VALUES(power_from_pk), final_power=VALUES(final_power), luck_value=VALUES(luck_value), change_summary=VALUES(change_summary)";
+        try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setLong(1, log.getUserId());
+            ps.setString(2, log.getGroupId());
+            ps.setDate(3, java.sql.Date.valueOf(log.getLogDate()));
+            ps.setString(4, log.getProfessionPath());
+            ps.setString(5, log.getProfessionName());
+            ps.setInt(6, log.getTier());
+            ps.setString(7, log.getRarity());
+            ps.setInt(8, log.getYesterdayPower());
+            ps.setInt(9, log.getBasePower());
+            ps.setInt(10, log.getPowerFromLuck());
+            ps.setInt(11, log.getPowerFromPk());
+            ps.setInt(12, log.getFinalPower());
+            ps.setInt(13, log.getLuckValue());
+            ps.setString(14, log.getChangeSummary());
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("upsert daily log failed", e);
+        }
+    }
+
+    public ProfessionDailyLog getDailyLog(long userId, String groupId, LocalDate date) {
+        String sql = "SELECT * FROM profession_daily_logs WHERE user_id=? AND group_id=? AND log_date=?";
+        try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setLong(1, userId);
+            ps.setString(2, groupId);
+            ps.setDate(3, java.sql.Date.valueOf(date));
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    ProfessionDailyLog log = new ProfessionDailyLog();
+                    log.setUserId(rs.getLong("user_id"));
+                    log.setGroupId(rs.getString("group_id"));
+                    log.setLogDate(rs.getDate("log_date").toLocalDate());
+                    log.setProfessionPath(rs.getString("profession_path"));
+                    log.setProfessionName(rs.getString("profession_name"));
+                    log.setTier(rs.getInt("tier"));
+                    log.setRarity(rs.getString("rarity"));
+                    log.setYesterdayPower(rs.getInt("yesterday_power"));
+                    log.setBasePower(rs.getInt("base_power"));
+                    log.setPowerFromLuck(rs.getInt("power_from_luck"));
+                    log.setPowerFromPk(rs.getInt("power_from_pk"));
+                    log.setFinalPower(rs.getInt("final_power"));
+                    log.setLuckValue(rs.getInt("luck_value"));
+                    log.setChangeSummary(rs.getString("change_summary"));
+                    return log;
+                }
+            }
+        } catch (SQLException ignored) {}
+        return null;
+    }
+
+    public void updateDailyLogPK(long userId, String groupId, LocalDate date, int pkDelta, int newFinalPower) {
+        String sql = "UPDATE profession_daily_logs SET power_from_pk = power_from_pk + ?, final_power = ? WHERE user_id=? AND group_id=? AND log_date=?";
+        try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setInt(1, pkDelta);
+            ps.setInt(2, newFinalPower);
+            ps.setLong(3, userId);
+            ps.setString(4, groupId);
+            ps.setDate(5, java.sql.Date.valueOf(date));
+            ps.executeUpdate();
+        } catch (SQLException ignored) {}
     }
 
     /** 脉系常量 */

@@ -1,10 +1,13 @@
-// test/DatabaseTest.java
-package test;
+package com.start;
 
 import com.start.config.DatabaseConfig;
 import com.start.repository.UserRepository;
 import com.start.repository.MessageRepository;
 
+/**
+ * 手动运行：需要 MySQL 连接。mvn exec:java -Dexec.mainClass="com.start.DatabaseTest"
+ * 或是用 mvn test 跑新的 JUnit 测试：CommandPolicyTest / LuckUtilTest / DatabaseResultTest
+ */
 public class DatabaseTest {
     public static void main(String[] args) {
         System.out.println("开始数据库测试...");

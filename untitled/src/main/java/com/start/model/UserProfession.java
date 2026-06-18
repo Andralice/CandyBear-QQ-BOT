@@ -13,6 +13,7 @@ public class UserProfession {
     private int combatPower;         // 战力
     private int streakGood = 0;      // 连续好运天数
     private int streakBad = 0;       // 连续霉运天数
+    private int bestTier = 1;        // 历史最高位阶
     private LocalDateTime updatedAt;
     private LocalDateTime createdAt;
 
@@ -45,6 +46,9 @@ public class UserProfession {
 
     public int getStreakBad() { return streakBad; }
     public void setStreakBad(int streakBad) { this.streakBad = streakBad; }
+
+    public int getBestTier() { return bestTier; }
+    public void setBestTier(int bestTier) { this.bestTier = bestTier; }
 
     public LocalDateTime getUpdatedAt() { return updatedAt; }
     public void setUpdatedAt(LocalDateTime updatedAt) { this.updatedAt = updatedAt; }

@@ -57,6 +57,37 @@ public class AIDatabaseService {
     }
 
     /**
+     * 记录用户消息（含图片描述数据）
+     */
+    public void recordUserMessageWithImages(String sessionId, String userId, String prompt,
+                                            String groupId, Long isagent, String imageDataJson) {
+        try {
+            userRepo.createOrUpdateUser(userId, "");
+            userRepo.incrementMessageCount(userId);
+
+            Map<String, Object> messageData = new HashMap<>();
+            messageData.put("sessionId", sessionId);
+            messageData.put("userId", userId);
+            messageData.put("content", prompt);
+            messageData.put("isRobotReply", false);
+            messageData.put("isPrivate", groupId == null);
+            messageData.put("isAgent", isagent);
+            if (groupId != null) messageData.put("groupId", groupId);
+            if (imageDataJson != null && !imageDataJson.isEmpty()) {
+                messageData.put("imageData", imageDataJson);
+            }
+
+            String topics = extractTopics(prompt);
+            if (!topics.isEmpty()) messageData.put("topics", topics);
+
+            messageRepo.saveMessage(messageData);
+            logger.debug("记录用户消息（含图片）成功");
+        } catch (Exception e) {
+            logger.warn("记录用户消息（含图片）异常: {}", e.getMessage());
+        }
+    }
+
+    /**
      * 记录AI回复
      */
     public void recordAIReply(String sessionId, String userId, String fullReply,

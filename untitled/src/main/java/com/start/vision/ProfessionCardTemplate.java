@@ -1,357 +1,461 @@
 package com.start.vision;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import java.awt.*;
 import java.awt.image.BufferedImage;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 
+/**
+ * 职业卡渲染模板 — 暗色企业级布局，大字版。
+ */
 public class ProfessionCardTemplate implements ImageTemplate<ProfessionData> {
 
-    private static final Logger logger = LoggerFactory.getLogger(ProfessionCardTemplate.class);
-    private final ImageRenderer renderer;
+    private static final int W = 800;
+    private static final int P = 36;
+    private static final int R = 14;
 
-    // 核心配色方案
-    private static final Color BRIGHT_WHITE = new Color(255, 255, 255);
-    private static final Color LIGHT_GRAY = new Color(204, 204, 204);
-    
-    // 位阶专属配色（1-5阶，越高级越尊贵）
-    private static final Color TIER_1_COLOR = new Color(150, 160, 180);      // 一阶 - 铁灰（朴素）
-    private static final Color TIER_2_COLOR = new Color(100, 180, 255);      // 二阶 - 天蓝（清新）
-    private static final Color TIER_3_COLOR = new Color(0, 191, 255);        // 三阶 - 霓虹蓝（稀有）
-    private static final Color TIER_4_COLOR_START = new Color(138, 43, 226); // 四阶起始 - 蓝紫（史诗）
-    private static final Color TIER_4_COLOR_END = new Color(180, 80, 255);   // 四阶结束 - 亮紫
-    private static final Color TIER_5_COLOR = new Color(255, 80, 80);        // 五阶 - 赤焰红（传说）
+    // ── 基础色 ──
+    private static final Color BG        = new Color(0x0D0F14);
+    private static final Color SURFACE   = new Color(0x161820);
+    private static final Color BORDER    = new Color(0x282A34);
+    private static final Color TEXT      = new Color(0xF2F2F5);
+    private static final Color SUBTEXT   = new Color(0xB0B2BC);
+    private static final Color BAR_BG    = new Color(0x2E303A);
+    private static final Color TICK      = new Color(0x585A64);
+    private static final Color GLOW_EPIC = new Color(180, 80, 255, 30);
+    private static final Color GLOW_LEGEND = new Color(255, 80, 80, 30);
+
+    // ── 位阶色 ──
+    private static final Color T1 = new Color(150, 160, 180);
+    private static final Color T2 = new Color(100, 180, 255);
+    private static final Color T3 = new Color(0, 191, 255);
+    private static final Color T4 = new Color(180, 80, 255);
+    private static final Color T5 = new Color(255, 80, 80);
+
+    // ── 字体 ──
+    private final Font fLabel, fBody, fTitle, fHero, fNumber;
 
     public ProfessionCardTemplate() {
-        this.renderer = ImageRenderer.getInstance();
+        fLabel  = load("HarmonyOS_SansSC_Bold.ttf",   14f);
+        fBody   = load("HarmonyOS_SansSC_Medium.ttf", 17f);
+        fTitle  = load("HarmonyOS_SansSC_Bold.ttf",   24f);
+        fHero   = load("HarmonyOS_SansSC_Black.ttf",  56f);
+        fNumber = load("HarmonyOS_SansSC_Bold.ttf",   34f);
     }
 
+    private Font load(String name, float sz) {
+        try {
+            java.io.InputStream is = getClass().getClassLoader().getResourceAsStream("assets/fonts/" + name);
+            if (is == null) return new Font(Font.SANS_SERIF, Font.PLAIN, (int) sz);
+            return Font.createFont(Font.TRUETYPE_FONT, is).deriveFont(sz);
+        } catch (Exception e) {
+            return new Font(Font.SANS_SERIF, Font.PLAIN, (int) sz);
+        }
+    }
+
+    // ============================================================
     @Override
     public BufferedImage render(Object data) {
-        if (!(data instanceof ProfessionData)) {
-            throw new IllegalArgumentException("数据格式错误");
-        }
-        ProfessionData p = (ProfessionData) data;
+        if (!(data instanceof ProfessionData p)) throw new IllegalArgumentException("数据格式错误");
 
-        int width = 800;
-        int height = 600;
-        BufferedImage img = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+        int headerH = 100;
+        int coreH   = 180;
+        int statsH  = 56;
+        int powerH  = 72;
+        int footerH = 44;
+        int gap     = 24;
+        int descH   = calcDescLines(p.description) * 30;
+
+        int H = P + headerH + gap + coreH + gap + statsH + gap + powerH + gap + descH + 12 + footerH + P;
+
+        BufferedImage img = new BufferedImage(W, H, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g = img.createGraphics();
-        renderer.configureRenderingHints(g);
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_LCD_HRGB);
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
 
-        // 1. 绘制背景（根据位阶变化）
-        drawBackground(g, width, height, p.tier);
+        g.setColor(BG);
+        g.fillRoundRect(0, 0, W, H, R, R);
 
-        // 2. 绘制双层边框
-        drawDoubleBorder(g, width, height, p.tier);
-
-        // 3. 绘制四角装饰
-        drawCornerDecorations(g, width, height, p.tier);
-
-        // 4. 绘制标题区
-        drawHeader(g, width);
-
-        // 5. 绘制职业核心信息
-        drawProfessionCore(g, width, p);
-
-        // 6. 绘制战力进度条
-        drawPowerBar(g, width, p);
-
-        // 7. 绘制职业描述
-        drawDescription(g, width, p);
-
-        // 8. 绘制底部信息
-        drawFooter(g, width, height, p);
+        int y = P;
+        y = header(g, p, y);
+        y += gap;
+        y = coreCard(g, p, y);
+        y += gap;
+        y = statsRow(g, p, y);
+        y += gap;
+        y = powerBar(g, p, y);
+        y += gap;
+        footer(g, p, y, H);
 
         g.dispose();
         return img;
     }
 
-    private void drawBackground(Graphics2D g, int width, int height, int tier) {
-        // 根据位阶调整背景色调（位阶越高越深邃尊贵）
-        Color bgStart, bgEnd, topGlowColor;
-        switch (tier) {
-            case 5: // 传说 - 深红紫
-                bgStart = new Color(20, 5, 30);
-                bgEnd = new Color(35, 10, 40);
-                topGlowColor = new Color(255, 80, 80, 25);
-                break;
-            case 4: // 史诗 - 深紫
-                bgStart = new Color(15, 8, 35);
-                bgEnd = new Color(28, 12, 48);
-                topGlowColor = new Color(180, 80, 255, 25);
-                break;
-            case 3: // 稀有 - 深蓝
-                bgStart = new Color(10, 12, 35);
-                bgEnd = new Color(18, 20, 45);
-                topGlowColor = new Color(0, 191, 255, 20);
-                break;
-            case 2: // 普通二阶 - 蓝灰
-                bgStart = new Color(12, 15, 30);
-                bgEnd = new Color(20, 25, 42);
-                topGlowColor = new Color(100, 180, 255, 15);
-                break;
-            default: // 一阶 - 深灰蓝
-                bgStart = new Color(12, 15, 25);
-                bgEnd = new Color(18, 22, 35);
-                topGlowColor = new Color(150, 160, 180, 15);
+    // ============================================================
+    // Header — 标题 + 稀有度 + 脉系 + 变化趋势
+    // ============================================================
+
+    private int header(Graphics2D g, ProfessionData p, int y) {
+        int rw = W - 2 * P;
+        Color tc = tierColor(p.tier);
+
+        // 标题
+        g.setFont(fTitle);
+        g.setColor(TEXT);
+        g.drawString("天命职业鉴定", P, y + 30);
+
+        // 脉系 pill
+        if (p.professionPath != null && !p.professionPath.isEmpty()) {
+            g.setFont(fLabel);
+            FontMetrics fm = g.getFontMetrics();
+            String pathLabel = p.professionPath + "脉";
+            int pw = fm.stringWidth(pathLabel) + 16;
+            g.setColor(new Color(tc.getRed(), tc.getGreen(), tc.getBlue(), 18));
+            g.fillRoundRect(P + 180, y + 10, pw, 26, 13, 13);
+            g.setColor(tc);
+            g.drawString(pathLabel, P + 188, y + 28);
         }
 
-        // 径向渐变背景
-        RadialGradientPaint bg = new RadialGradientPaint(
-                width / 2, height / 2, 500,
-                new float[]{0f, 0.5f, 1f},
-                new Color[]{bgEnd, bgStart, new Color(8, 10, 18)}
-        );
-        g.setPaint(bg);
-        g.fillRect(0, 0, width, height);
+        // 右上：稀有度 badge
+        String rarity = p.rarity;
+        g.setFont(fLabel);
+        FontMetrics fm = g.getFontMetrics();
+        int bw = fm.stringWidth(rarity) + 20;
+        int bx = P + rw - bw;
+        drawPillStroke(g, bx, y + 8, bw, 28, tc);
+        g.setColor(tc);
+        g.drawString(rarity, bx + 10, y + 26);
 
-        // 顶部光晕
-        GradientPaint topGlow = new GradientPaint(0, 0, topGlowColor, 0, 200, new Color(0, 0, 0, 0));
-        g.setPaint(topGlow);
-        g.fillRect(0, 0, width, 200);
+        // 位阶名
+        g.setFont(fBody);
+        g.setColor(SUBTEXT);
+        g.drawString(p.tierName, P, y + 62);
 
-        // 粒子效果
-        g.setColor(new Color(255, 255, 255, 8));
-        for (int i = 0; i < 25; i++) {
-            int x = (int) (Math.random() * width);
-            int y = (int) (Math.random() * height);
-            int size = (int) (Math.random() * 2) + 1;
-            g.fillOval(x, y, size, size);
+        // 变化趋势（位阶名右侧）
+        if (p.changeDesc != null && !p.changeDesc.isEmpty()) {
+            g.setFont(fBody);
+            g.setColor(tc);
+            g.drawString(p.changeDesc, P + 200, y + 62);
         }
-    }
 
-    private void drawDoubleBorder(Graphics2D g, int width, int height, int tier) {
-        int margin = 15;
-        Color accent = getTierColor(tier);
-
-        // 外层：虚线边框
-        g.setColor(new Color(accent.getRed(), accent.getGreen(), accent.getBlue(), 60));
-        g.setStroke(new BasicStroke(2f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10, 
-                new float[]{8, 6}, 0));
-        g.drawRoundRect(margin, margin, width - 2 * margin, height - 2 * margin, 16, 16);
-
-        // 外层发光
-        g.setColor(new Color(accent.getRed(), accent.getGreen(), accent.getBlue(), 15));
-        g.setStroke(new BasicStroke(8f));
-        g.drawRoundRect(margin, margin, width - 2 * margin, height - 2 * margin, 16, 16);
-
-        // 内层：细白线
-        g.setColor(new Color(255, 255, 255, 50));
-        g.setStroke(new BasicStroke(1f));
-        g.drawRoundRect(margin + 10, margin + 10, width - 2 * margin - 20, height - 2 * margin - 20, 12, 12);
-    }
-
-    private void drawCornerDecorations(Graphics2D g, int width, int height, int tier) {
-        Color accent = getTierColor(tier);
-        g.setColor(new Color(accent.getRed(), accent.getGreen(), accent.getBlue(), 70));
-        g.setStroke(new BasicStroke(2.5f));
-
-        int len = 40;
-        int margin = 28;
-
-        // 左上角
-        g.drawLine(margin, margin + len, margin, margin);
-        g.drawLine(margin, margin, margin + len, margin);
-        // 右上角
-        g.drawLine(width - margin - len, margin, width - margin, margin);
-        g.drawLine(width - margin, margin, width - margin, margin + len);
-        // 左下角
-        g.drawLine(margin, height - margin - len, margin, height - margin);
-        g.drawLine(margin, height - margin, margin + len, height - margin);
-        // 右下角
-        g.drawLine(width - margin - len, height - margin, width - margin, height - margin);
-        g.drawLine(width - margin, height - margin - len, width - margin, height - margin);
-    }
-
-    private void drawHeader(Graphics2D g, int width) {
-        // 标题：42pt 亮白 + 外发光
-        Font titleFont = renderer.loadFont("HarmonyOS_SansSC_Bold.ttf", 42f);
-        g.setFont(titleFont);
-
-        // 外发光
-        g.setColor(new Color(0, 191, 255, 30));
-        renderer.drawCenteredString(g, "天命职业鉴定", width + 1, 85);
-        g.setColor(new Color(0, 191, 255, 18));
-        renderer.drawCenteredString(g, "天命职业鉴定", width, 84);
-
-        // 主标题
-        g.setColor(BRIGHT_WHITE);
-        renderer.drawCenteredString(g, "天命职业鉴定", width, 83);
+        // 运势（右上 badge 下方）
+        drawLuckBadge(g, tc, bx, bw, y + 40, p.todayLuck);
 
         // 分隔线
-        g.setStroke(new BasicStroke(1f));
-        GradientPaint lineLeft = new GradientPaint(200, 110, new Color(255, 255, 255, 0), 400, 110, new Color(255, 255, 255, 35));
-        g.setPaint(lineLeft);
-        g.drawLine(200, 110, 400, 110);
-        GradientPaint lineRight = new GradientPaint(400, 110, new Color(255, 255, 255, 35), 600, 110, new Color(255, 255, 255, 0));
-        g.setPaint(lineRight);
-        g.drawLine(400, 110, 600, 110);
+        int ly = y + 82;
+        g.setColor(BORDER);
+        g.drawLine(P, ly, P + rw, ly);
+
+        return y + 100;
     }
 
-    private void drawProfessionCore(Graphics2D g, int width, ProfessionData p) {
-        int coreY = 175;
-        Color accent = getTierColor(p.tier);
+    private void drawLuckBadge(Graphics2D g, Color tc, int rx, int rw, int y, int luck) {
+        int w = 100;
+        int h = 22;
+        int x = rx + rw - w;
 
-        // 职业名称：68pt，使用位阶颜色
-        Font nameFont = renderer.loadFont("HarmonyOS_SansSC_Black.ttf", 68f);
-        g.setFont(nameFont);
+        // BG
+        g.setColor(BAR_BG);
+        g.fillRoundRect(x, y, w, h, 11, 11);
 
-        // 外发光（根据位阶变色）
-        g.setColor(new Color(accent.getRed(), accent.getGreen(), accent.getBlue(), 30));
-        renderer.drawCenteredString(g, p.professionName, width + 2, coreY + 65);
-        
-        // 主体文字（使用位阶颜色而非白色）
-        g.setColor(accent);
-        renderer.drawCenteredString(g, p.professionName, width, coreY + 63);
-
-        // 位阶标签：22pt
-        Font tierFont = renderer.loadFont("HarmonyOS_SansSC_Regular.ttf", 22f);
-        g.setFont(tierFont);
-        g.setColor(new Color(200, 200, 210));
-        renderer.drawCenteredString(g, p.tierName, width, coreY + 120);
-
-        // 稀有度徽章
-        drawRarityBadge(g, width, coreY + 150, p.rarity, accent);
-    }
-
-    private void drawRarityBadge(Graphics2D g, int width, int y, String rarity, Color accent) {
-        String text = rarity;
-        Font badgeFont = renderer.loadFont("HarmonyOS_SansSC_Bold.ttf", 18f);
-        g.setFont(badgeFont);
-        int textW = g.getFontMetrics().stringWidth(text);
-        int badgeW = textW + 45;
-        int badgeH = 34;
-        int badgeX = (width - badgeW) / 2;
-
-        // 徽章背景渐变
-        GradientPaint badgeBg = new GradientPaint(badgeX, y, 
-                new Color(accent.getRed(), accent.getGreen(), accent.getBlue(), 45),
-                badgeX + badgeW, y, 
-                new Color(accent.getRed(), accent.getGreen(), accent.getBlue(), 15));
-        g.setPaint(badgeBg);
-        g.fillRoundRect(badgeX, y, badgeW, badgeH, 17, 17);
-
-        // 徽章边框
-        g.setColor(new Color(accent.getRed(), accent.getGreen(), accent.getBlue(), 70));
-        g.setStroke(new BasicStroke(1.5f));
-        g.drawRoundRect(badgeX, y, badgeW, badgeH, 17, 17);
-
-        // 徽章文字
-        g.setColor(BRIGHT_WHITE);
-        int textX = (width - textW) / 2;
-        g.drawString(text, textX, y + 23);
-    }
-
-    private void drawPowerBar(Graphics2D g, int width, ProfessionData p) {
-        int barY = 410;
-        int barW = 520;
-        int barH = 26;
-        int barX = (width - barW) / 2;
-        Color accent = getTierColor(p.tier);
-
-        // 未填充部分
-        g.setColor(new Color(20, 20, 30, 180));
-        g.fillRoundRect(barX, barY, barW, barH, 13, 13);
-
-        // 进度条边框
-        g.setColor(new Color(255, 255, 255, 25));
-        g.setStroke(new BasicStroke(1f));
-        g.drawRoundRect(barX, barY, barW, barH, 13, 13);
-
-        // 填充部分（根据位阶变色）
-        double powerRatio = Math.min(1.0, (double) p.combatPower / 10000.0);
-        int fillW = (int) (barW * powerRatio);
-        if (fillW > 10) {
-            Color fillColor = getTierColor(p.tier);
-            GradientPaint barFill = new GradientPaint(
-                    barX, barY, fillColor,
-                    barX + fillW, barY, new Color(fillColor.getRed() / 2, fillColor.getGreen() / 2, fillColor.getBlue() / 2)
-            );
-            g.setPaint(barFill);
-            g.fillRoundRect(barX + 2, barY + 2, fillW - 4, barH - 4, 11, 11);
-
-            // 光泽效果
-            GradientPaint gloss = new GradientPaint(
-                    barX, barY, new Color(255, 255, 255, 50),
-                    barX, barY + barH / 2, new Color(255, 255, 255, 0)
-            );
-            g.setPaint(gloss);
-            g.fillRoundRect(barX + 2, barY + 2, fillW - 4, barH / 2 - 2, 11, 11);
+        // fill
+        double ratio = Math.min(1.0, Math.max(0.02, luck / 100.0));
+        int fill = (int) ((w - 4) * ratio);
+        if (fill > 2) {
+            Color lc = luck >= 80 ? new Color(0x4CAF50) : luck >= 50 ? new Color(0xFFC107) : new Color(0xF44336);
+            g.setColor(lc);
+            g.fillRoundRect(x + 2, y + 2, fill, h - 4, 9, 9);
         }
 
-        // 战力数值：28pt
-        Font powerFont = renderer.loadFont("HarmonyOS_SansSC_Bold.ttf", 28f);
-        g.setFont(powerFont);
-        
-        // 发光效果
-        g.setColor(new Color(accent.getRed(), accent.getGreen(), accent.getBlue(), 35));
-        renderer.drawCenteredString(g, "战力值：" + p.combatPower, width, barY + 55);
-        
-        // 主体文字
-        g.setColor(accent);
-        renderer.drawCenteredString(g, "战力值：" + p.combatPower, width, barY + 53);
-    }
-
-    private void drawDescription(Graphics2D g, int width, ProfessionData p) {
-        // 描述文字：18pt
-        Font descFont = renderer.loadFont("HarmonyOS_SansSC_Regular.ttf", 18f);
-        g.setFont(descFont);
-        g.setColor(BRIGHT_WHITE);
-        wrapAndDrawText(g, p.description, width - 160, width, 500);
-    }
-
-    private void drawFooter(Graphics2D g, int width, int height, ProfessionData p) {
-        int y = height - 38;
-        Font footerFont = renderer.loadFont("HarmonyOS_SansSC_Light.ttf", 15f);
-        g.setFont(footerFont);
-        g.setColor(new Color(130, 140, 160));
-
-        // 底部装饰线
-        g.setStroke(new BasicStroke(1f));
-        GradientPaint footerLeft = new GradientPaint(120, y - 12, new Color(255, 255, 255, 0), 400, y - 12, new Color(255, 255, 255, 20));
-        g.setPaint(footerLeft);
-        g.drawLine(120, y - 12, 400, y - 12);
-        GradientPaint footerRight = new GradientPaint(400, y - 12, new Color(255, 255, 255, 20), 680, y - 12, new Color(255, 255, 255, 0));
-        g.setPaint(footerRight);
-        g.drawLine(400, y - 12, 680, y - 12);
-
-        g.drawString("查询者：" + p.userId, 40, y);
-        g.drawString("命运已注定", width - 130, y);
-    }
-
-    private void wrapAndDrawText(Graphics2D g, String text, int maxWidth, int centerX, int startY) {
+        // text
+        g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 11));
+        g.setColor(TEXT);
+        String s = "运势 " + luck;
         FontMetrics fm = g.getFontMetrics();
-        int y = startY;
-        String[] sentences = text.split("。|，|、|；");
+        g.drawString(s, x + (w - fm.stringWidth(s)) / 2, y + 15);
+    }
+
+    // ============================================================
+    // Core card — 大位阶数字 + 星 + 职业名 + 战力
+    // ============================================================
+
+    private int coreCard(Graphics2D g, ProfessionData p, int y) {
+        int cw = W - 2 * P;
+        int ch = 180;
+        Color tc = tierColor(p.tier);
+
+        // 稀有度光环
+        if ("史诗".equals(p.rarity) || "传说".equals(p.rarity)) {
+            g.setColor("史诗".equals(p.rarity) ? GLOW_EPIC : GLOW_LEGEND);
+            g.setStroke(new BasicStroke(4f));
+            g.drawRoundRect(P - 2, y - 2, cw + 4, ch + 4, R + 2, R + 2);
+        }
+
+        // 面板
+        g.setColor(SURFACE);
+        g.fillRoundRect(P, y, cw, ch, R, R);
+        g.setColor(BORDER);
+        g.setStroke(new BasicStroke(1f));
+        g.drawRoundRect(P, y, cw, ch, R, R);
+
+        // ── 左列 ──
+        int leftW = 140;
+        // 位阶数字
+        g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 72));
+        g.setColor(tc);
+        String tierStr = String.valueOf(p.tier);
+        FontMetrics tfm = g.getFontMetrics();
+        g.drawString(tierStr, P + (leftW - tfm.stringWidth(tierStr)) / 2, y + 88);
+
+        // 星
+        g.setFont(fLabel);
+        int starY = y + 110;
+        int starStart = P + (leftW - 5 * 20) / 2;
+        for (int i = 0; i < 5; i++) {
+            g.setColor(i < p.tier ? tc : TICK);
+            g.drawString("★", starStart + i * 22, starY);
+        }
+
+        // 连击
+        if (p.streakGood >= 3 || p.streakBad >= 3) {
+            g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 16));
+            boolean good = p.streakGood >= 3;
+            g.setColor(good ? new Color(0xFF9800) : TICK);
+            String icon = good ? "🔥" + p.streakGood + "连升" : "💀" + p.streakBad + "连降";
+            FontMetrics ifm = g.getFontMetrics();
+            g.drawString(icon, P + (leftW - ifm.stringWidth(icon)) / 2, y + 138);
+        }
+
+        // 竖线
+        int sepX = P + leftW;
+        g.setColor(BORDER);
+        g.setStroke(new BasicStroke(1f));
+        g.drawLine(sepX, y + 22, sepX, y + ch - 22);
+
+        // ── 右列 ──
+        int rx = sepX + 28;
+
+        // 职业名
+        g.setFont(fHero);
+        g.setColor(TEXT);
+        g.drawString(p.professionName, rx, y + 68);
+
+        // COMBAT POWER
+        g.setFont(fLabel);
+        g.setColor(SUBTEXT);
+        g.drawString("COMBAT POWER", rx + 2, y + 94);
+
+        // 战力数值
+        g.setFont(fNumber);
+        g.setColor(tc);
+        g.drawString(formatNumber(p.combatPower), rx + 2, y + 130);
+
+        // 右上 pill
+        String pill = "第 " + p.tier + " 阶";
+        g.setFont(fLabel);
+        FontMetrics pfm = g.getFontMetrics();
+        int pw = pfm.stringWidth(pill) + 18;
+        int px = P + cw - pw - 18;
+        drawPillFilled(g, px, y + 16, pw, 28, tc);
+        g.setColor(tc);
+        g.drawString(pill, px + 9, y + 34);
+
+        return y + ch;
+    }
+
+    // ============================================================
+    // Stats row — 排名 + 历史巅峰
+    // ============================================================
+
+    private int statsRow(Graphics2D g, ProfessionData p, int y) {
+        // 左侧标签
+        g.setFont(fLabel);
+        g.setColor(SUBTEXT);
+        g.drawString("排名与成就", P, y + 22);
+
+        // 右侧内容
+        g.setFont(fBody);
+        int items = 0;
+        int curX = P + 140;
+
+        if (p.groupRank > 0) {
+            String rank = "本群第 " + p.groupRank + " 名";
+            g.setColor(TEXT);
+            g.drawString(rank, curX, y + 22);
+            curX += g.getFontMetrics().stringWidth(rank) + 28;
+            items++;
+        }
+
+        if (p.bestTier > 0) {
+            g.setColor(BORDER);
+            g.drawLine(curX - 14, y + 4, curX - 14, y + 20); // 竖线分隔
+            String best = "历史巅峰：" + bestTierLabel(p.bestTier);
+            g.setColor(TEXT);
+            g.drawString(best, curX, y + 22);
+            items++;
+        }
+
+        if (items == 0) {
+            g.setColor(TICK);
+            g.drawString("暂无数据", curX, y + 22);
+        }
+
+        return y + 56;
+    }
+
+    // ============================================================
+    // Power bar
+    // ============================================================
+
+    private int powerBar(Graphics2D g, ProfessionData p, int y) {
+        int bw = W - 2 * P;
+        int barH = 8;
+        Color tc = tierColor(p.tier);
+
+        // 标签 + 数值
+        g.setFont(fLabel);
+        g.setColor(SUBTEXT);
+        g.drawString("战力评估", P, y + 16);
+
+        String val = formatNumber(p.combatPower);
+        g.setFont(fNumber);
+        g.setColor(tc);
+        FontMetrics vfm = g.getFontMetrics();
+        g.drawString(val, P + bw - vfm.stringWidth(val), y + 22);
+
+        // 进度条
+        int barY = y + 38;
+        g.setColor(BAR_BG);
+        g.fillRoundRect(P, barY, bw, barH, 4, 4);
+
+        double ratio = Math.min(1.0, Math.max(0.02, (double) p.combatPower / 10000.0));
+        int fillW = (int) (bw * ratio);
+        if (fillW > 3) {
+            GradientPaint grad = new GradientPaint(P, barY, tc, P + fillW, barY, brighter(tc, 0.5f));
+            g.setPaint(grad);
+            g.fillRoundRect(P, barY, fillW, barH, 4, 4);
+        }
+
+        // 刻度
+        g.setColor(TICK);
+        g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
+        for (int m : new int[]{2000, 4000, 6000, 8000}) {
+            int tx = P + bw * m / 10000;
+            g.drawLine(tx, barY + barH + 6, tx, barY + barH + 12);
+            String label = (m / 1000) + "k";
+            g.drawString(label, tx - g.getFontMetrics().stringWidth(label) / 2, barY + barH + 26);
+        }
+        g.drawString("10k", P + bw - g.getFontMetrics().stringWidth("10k") / 2, barY + barH + 26);
+
+        return y + 72;
+    }
+
+    // ============================================================
+    // Footer
+    // ============================================================
+
+    private void footer(Graphics2D g, ProfessionData p, int y, int H) {
+        int rw = W - 2 * P;
+
+        // 描述
+        g.setFont(fBody);
+        g.setColor(SUBTEXT);
+        String desc = p.description != null ? p.description : "";
+        drawWrapped(g, desc, P, y, rw, 30);
+
+        // 底部
+        int fy = H - P - 30;
+        g.setColor(BORDER);
+        g.setStroke(new BasicStroke(1f));
+        g.drawLine(P, fy, P + rw, fy);
+
+        String today = LocalDate.now().format(DateTimeFormatter.ofPattern("yyyy.MM.dd"));
+        Font f = new Font(Font.SANS_SERIF, Font.PLAIN, 12);
+        g.setFont(f);
+        FontMetrics ffm = g.getFontMetrics();
+        g.setColor(TICK);
+        g.drawString("USER #" + p.userId, P, fy + 18);
+        g.drawString(today, P + rw - ffm.stringWidth(today), fy + 18);
+    }
+
+    // ============================================================
+    // Helpers
+    // ============================================================
+
+    private int calcDescLines(String desc) {
+        if (desc == null || desc.isEmpty()) return 1;
+        int maxChars = (W - 2 * P) / 18;
+        int lines = 0, cur = 0;
+        for (int i = 0; i < desc.length(); i++) {
+            cur++;
+            if (desc.charAt(i) == '。' || desc.charAt(i) == '，' || desc.charAt(i) == '、'
+                    || desc.charAt(i) == '；' || cur >= maxChars) { lines++; cur = 0; }
+        }
+        if (cur > 0) lines++;
+        return Math.max(1, lines);
+    }
+
+    private void drawWrapped(Graphics2D g, String text, int x, int y, int maxW, int lineH) {
+        if (text == null || text.isEmpty()) return;
+        FontMetrics fm = g.getFontMetrics();
         StringBuilder line = new StringBuilder();
-        
-        for (String sentence : sentences) {
-            if (sentence.isEmpty()) continue;
-            String test = line + sentence + "。";
-            if (fm.stringWidth(test) > maxWidth) {
-                renderer.drawCenteredString(g, line.toString().trim(), centerX, y);
-                y += 30;
-                line = new StringBuilder(sentence + "。");
+        int cy = y;
+        for (int i = 0; i < text.length(); i++) {
+            char ch = text.charAt(i);
+            String trial = line.toString() + ch;
+            if (fm.stringWidth(trial) > maxW && line.length() > 0) {
+                g.drawString(line.toString(), x, cy + lineH); cy += lineH;
+                line = new StringBuilder(String.valueOf(ch));
             } else {
-                line.append(sentence).append("。");
+                line.append(ch);
+            }
+            if (ch == '。' || ch == '，' || ch == '、' || ch == '；') {
+                g.drawString(line.toString(), x, cy + lineH); cy += lineH;
+                line = new StringBuilder();
             }
         }
-        if (line.length() > 0) {
-            renderer.drawCenteredString(g, line.toString().trim(), centerX, y);
-        }
+        if (line.length() > 0) g.drawString(line.toString(), x, cy + lineH);
     }
 
-    /**
-     * 根据位阶获取颜色（1-5阶，越高级越尊贵）
-     */
-    private Color getTierColor(int tier) {
+    private void drawPillStroke(Graphics2D g, int x, int y, int w, int h, Color c) {
+        g.setColor(c);
+        g.setStroke(new BasicStroke(1.2f));
+        g.drawRoundRect(x, y, w, h, h / 2, h / 2);
+    }
+
+    private void drawPillFilled(Graphics2D g, int x, int y, int w, int h, Color c) {
+        g.setColor(new Color(c.getRed(), c.getGreen(), c.getBlue(), 18));
+        g.fillRoundRect(x, y, w, h, h / 2, h / 2);
+        g.setColor(c);
+        g.setStroke(new BasicStroke(1f));
+        g.drawRoundRect(x, y, w, h, h / 2, h / 2);
+    }
+
+    private Color tierColor(int tier) {
         return switch (tier) {
-            case 5 -> TIER_5_COLOR;      // 五阶 - 赤焰红（传说）
-            case 4 -> TIER_4_COLOR_END;  // 四阶 - 亮紫（史诗）
-            case 3 -> TIER_3_COLOR;      // 三阶 - 霓虹蓝（稀有）
-            case 2 -> TIER_2_COLOR;      // 二阶 - 天蓝（普通）
-            default -> TIER_1_COLOR;     // 一阶 - 铁灰（入门）
+            case 5 -> T5; case 4 -> T4; case 3 -> T3; case 2 -> T2;
+            default -> T1;
         };
+    }
+
+    private static String bestTierLabel(int tier) {
+        return switch (tier) {
+            case 5 -> "五阶·登峰造极"; case 4 -> "四阶·炉火纯青";
+            case 3 -> "三阶·融会贯通"; case 2 -> "二阶·登堂入室";
+            default -> "一阶·初窥门径";
+        };
+    }
+
+    private static String formatNumber(int n) {
+        if (n >= 10000) return String.format("%.1fw", n / 1000.0 / 10);
+        return String.valueOf(n);
+    }
+
+    private static Color brighter(Color c, float f) {
+        return new Color(
+                Math.min(255, (int)(c.getRed() + (255 - c.getRed()) * f)),
+                Math.min(255, (int)(c.getGreen() + (255 - c.getGreen()) * f)),
+                Math.min(255, (int)(c.getBlue() + (255 - c.getBlue()) * f)));
     }
 }

@@ -28,7 +28,7 @@ public class CommandPolicy {
             "echo ", "date", "env", "printenv",
             "systemctl status ", "journalctl ", "docker ps", "docker logs",
             "git log", "git diff", "git status", "git branch", "git show",
-            "git remote ", "git config ", "git ",
+            "git remote ", "git config ",
             "pgrep ", "pidof ",
             "pwd",
             "curl ", "wget ",
@@ -176,17 +176,17 @@ public class CommandPolicy {
             return Verdict.DENY;
         }
 
-        // 4. 检查需确认前缀
-        for (String prefix : CONFIRM_PREFIX) {
-            if (cmd.startsWith(prefix)) {
-                return Verdict.NEED_CONFIRM;
-            }
-        }
-
-        // 5. 检查白名单前缀
+        // 4. 检查白名单前缀（优先于确认列表，避免白名单命令被误判）
         for (String prefix : WHITE_PREFIX) {
             if (cmd.startsWith(prefix)) {
                 return Verdict.ALLOW;
+            }
+        }
+
+        // 5. 检查需确认前缀
+        for (String prefix : CONFIRM_PREFIX) {
+            if (cmd.startsWith(prefix)) {
+                return Verdict.NEED_CONFIRM;
             }
         }
 

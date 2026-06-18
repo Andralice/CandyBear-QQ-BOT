@@ -29,6 +29,7 @@ public class AwaitReplyTool implements Tool {
 
     @Override public String getDescription() {
         return "向某人提问并等待TA的回复。当你想进一步了解某件事、需要对方澄清、或者想追问细节时调用。" +
+               "也用于用户说「识图」「看图」「看看这个」但没发图片时——调用此工具让TA发图，context写明你想看什么。" +
                "调用后糖果熊会在群里@对方提问，然后安静等待。对方回复后，糖果熊会自动根据回复内容继续对话。" +
                "参数：target_user_id(问谁), target_nickname(对方昵称), question(发到群里的问题，要自然口语化), context(你内心想知道什么，不会发出去，用于决定收到回复后怎么回应), timeout_seconds(等待秒数，默认120)";
     }

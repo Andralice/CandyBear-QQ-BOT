@@ -187,6 +187,8 @@ public class DatabaseConfig {
                 "INDEX idx_msg_session (session_id)" +
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 
+            "ALTER TABLE messages ADD COLUMN image_data TEXT COMMENT 'JSON image url+desc' AFTER content",
+
             // 主动回复决策日志表
             "CREATE TABLE IF NOT EXISTS active_reply_logs (" +
                 "id BIGINT AUTO_INCREMENT PRIMARY KEY," +
@@ -376,6 +378,46 @@ public class DatabaseConfig {
                 "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
                 "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
                 "UNIQUE KEY uk_user_group (user_id, group_id)" +
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            "ALTER TABLE user_professions ADD COLUMN best_tier INT DEFAULT 1",
+
+            // 每日职业变动日志（运气漂移 + PK 明细）
+            "CREATE TABLE IF NOT EXISTS profession_daily_logs (" +
+                "id BIGINT AUTO_INCREMENT PRIMARY KEY," +
+                "user_id BIGINT NOT NULL," +
+                "group_id VARCHAR(50) NOT NULL," +
+                "log_date DATE NOT NULL," +
+                "profession_path VARCHAR(20)," +
+                "profession_name VARCHAR(50)," +
+                "tier INT DEFAULT 1," +
+                "rarity VARCHAR(10)," +
+                "yesterday_power INT DEFAULT 0," +
+                "base_power INT DEFAULT 0," +
+                "power_from_luck INT DEFAULT 0," +
+                "power_from_pk INT DEFAULT 0," +
+                "final_power INT DEFAULT 0," +
+                "luck_value INT DEFAULT 50," +
+                "change_summary TEXT," +
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
+                "UNIQUE KEY uk_daily_user_group_date (user_id, group_id, log_date)" +
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            // PK记录表
+            "CREATE TABLE IF NOT EXISTS pk_records (" +
+                "id BIGINT AUTO_INCREMENT PRIMARY KEY," +
+                "attacker_id BIGINT NOT NULL," +
+                "defender_id BIGINT NOT NULL," +
+                "group_id VARCHAR(50) NOT NULL," +
+                "attacker_tier INT DEFAULT 1," +
+                "defender_tier INT DEFAULT 1," +
+                "win BOOLEAN DEFAULT FALSE," +
+                "power_change INT DEFAULT 0," +
+                "is_bully BOOLEAN DEFAULT FALSE," +
+                "pk_date DATE NOT NULL," +
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
+                "INDEX idx_pk_attacker_date (attacker_id, pk_date)," +
+                "INDEX idx_pk_group_date (group_id, pk_date)" +
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 
             // 运行时配置（热重载提示词、工具描述等，无需重启）

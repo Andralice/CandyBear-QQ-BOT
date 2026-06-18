@@ -16,7 +16,7 @@ public class MessageRepository extends BaseRepository {
     public DatabaseResult<Long> saveMessage(Map<String, Object> data) {
         return safeExecute(() -> {
             String sql = "INSERT INTO messages (session_id, user_id, content, is_robot_reply, " +
-                    "is_private, group_id, reply_to_id, topics) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+                    "is_private, group_id, reply_to_id, topics, image_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
             // 提取参数，处理null值
             String sessionId = getStringValue(data, "sessionId", "");
@@ -27,9 +27,10 @@ public class MessageRepository extends BaseRepository {
             String groupId = getStringValue(data, "groupId", null);
             Long replyToId = getLongValue(data, "replyToId", null);
             String topics = getStringValue(data, "topics", null);
+            String imageData = getStringValue(data, "imageData", null);
 
             return executeInsert(sql,
-                    sessionId, userId, content, isRobotReply, isPrivate, groupId, replyToId, topics
+                    sessionId, userId, content, isRobotReply, isPrivate, groupId, replyToId, topics, imageData
             ).getData();
         });
     }
@@ -276,6 +277,42 @@ public class MessageRepository extends BaseRepository {
     }
 
     /**
+     * 搜索历史图片描述（按关键词模糊匹配 content 中的图片描述文本）
+     */
+    public DatabaseResult<List<ChatMessage>> searchImageDescriptions(String groupId, String keyword, int limit) {
+        return safeExecute(() -> {
+            boolean hasGroup = groupId != null && !groupId.isBlank();
+            String sql = "SELECT * FROM messages WHERE is_robot_reply = FALSE " +
+                    (hasGroup ? "AND group_id = ? " : "") +
+                    "AND (image_data IS NOT NULL OR content LIKE '%图片%内容%') " +
+                    "AND (content LIKE ? OR image_data LIKE ?) " +
+                    "ORDER BY created_at DESC LIMIT ?";
+
+            Connection conn = null;
+            PreparedStatement pstmt = null;
+            ResultSet rs = null;
+            try {
+                conn = DatabaseConfig.getConnection();
+                pstmt = conn.prepareStatement(sql);
+                int idx = 1;
+                if (hasGroup) pstmt.setString(idx++, groupId);
+                pstmt.setString(idx++, "%" + keyword + "%");
+                pstmt.setString(idx++, "%" + keyword + "%");
+                pstmt.setInt(idx, limit);
+                rs = pstmt.executeQuery();
+                List<ChatMessage> messages = new ArrayList<>();
+                while (rs.next()) {
+                    ChatMessage msg = mapToChatMessage(rs);
+                    if (msg != null) messages.add(msg);
+                }
+                return messages;
+            } finally {
+                closeResources(conn, pstmt, rs);
+            }
+        });
+    }
+
+    /**
      * 获取热门话题
      */
     public DatabaseResult<List<String>> findPopularTopics(String groupId, int days) {
@@ -312,6 +349,8 @@ public class MessageRepository extends BaseRepository {
 
         message.setTopics(rs.getString("topics"));
         message.setSessionId(rs.getString("session_id"));
+
+        try { message.setImageData(rs.getString("image_data")); } catch (SQLException ignored) {}
 
         Timestamp createdAt = rs.getTimestamp("created_at");
         if (createdAt != null) message.setCreatedAt(createdAt.toLocalDateTime());

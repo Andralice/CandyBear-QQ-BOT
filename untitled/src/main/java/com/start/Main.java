@@ -8,18 +8,12 @@ import com.start.config.DatabaseConfig;
 import com.start.handler.CPTracker;
 import com.start.handler.HandlerRegistry;
 import com.start.repository.GroupMessageStatsRepository;
-import com.start.repository.GroupMoodRepository;
 import com.start.repository.LongTermMemoryRepository;
-import com.start.repository.MessageRepository;
 import com.start.repository.RecurringTaskRepository;
-import com.start.model.LongTermMemory;
-import com.start.model.RecurringTask;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
-import com.start.repository.CandyBearLifeRepository;
-import com.start.repository.CandyBearScheduleRepository;
 import com.start.repository.UserAffinityRepository;
 import com.start.service.*;
 import org.java_websocket.client.WebSocketClient;
@@ -65,60 +59,60 @@ public class Main extends WebSocketClient {
     // ===== 核心服务实例（依赖注入） =====
 
     /** 用户相关操作服务（如查询、更新用户状态等）。 */
-    private final UserService userService;
+    UserService userService;
 
     /** 消息持久化与查询服务。 */
-    private final MessageService messageService;
+    MessageService messageService;
 
     /** 对话上下文管理服务，用于维护多轮对话状态。 */
-    private ConversationService conversationService;
+    ConversationService conversationService;
 
     /** 人格化回复生成服务，根据用户历史调整语气与风格。 */
-    private PersonalityService personalityService;
+    PersonalityService personalityService;
 
     /** AI 知识库与向量检索服务。 */
-    private final AIDatabaseService aiDatabaseService;
+    AIDatabaseService aiDatabaseService;
 
     /** 百炼大模型调用服务（阿里云 DashScope）。 */
-    private final BaiLianService baiLianService;
+    BaiLianService baiLianService;
 
     /** TTS 语音合成服务。 */
-    private final TtsService ttsService;
+    TtsService ttsService;
 
     /** 用户亲密度存储仓库，用于个性化推荐与互动。 */
-    private final UserAffinityRepository userAffinityRepo = new UserAffinityRepository();
+    final UserAffinityRepository userAffinityRepo = new UserAffinityRepository();
 
     /** 长期记忆存储仓库，用于定时事件触发。 */
-    private final LongTermMemoryRepository longTermMemoryRepo = new LongTermMemoryRepository(DatabaseConfig.getDataSource());
+    final LongTermMemoryRepository longTermMemoryRepo = new LongTermMemoryRepository(DatabaseConfig.getDataSource());
 
     /** 周期任务存储仓库，用于工具联动（定时取出 prompt 发给 LLM 自由执行）。 */
-    private final RecurringTaskRepository recurringTaskRepo = new RecurringTaskRepository(DatabaseConfig.getDataSource());
+    final RecurringTaskRepository recurringTaskRepo = new RecurringTaskRepository(DatabaseConfig.getDataSource());
 
     /** 关键词知识库服务，支持基于关键词的快速问答匹配。 */
-    private final KeywordKnowledgeService keywordKnowledgeService;
+    KeywordKnowledgeService keywordKnowledgeService;
 
     /** 智能代理服务，整合大模型、知识库与用户画像。 */
-    private final AgentService agentService;
+    AgentService agentService;
 
     // ===== 事件处理器与辅助组件 =====
 
     /** 事件处理器注册中心，用于动态绑定不同消息类型的处理逻辑。 */
-    private HandlerRegistry handlerRegistry;
+    HandlerRegistry handlerRegistry;
 
     /** 防刷检测器，防止高频消息攻击或滥用。 */
-    private SpamDetector spamDetector;
+    SpamDetector spamDetector;
 
     /** 用户画像服务，定期分析用户行为并更新画像标签。 */
-    private UserPortraitService portraitService;
+    UserPortraitService portraitService;
 
     /** 糖果熊分群情绪系统，持久化到 group_mood 表。 */
-    private final BotMoodService moodService;
+    BotMoodService moodService;
 
     /** 封装 OneBot WebSocket API 调用的服务，支持异步请求。 */
-    private final OneBotWsService oneBotWsService;
+    OneBotWsService oneBotWsService;
 
     /** 自动异常监控服务 —— 定时扫描日志 ERROR，触发 LLM 自审自修。 */
-    private final ErrorMonitorService errorMonitorService;
+    ErrorMonitorService errorMonitorService;
 
     // ===== 异步请求管理 =====
 
@@ -138,50 +132,8 @@ public class Main extends WebSocketClient {
      */
     public Main(URI serverUri) {
         super(serverUri);
-        // 初始化数据库连接池
         DatabaseConfig.initConnectionPool();
-
-        // 初始化 WebSocket API 封装服务（传入当前 Main 实例以支持发送请求）
-        this.oneBotWsService = new OneBotWsService(this);
-
-        // 初始化基础服务
-        this.userService = new UserService();
-        this.messageService = new MessageService();
-        this.conversationService = new ConversationService();
-        this.personalityService = new PersonalityService();
-        this.aiDatabaseService = new AIDatabaseService();
-
-        // 初始化知识库服务（需数据源）
-        this.keywordKnowledgeService = new KeywordKnowledgeService(DatabaseConfig.getDataSource());
-
-        // 初始化糖果熊分群情绪系统（需数据源）
-        this.moodService = new BotMoodService(new GroupMoodRepository(DatabaseConfig.getDataSource()));
-
-        // 初始化 TTS 语音服务
-        this.ttsService = new TtsService();
-
-        // 初始化大模型服务
-        this.baiLianService = new BaiLianService(this.keywordKnowledgeService, this.userAffinityRepo, this.ttsService);
-        this.baiLianService.setMoodService(this.moodService);
-        this.baiLianService.setBotInstance(this);
-        this.agentService = new AgentService(this.baiLianService, this.keywordKnowledgeService, this.userAffinityRepo);
-
-        // 初始化自动异常监控
-        this.errorMonitorService = new ErrorMonitorService(this.baiLianService);
-
-        // 初始化每群串行执行器（私聊4线程，排队30秒超时）
-        GroupSerialExecutor groupExecutor = new GroupSerialExecutor(4, 30_000);
-
-        // 初始化服务器管理服务
-        ServerAdminService shellService = new ServerAdminService();
-
-        // 初始化事件处理器注册中心
-        this.handlerRegistry = new HandlerRegistry(this.agentService, this.baiLianService, groupExecutor, this, shellService);
-
-        // 设置 DashScope API Key（来自配置文件，不使用环境变量）
-        if (BotConfig.getBaiLianApiKey() != null && !BotConfig.getBaiLianApiKey().isBlank()) {
-            System.setProperty("dashscope.api-key", BotConfig.getBaiLianApiKey());
-        }
+        BotBootstrap.wireServices(this);
     }
 
     // ===== 初始化方法：启动后台任务与绑定服务 =====
@@ -190,159 +142,7 @@ public class Main extends WebSocketClient {
      * 初始化防刷、画像、代理等高级功能，并启动定时任务。
      */
     public void init() {
-        // 初始化防刷检测器
-        this.spamDetector = new SpamDetector(this);
-        logger.info("🛡️ SpamDetector 初始化完成");
-
-        logger.info("🧠 BaiLianService 已绑定 KeywordKnowledgeService");
-
-        // 写入糖果熊背景知识种子数据
-        this.keywordKnowledgeService.seedCandyBearKnowledge();
-
-        // 初始化糖果熊人生引擎（AI 驱动的连续生命线）
-        CandyBearLifeRepository lifeRepo = new CandyBearLifeRepository(DatabaseConfig.getDataSource());
-        CandyBearScheduleRepository scheduleRepo = new CandyBearScheduleRepository(DatabaseConfig.getDataSource());
-        CandyBearLifeEngine lifeEngine = new CandyBearLifeEngine(lifeRepo, scheduleRepo, this.baiLianService);
-        this.baiLianService.setLifeEngine(lifeEngine);
-        lifeEngine.onStartup();
-        logger.info("📅 糖果熊人生引擎已启动（四层架构：章节→周记→日记→工具查询 + LifeState + 日程表）");
-
-        // 每天凌晨 3 点生成昨日日记 + 周日生成周记
-        Thread lifeThread = new Thread(() -> {
-            while (!Thread.currentThread().isInterrupted()) {
-                try {
-                    Thread.sleep(millisUntilNext3AM());
-                    lifeEngine.dailyTick();
-                    logger.info("📅 糖果熊人生引擎 tick 完成");
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                } catch (Exception e) {
-                    logger.error("人生引擎 tick 失败", e);
-                }
-            }
-        }, "CandyBearLife-Thread");
-        lifeThread.setDaemon(true);
-        lifeThread.start();
-
-        logger.info("🤖 Agent 已启用");
-
-        // 初始化用户画像服务
-        this.portraitService = new UserPortraitService(this.baiLianService, new MessageRepository());
-
-        // 立即执行一次画像更新（可选，加速首次响应）
-        this.portraitService.runUpdateTask();
-        logger.info("👤 用户画像首次更新完成");
-
-        // 启动后台定时任务：每 10 分钟更新一次用户画像
-        Thread timerThread = new Thread(() -> {
-            while (!Thread.currentThread().isInterrupted()) {
-                try {
-                    Thread.sleep(10 * 60 * 1000); // 10 分钟
-                    this.portraitService.runUpdateTask();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                } catch (Exception e) {
-                    logger.error("❌ 用户画像更新任务异常", e);
-                }
-            }
-        }, "UserPortrait-Update-Thread");
-        timerThread.setDaemon(true); // 设为守护线程，主程序退出时自动终止
-        timerThread.start();
-
-        logger.info("👤 用户画像系统已启动");
-
-        // 初始化定时提醒服务
-        ReminderService reminderService = ReminderService.getInstance();
-        reminderService.setBotInstance(this); // 注入 Main 实例
-        reminderService.setEnabled(true); // 默认开启，可通过命令控制
-        logger.info("⏰ 私聊提醒服务已初始化");
-
-        // 启动定时事件检查线程（每10分钟检查一次到期的定时事件）
-        Thread eventCheckerThread = new Thread(() -> {
-            while (!Thread.currentThread().isInterrupted()) {
-                try {
-                    Thread.sleep(10 * 60 * 1000); // 10 分钟
-                    List<LongTermMemory> dueEvents = longTermMemoryRepo.findDueEvents();
-                    for (LongTermMemory event : dueEvents) {
-                        try {
-                            String prompt = "你之前记下了一个定时事件：\"" + event.getContent()
-                                    + "\"\n涉及用户：" + event.getUserId()
-                                    + "\n现在时间到了，请自然地提醒或祝福。";
-                            String reply = baiLianService.generate(
-                                    "event_" + event.getId(),
-                                    event.getUserId(),
-                                    prompt,
-                                    event.getGroupId(),
-                                    "糖果熊"
-                            );
-                            if (reply != null && !reply.trim().isEmpty()) {
-                                sendGroupReply(Long.parseLong(event.getGroupId()), reply);
-                            }
-                            longTermMemoryRepo.markTriggered(event.getId());
-                            logger.info("📅 定时事件已触发: {} -> {}", event.getContent(), event.getGroupId());
-                        } catch (Exception e) {
-                            logger.error("❌ 定时事件触发失败 id={}: {}", event.getId(), e.getMessage());
-                        }
-                    }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                } catch (Exception e) {
-                    logger.error("❌ 定时事件检查异常", e);
-                }
-            }
-        }, "EventChecker-Thread");
-        eventCheckerThread.setDaemon(true);
-        eventCheckerThread.start();
-        logger.info("📅 定时事件检查器已启动");
-
-        // 启动周期任务调度线程（每 60 秒检查到期的 recurring_tasks，取出 prompt 发给 LLM 自由执行）
-        Thread recurringScheduler = new Thread(() -> {
-            while (!Thread.currentThread().isInterrupted()) {
-                try {
-                    Thread.sleep(60 * 1000);
-                    recurringTaskRepo.expireOldTasks();
-                    List<RecurringTask> dueTasks = recurringTaskRepo.findDueTasks();
-                    for (RecurringTask task : dueTasks) {
-                        try {
-                            logger.info("🔁 周期任务触发: {} (id={})", task.getTaskName(), task.getId());
-                            String sessionId = "recurring_" + task.getId() + "_" + System.currentTimeMillis();
-                            String reply = baiLianService.generate(
-                                    sessionId,
-                                    task.getUserId(),
-                                    task.getTriggerPrompt(),
-                                    task.getGroupId(),
-                                    "糖果熊"
-                            );
-                            if (reply != null && !reply.trim().isEmpty() && task.getGroupId() != null) {
-                                sendGroupReply(Long.parseLong(task.getGroupId()), reply);
-                            }
-
-                            // 计算下次触发时间
-                            LocalDateTime nextFire = computeNextFireFromCron(task.getCronExpr());
-                            recurringTaskRepo.markFired(task.getId(), nextFire);
-                        } catch (Exception e) {
-                            logger.error("❌ 周期任务执行失败 id={}: {}", task.getId(), e.getMessage());
-                        }
-                    }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                } catch (Exception e) {
-                    logger.error("❌ 周期任务调度异常", e);
-                }
-            }
-        }, "RecurringTask-Scheduler");
-        recurringScheduler.setDaemon(true);
-        recurringScheduler.start();
-        logger.info("🔁 周期任务调度器已启动");
-
-        // 启动自动异常监控（每5分钟扫日志 ERROR，触发 AI 自审）
-        this.errorMonitorService.setBotInstance(this);
-        this.errorMonitorService.start();
-        logger.info("🔍 异常自动监控已启动");
+        BotBootstrap.startBackgroundTasks(this);
     }
 
     // ===== WebSocket 生命周期回调 =====
@@ -658,7 +458,7 @@ public class Main extends WebSocketClient {
     }
 
     /** 计算到下一个凌晨 3:00 的毫秒数 */
-    private static long millisUntilNext3AM() {
+    static long millisUntilNext3AM() {
         LocalDateTime now = LocalDateTime.now();
         LocalDateTime next = now.withHour(3).withMinute(0).withSecond(0).withNano(0);
         if (!next.isAfter(now)) {

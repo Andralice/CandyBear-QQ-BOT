@@ -6,7 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import com.start.agent.KnowledgeBaseTool;
 import com.start.agent.Tool;
-import com.start.agent.UserAffinityTool;
+import com.start.agent.social.UserAffinityTool;
 import com.start.agent.WeatherTool;
 import com.start.repository.UserAffinityRepository;
 import com.start.service.BaiLianService;

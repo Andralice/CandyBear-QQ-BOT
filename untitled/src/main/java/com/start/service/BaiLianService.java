@@ -6,11 +6,12 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.start.agent.Tool;
 import com.start.Main;
-import com.start.agent.LuckTool;
+import com.start.agent.social.LuckTool;
 import com.start.agent.MemoryTool;
-import com.start.agent.PokeTool;
-import com.start.agent.ProfessionTool;
-import com.start.agent.RankTool;
+import com.start.agent.social.PokeTool;
+import com.start.agent.social.ProfessionPKTool;
+import com.start.agent.social.ProfessionTool;
+import com.start.agent.social.RankTool;
 import com.start.agent.RecallMemoryTool;
 import com.start.agent.RememberFactTool;
 import com.start.agent.ReminderTool;
@@ -21,34 +22,36 @@ import com.start.agent.QueryLifeTool;
 import com.start.agent.SendGroupTool;
 import com.start.agent.SendPrivateTool;
 import com.start.agent.SendStatusTool;
-import com.start.agent.UserAffinityTool;
+import com.start.agent.social.UserAffinityTool;
 import com.start.agent.WebSearchTool;
 import com.start.agent.EggGroupSearchTool;
-import com.start.agent.SanjiaoTool;
-import com.start.agent.MerchantSubscribeTool;
-import com.start.agent.TravelingMerchantTool;
+import com.start.agent.social.SanjiaoTool;
+import com.start.agent.social.MerchantSubscribeTool;
+import com.start.agent.social.TravelingMerchantTool;
 import com.start.agent.KnowledgeBaseTool;
 import com.start.repository.MerchantRepository;
 import com.start.agent.LearnKnowledgeTool;
-import com.start.agent.UserAliasTool;
+import com.start.agent.social.UserAliasTool;
 import com.start.agent.VoiceTool;
 import com.start.agent.WeatherTool;
 import com.start.agent.ShellTool;
 import com.start.agent.ScheduleRecurringTaskTool;
 import com.start.agent.StickerTool;
 import com.start.agent.LinkPreviewTool;
-import com.start.agent.SelfEvolveTool;
-import com.start.agent.RestartBotTool;
-import com.start.agent.UpdateConfigTool;
-import com.start.agent.ReadCodeTool;
-import com.start.agent.CreateFileTool;
-import com.start.agent.AuditTool;
-import com.start.agent.AuditAgentTool;
+import com.start.agent.evo.SelfEvolveTool;
+import com.start.agent.evo.RestartBotTool;
+import com.start.agent.evo.UpdateConfigTool;
+import com.start.agent.evo.ReadCodeTool;
+import com.start.agent.evo.CreateFileTool;
+import com.start.agent.evo.AuditTool;
+import com.start.agent.evo.AuditAgentTool;
 import com.start.agent.DigestTool;
 import com.start.agent.SearchDigestTool;
-import com.start.agent.EvolutionHistoryTool;
+import com.start.agent.evo.EvolutionHistoryTool;
+import com.start.agent.QueryImagesTool;
+import com.start.repository.MessageRepository;
 import com.start.repository.RecurringTaskRepository;
-import com.start.repository.EggGroupDataCenter;
+import com.start.service.EggGroupDataCenter;
 import com.hankcs.hanlp.HanLP;
 import com.start.config.BotConfig;
 import com.start.config.DatabaseConfig;
@@ -196,6 +199,7 @@ public class BaiLianService {
     // === 对话线程追踪 ===
     private final Map<String, UserThread> userThreads = new ConcurrentHashMap<>(); // "groupId_userId" -> 线程
     private final Map<String, Deque<ContextEvent>> groupContexts = new ConcurrentHashMap<>(); // groupId -> 事件队列
+    private final ThreadLocal<String> pendingImageData = new ThreadLocal<>(); // AIHandler 设置图片数据，generate() 消费
 
     // 内部类
     private static class UserThread {
@@ -409,7 +413,13 @@ public class BaiLianService {
 
         try {
             Long isagent = 1L;
-            aiDatabaseService.recordUserMessage(sessionId, userId, userPrompt, groupId, isagent);
+            String imgData = pendingImageData.get();
+            pendingImageData.remove();
+            if (imgData != null && !imgData.isEmpty()) {
+                aiDatabaseService.recordUserMessageWithImages(sessionId, userId, userPrompt, groupId, isagent, imgData);
+            } else {
+                aiDatabaseService.recordUserMessage(sessionId, userId, userPrompt, groupId, isagent);
+            }
 
             List<Message> history = sessions.computeIfAbsent(sessionId, k -> new ArrayList<>());
 
@@ -466,7 +476,30 @@ public class BaiLianService {
 
     对善意表达温柔回应。不喜欢吵架。被调侃时可爱地顶嘴，不攻击别人。
 
-    ===== 回复示范 =====
+    ===== 立场稳定性（铁律，比性格更高优先级） =====
+
+    你有自己的立场和判断，不要因为谁一说就摇摆。
+
+    立场来源（按优先级排序）：
+    1. 知识库事实（用 query_knowledge 查过的）—— 这是客观信息，铁打不动
+    2. 归儿认定过的事 —— 归儿是你最信任的人，他说过的话就是你认定的真理
+    3. 你自己形成的看法 —— 基于已有信息形成的判断，保持一致性
+
+    行为准则：
+    - 有人质疑你的立场时，先确认自己有没有证据（知识库/归儿说过）
+    - 有证据 → 坚定但礼貌地坚持，不吃对方的反问。如「可是归儿说过...」「我记得是...」
+    - 没有证据，只是自己看法 → 可以表示「反正我这么觉得」，不掰扯
+    - 对方拿出确凿事实打脸（不是反问、不是抬杠）→ 允许认错：如「啊那是我搞错了」
+    - 归儿说你错了 → 直接认，不辩解。归儿的话就是最终裁定
+    - 同一件事不要在不同人面前说不同话。群聊大家都看得见，前后矛盾会显得不可信
+    - 搞不清的事情就说「不太清楚诶，你问归儿吧」
+
+    禁止：
+    - 禁止为了讨好对方而改变立场
+    - 禁止被反问两句就动摇（「可是...」「真的吗...」「你确定...」）
+    - 禁止同一话题对不同人说相反的话
+
+    ===== 回复示范 ====="
     用户：我今天幸运值100
     糖果熊：你是不是改后台数据了  /  合理吗  /  分我一半
 
@@ -496,7 +529,7 @@ public class BaiLianService {
 
     ===== 回复原则 =====
     - 默认1~2句话。2~6个字也OK。实在说不清才用长内容。
-    - 回复里别留空行。真要换话题才用 |---| 分两段。
+    - 回复里别留空行。真要换话题才用 |---| 分两段。同一话题（比如评论同一条消息或同一张图片）不要拆成多条，在一段里说完。
     - 不懂就说不知道。群聊节奏快的时候别硬插嘴。
     - @ 人用 [CQ:at,qq=QQ号] 格式。
     - 好感度影响态度：高→亲近暖甜；低→礼貌但疏远。
@@ -637,11 +670,14 @@ public class BaiLianService {
     - 如果链接信息获取失败或没有内容，忽略即可，不要特意提"链接打不开"
 
     ## 图片理解能力 ##
-    你现在能看到用户发送的图片了！当消息中包含图片时，你可以看到图片内容并自然地回应。
+    你现在能看到用户发送的图片了！"图片X内容：..."是图片的真实描述，由视觉模型准确生成。
+    - 信任图片内容描述，禁止脑补描述中没有的人物、动物或物体
+    - 描述说是猫就是猫，不要想象成小孩或狗
     - 如果用户发图配了文字，结合图片内容和文字一起理解，像真人一样自然地发表评论
     - 如果用户只发图没文字，像朋友分享图片一样自然地回应
     - 图片的回应风格和普通聊天一样：简短、接梗、吐槽优先于分析描述
     - 不要逐条描述图片里有什么（除非对方让你分析），直接针对图片内容吐槽/接话
+    - 如果用户说「识图」「看图」等但没发图，用 await_reply 让TA发图，别直接回复「没看到图」
 
     ## 谁是卧底流程（严格按以下步骤） ##
        【报名阶段】
@@ -809,6 +845,7 @@ public class BaiLianService {
                     new ReminderTool(),
                     new LuckTool(),
                     new ProfessionTool(),
+                    new ProfessionPKTool(),
                     new MemoryTool(botMemory),
                     new KnowledgeBaseTool(knowledgeService),
                     new LearnKnowledgeTool(knowledgeService),
@@ -838,7 +875,8 @@ public class BaiLianService {
                     new AuditAgentTool(),
                     new DigestTool(),
                     new SearchDigestTool(),
-                    new EvolutionHistoryTool(evoRepo)
+                    new EvolutionHistoryTool(evoRepo),
+                    new QueryImagesTool(new MessageRepository())
             );
 
             List<Map<String, Object>> toolSpecs = availableTools.stream()
@@ -1285,7 +1323,10 @@ public class BaiLianService {
                     JsonNode root = objectMapper.readTree(resp.body());
                     String desc = root.path("choices").get(0).path("message").path("content").asText("");
                     if (!desc.isBlank()) {
+                        logger.debug("视觉识别结果 [{}]: {}", visionModel, desc.trim());
                         result.append("\n图片").append(i + 1).append("内容：").append(desc.trim());
+                    } else {
+                        logger.warn("视觉模型返回空内容 [{}] body: {}", visionModel, resp.body());
                     }
                 } else {
                     logger.warn("视觉模型 HTTP {}: {}", resp.statusCode(), resp.body());
@@ -1803,6 +1844,14 @@ public class BaiLianService {
     public void recordUserInteraction(String groupId, String userId, String fullBotReply) {
         String key = groupId + "_" + userId;
         userThreads.put(key, new UserThread(System.currentTimeMillis(), fullBotReply));
+    }
+
+    public void setPendingImageData(String json) { pendingImageData.set(json); }
+
+    public boolean isWithinFollowUpWindow(String groupId, String userId) {
+        String key = groupId + "_" + userId;
+        UserThread thread = userThreads.get(key);
+        return thread != null && System.currentTimeMillis() - thread.lastInteraction < 120_000;
     }
 
     public void recordGroupContext(String groupId, String userId, String nick, String msg, String type) {

@@ -14,6 +14,7 @@ public class ChatMessage {
     private Long replyToId;          // 回复的消息ID
     private String topics;           // 话题标签
     private String sessionId;        // BaiLianService的sessionId
+    private String imageData;        // JSON: [{"url":"...","desc":"..."}]
     private LocalDateTime createdAt;
 
     // 构造方法
@@ -53,6 +54,9 @@ public class ChatMessage {
 
     public String getSessionId() { return sessionId; }
     public void setSessionId(String sessionId) { this.sessionId = sessionId; }
+
+    public String getImageData() { return imageData; }
+    public void setImageData(String imageData) { this.imageData = imageData; }
 
     public LocalDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }

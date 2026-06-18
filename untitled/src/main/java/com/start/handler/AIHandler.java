@@ -37,6 +37,8 @@ public class AIHandler implements MessageHandler {
     private final Random random = new Random();
     private final ConcurrentHashMap<String, Long> lastReactionTime = new ConcurrentHashMap<>();
     private static final long USER_REACTION_COOLDOWN_MS = 2000;
+    private final ConcurrentHashMap<String, Long> lastGroupReplyTime = new ConcurrentHashMap<>();
+    private static final long GROUP_REPLY_COOLDOWN_MS = 12_000;
 
     public AIHandler(BaiLianService aiService, GroupSerialExecutor groupExecutor) {
         this.aiService = aiService;
@@ -125,23 +127,36 @@ public class AIHandler implements MessageHandler {
                 ats
         );
 
-        if (reaction.isPresent()) {
+        // 纯图片消息的追问处理（移动端QQ无法同时发送文字+图片，用户可能在"发图吧"之后单独发图）
+        boolean imageFollowUp = !imageInfos.isEmpty() && reaction.isEmpty()
+                && aiService.isWithinFollowUpWindow(gid, String.valueOf(userId));
+
+        if (reaction.isPresent() || imageFollowUp) {
+            long now = System.currentTimeMillis();
+
+            // 群级冷却：上次回复后12秒内不触发新回复，避免频繁切人导致语言碎片化
+            Long lastGroupReply = lastGroupReplyTime.get(gid);
+            if (lastGroupReply != null && now - lastGroupReply < GROUP_REPLY_COOLDOWN_MS) {
+                return;
+            }
+
             // 同一用户2秒内冷却，避免连续短消息触发多次回复
             String userKey = gid + "_" + userId;
-            long now = System.currentTimeMillis();
             Long last = lastReactionTime.get(userKey);
             if (last != null && now - last < USER_REACTION_COOLDOWN_MS) {
                 return;
             }
             lastReactionTime.put(userKey, now);
+            lastGroupReplyTime.put(gid, now);
 
-            BaiLianService.Reaction r = reaction.get();
-            if (r.needsAI) {
+            boolean needsAI = imageFollowUp || reaction.map(r -> r.needsAI).orElse(false);
+            String prompt = imageFollowUp ? "看一下这张图片" : reaction.get().prompt;
+            if (needsAI) {
                 groupExecutor.execute(gid, () -> {
                     List<String> imageDataUris = downloadImages(imageInfos);
                     String imageDesc = aiService.describeImages(imageDataUris);
                     String linkContext = buildLinkContext(linksToFetch);
-                    String fullPrompt = r.prompt;
+                    String fullPrompt = prompt;
                     if (!imageDesc.isEmpty()) fullPrompt = fullPrompt + "\n\n" + imageDesc;
                     if (!linkContext.isEmpty()) fullPrompt = fullPrompt + "\n\n" + linkContext;
                     String reply = aiService.generate("group_" + groupId + "_" + userId, String.valueOf(userId), fullPrompt, gid, String.valueOf(nickname), ats);
@@ -154,7 +169,7 @@ public class AIHandler implements MessageHandler {
                     }
                 });
             } else {
-                sendSplitGroupReplies(bot, groupId, r.text);
+                sendSplitGroupReplies(bot, groupId, reaction.get().text);
             }
         }
     }
@@ -187,10 +202,11 @@ public class AIHandler implements MessageHandler {
             return;
         }
 
-        if (prompt.isEmpty()) {
+        if (prompt.isEmpty() && imageInfos.isEmpty()) {
             bot.sendReply(msg, "想聊什么？直接说就好～");
             return;
         }
+        if (prompt.isEmpty()) prompt = "看一下这张图片";
 
         replyWithAI(bot, msg, sessionId, String.valueOf(userId), prompt, null, nickname, Collections.emptyList(), imageInfos, linksToFetch);
     }
@@ -206,10 +222,11 @@ public class AIHandler implements MessageHandler {
             return;
         }
 
-        if (prompt.isEmpty()) {
+        if (prompt.isEmpty() && imageInfos.isEmpty()) {
             bot.sendReply(msg, "问点什么吧～");
             return;
         }
+        if (prompt.isEmpty()) prompt = "看一下这张图片";
 
         List<Long> ats = MessageUtil.extractAts(msg.path("message"));
         replyWithAI(bot, msg, sessionId, String.valueOf(userId), prompt, String.valueOf(groupId), nickname, ats, imageInfos, linksToFetch);
@@ -233,6 +250,7 @@ public class AIHandler implements MessageHandler {
         return "#clear".equals(prompt) || "!clear".equals(prompt) || "！clear".equals(prompt);
     }
 
+
     private void replyWithAI(Main bot, JsonNode originalMsg, String sessionId, String userId, String prompt, String groupId, String nickname, List<Long> atUserIds, List<Map<String, String>> imageInfos, List<String> linksToFetch) {
         groupExecutor.execute(groupId, () -> {
             List<String> imageDataUris = downloadImages(imageInfos);
@@ -241,6 +259,11 @@ public class AIHandler implements MessageHandler {
             String fullPrompt = prompt;
             if (!imageDesc.isEmpty()) fullPrompt = fullPrompt + "\n\n" + imageDesc;
             if (!linkContext.isEmpty()) fullPrompt = fullPrompt + "\n\n" + linkContext;
+
+            // 存储图片数据到 DB
+            if (!imageDesc.isEmpty()) {
+                aiService.setPendingImageData(buildImageDataJson(imageInfos, imageDesc));
+            }
             String reply = aiService.generate(sessionId, userId, fullPrompt, groupId, nickname, atUserIds);
 
             if (reply == null || reply.trim().isEmpty()) {
@@ -310,6 +333,32 @@ public class AIHandler implements MessageHandler {
             if (dataUri != null) uris.add(dataUri);
         }
         return uris;
+    }
+
+    private String buildImageDataJson(List<Map<String, String>> imageInfos, String imageDesc) {
+        if (imageInfos == null || imageInfos.isEmpty() || imageDesc.isEmpty()) return null;
+        // 解析 vision 描述中的每条 "图片N内容：xxx"，与 imageInfos 的 URL 配对
+        StringBuilder sb = new StringBuilder("[");
+        int limit = Math.min(imageInfos.size(), 3);
+        for (int i = 0; i < limit; i++) {
+            String url = imageInfos.get(i).get("url");
+            if (url == null) url = "";
+            // 从 imageDesc 提取对应描述
+            String prefix = "图片" + (i + 1) + "内容：";
+            int idx = imageDesc.indexOf(prefix);
+            String desc = "";
+            if (idx >= 0) {
+                int start = idx + prefix.length();
+                int end = imageDesc.indexOf("\n", start);
+                if (end < 0) end = imageDesc.length();
+                desc = imageDesc.substring(start, end).trim().replace("\\", "\\\\").replace("\"", "\\\"");
+            }
+            if (i > 0) sb.append(",");
+            sb.append("{\"url\":\"").append(url.replace("\\", "\\\\").replace("\"", "\\\"")).append("\"")
+              .append(",\"desc\":\"").append(desc).append("\"}");
+        }
+        sb.append("]");
+        return sb.toString();
     }
 
     /** 私聊同样拆分，避免一大段砸过去 */

@@ -2,7 +2,7 @@ package com.start.handler;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.start.Main;
-import com.start.repository.EggGroupDataCenter;
+import com.start.service.EggGroupDataCenter;
 import com.start.repository.MerchantRepository;
 import com.start.service.AgentService;
 import com.start.service.BaiLianService;
@@ -53,6 +53,7 @@ public class HandlerRegistry {
         handlers.add(new EggGroupSearchHandler(dataCenter));
         handlers.add(new AgentHandler(agentService, groupExecutor));
         handlers.add(merchantHandler);
+        handlers.add(new ProfessionPKHandler());
         handlers.add(new AIHandler(baiLianService, groupExecutor));
     }
 

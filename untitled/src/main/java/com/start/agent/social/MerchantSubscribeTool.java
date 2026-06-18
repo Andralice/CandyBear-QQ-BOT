@@ -1,4 +1,6 @@
-package com.start.agent;
+package com.start.agent.social;
+
+import com.start.agent.Tool;
 
 import com.start.repository.MerchantRepository;
 import com.start.repository.MerchantRepository.Subscription;
