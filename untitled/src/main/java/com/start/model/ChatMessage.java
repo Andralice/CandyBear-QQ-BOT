@@ -1,5 +1,3 @@
-
-// model/ChatMessage.java
 package com.start.model;
 
 import java.time.LocalDateTime;

@@ -80,7 +80,7 @@ public class Main extends WebSocketClient {
     TtsService ttsService;
 
     /** 用户亲密度存储仓库，用于个性化推荐与互动。 */
-    final UserAffinityRepository userAffinityRepo = new UserAffinityRepository();
+    final UserAffinityRepository userAffinityRepo = new UserAffinityRepository(DatabaseConfig.getDataSource());
 
     /** 长期记忆存储仓库，用于定时事件触发。 */
     final LongTermMemoryRepository longTermMemoryRepo = new LongTermMemoryRepository(DatabaseConfig.getDataSource());

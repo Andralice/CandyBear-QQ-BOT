@@ -1,5 +1,3 @@
-// repository/UserRepository.java
-// repository/UserRepository.java
 package com.start.repository;
 
 import com.start.config.DatabaseConfig;

@@ -8,9 +8,12 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
-public class RecurringTaskRepository {
+public class RecurringTaskRepository implements Repository {
 
     private final DataSource dataSource;
+
+    @Override
+    public DataSource getDataSource() { return dataSource; }
 
     public RecurringTaskRepository(DataSource dataSource) {
         this.dataSource = dataSource;

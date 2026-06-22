@@ -10,9 +10,12 @@ import java.util.List;
 import java.util.Optional;
 
 /** 糖果熊人生引擎的数据访问层：story_arc, weekly_diary, daily_journal */
-public class CandyBearLifeRepository {
+public class CandyBearLifeRepository implements Repository {
 
     private final DataSource dataSource;
+
+    @Override
+    public DataSource getDataSource() { return dataSource; }
 
     public CandyBearLifeRepository(DataSource dataSource) {
         this.dataSource = dataSource;

@@ -1,21 +1,29 @@
 package com.start.repository;
 
-
-import com.start.config.DatabaseConfig;
 import com.start.model.UserAffinity;
 
+import javax.sql.DataSource;
 import java.sql.*;
 import java.util.Optional;
 
 /**
  * UserAffinity 数据库操作类
  */
-public class UserAffinityRepository {
+public class UserAffinityRepository implements Repository {
+
+    private final DataSource dataSource;
+
+    @Override
+    public DataSource getDataSource() { return dataSource; }
+
+    public UserAffinityRepository(DataSource dataSource) {
+        this.dataSource = dataSource;
+    }
 
     public Optional<UserAffinity> findByUserIdAndGroupId(String userId, String groupId) throws SQLException {
         String sql = "SELECT * FROM user_affinity WHERE user_id = ? AND group_id " +
                 (groupId == null ? "IS NULL" : "= ?");
-        try (Connection conn = DatabaseConfig.getConnection();
+        try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, userId);
             if (groupId != null) {
@@ -40,7 +48,7 @@ public class UserAffinityRepository {
     }
 
     public void saveOrUpdate(UserAffinity affinity) throws SQLException {
-        try (Connection conn = DatabaseConfig.getConnection()) {
+        try (Connection conn = dataSource.getConnection()) {
             conn.setAutoCommit(false);
             String updateSql = "UPDATE user_affinity SET affinity_score = ?, last_updated_message_id = ?, message_count_snapshot = ?, reason_log = ?, updated_at = NOW() " +
                     "WHERE user_id = ? AND group_id " + (affinity.getGroupId() == null ? "IS NULL" : "= ?");

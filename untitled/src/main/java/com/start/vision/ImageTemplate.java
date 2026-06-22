@@ -1,6 +1,5 @@
 package com.start.vision;
 
-// ImageTemplate.java
 import java.awt.image.BufferedImage;
 
 @FunctionalInterface

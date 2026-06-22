@@ -1,6 +1,4 @@
 package com.start.agent;
-// src/main/java/agent/tools/KnowledgeBaseTool.java
-
 
 import com.start.agent.Tool;
 import com.start.service.KeywordKnowledgeService; // ← 替换为你的实际包路径

@@ -98,6 +98,9 @@ public class DailyProfessionHandler implements MessageHandler {
             return fallbackResult(userId, luck);
         }
 
+        // ⭐ 数据一致性修复：检测并修正位阶与战力不匹配的问题
+        repairPowerMismatch(p);
+
         // 特殊活动日：全员紫色史诗（必须在缓存判断之前，确保已抽过的人也能享受）
         boolean eventDay = LocalDate.now().getMonthValue() == 6 && LocalDate.now().getDayOfMonth() == 17;
 
@@ -412,6 +415,42 @@ public class DailyProfessionHandler implements MessageHandler {
             this.streakBad = streakBad;
             this.bestTier = bestTier;
             this.groupRank = groupRank;
+        }
+    }
+
+    /**
+     * 数据一致性修复：检测并修正位阶与战力不匹配的问题
+     * 当战力超出当前位阶的合理范围时，自动调整战力并回写数据库
+     */
+    private static void repairPowerMismatch(UserProfession p) {
+        int tier = p.getTier();
+        int power = p.getCombatPower();
+        
+        // 获取当前位阶的战力范围
+        int[] tierRange = UserProfessionRepository.ProfessionPath.POWER_RANGES[Math.min(Math.max(tier, 1), 5) - 1];
+        int minPower = tierRange[0];
+        int maxPower = tierRange[1];
+        
+        // 检测是否超出范围
+        if (power < minPower || power > maxPower) {
+            // 需要修复
+            logger.warn("数据一致性修复: 用户{} 位阶{} 战力{} 超出范围[{},{}]", 
+                    p.getUserId(), tier, power, minPower, maxPower);
+            
+            // 将战力修正到合理范围（取中间值附近）
+            int newPower = minPower + (int)((maxPower - minPower) * 0.5);
+            p.setCombatPower(newPower);
+            
+            // 更新稀有度（确保与位阶匹配）
+            p.setRarity(UserProfessionRepository.ProfessionPath.rarityForTier(tier));
+            
+            // 回写数据库
+            try {
+                repo.update(p);
+                logger.info("数据一致性修复完成: 用户{} 战力已修正为{}", p.getUserId(), newPower);
+            } catch (SQLException e) {
+                logger.error("数据一致性修复失败 userId={}", p.getUserId(), e);
+            }
         }
     }
 }

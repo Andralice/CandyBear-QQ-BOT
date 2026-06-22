@@ -10,9 +10,12 @@ import java.util.List;
 /**
  * 糖果熊自身记忆的数据库持久化。
  */
-public class BotMemoryRepository {
+public class BotMemoryRepository implements Repository {
 
     private final DataSource dataSource;
+
+    @Override
+    public DataSource getDataSource() { return dataSource; }
 
     public BotMemoryRepository(DataSource dataSource) {
         this.dataSource = dataSource;

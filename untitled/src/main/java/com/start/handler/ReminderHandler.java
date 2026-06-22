@@ -1,4 +1,3 @@
-// ReminderHandler.java
 package com.start.handler;
 
 import com.fasterxml.jackson.databind.JsonNode;

@@ -29,7 +29,7 @@ import static com.start.util.MessageUtil.extractAts;
  */
 public class AIHandler implements MessageHandler {
 
-    private static final Logger log = LoggerFactory.getLogger(AIHandler.class);
+    private static final Logger logger = LoggerFactory.getLogger(AIHandler.class);
     private static final long MAX_QUEUE_MS = 30_000; // 排队超过30秒则丢弃
 
     private final BaiLianService aiService;

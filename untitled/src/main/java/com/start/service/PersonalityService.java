@@ -1,4 +1,3 @@
-// service/PersonalityService.java - 新文件
 package com.start.service;
 
 import java.util.*;

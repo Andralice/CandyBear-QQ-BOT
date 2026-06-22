@@ -9,9 +9,12 @@ import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
 
-public class CandyBearScheduleRepository {
+public class CandyBearScheduleRepository implements Repository {
 
     private final DataSource dataSource;
+
+    @Override
+    public DataSource getDataSource() { return dataSource; }
 
     public CandyBearScheduleRepository(DataSource dataSource) {
         this.dataSource = dataSource;

@@ -8,9 +8,12 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
-public class LongTermMemoryRepository {
+public class LongTermMemoryRepository implements Repository {
 
     private final DataSource dataSource;
+
+    @Override
+    public DataSource getDataSource() { return dataSource; }
 
     public LongTermMemoryRepository(DataSource dataSource) {
         this.dataSource = dataSource;

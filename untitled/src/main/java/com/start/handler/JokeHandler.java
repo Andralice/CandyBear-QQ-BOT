@@ -1,4 +1,3 @@
-// src/main/java/com/start/handler/JokeHandler.java
 package com.start.handler;
 
 import com.fasterxml.jackson.databind.JsonNode;

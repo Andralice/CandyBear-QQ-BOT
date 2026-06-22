@@ -7,9 +7,12 @@ import javax.sql.DataSource;
 import java.time.LocalDate;
 import java.sql.*;
 
-public class UserProfessionRepository {
+public class UserProfessionRepository implements Repository {
 
     private final DataSource dataSource;
+
+    @Override
+    public DataSource getDataSource() { return dataSource; }
 
     public UserProfessionRepository(DataSource dataSource) {
         this.dataSource = dataSource;
@@ -33,6 +36,7 @@ public class UserProfessionRepository {
         return fresh;
     }
 
+    /** 根据用户ID和群ID查询职业记录 */
     public UserProfession findByUser(long userId, String groupId) throws SQLException {
         String sql = "SELECT * FROM user_professions WHERE user_id = ? AND group_id = ?";
         try (Connection conn = dataSource.getConnection();
@@ -46,6 +50,7 @@ public class UserProfessionRepository {
         return null;
     }
 
+    /** 插入新用户职业记录 */
     public void insert(UserProfession p) throws SQLException {
         String sql = "INSERT INTO user_professions (user_id, group_id, profession_path, profession_name, tier, rarity, combat_power, streak_good, streak_bad, best_tier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         try (Connection conn = dataSource.getConnection();
@@ -67,6 +72,7 @@ public class UserProfessionRepository {
         }
     }
 
+    /** 更新用户职业记录 */
     public void update(UserProfession p) throws SQLException {
         String sql = "UPDATE user_professions SET profession_path=?, profession_name=?, tier=?, rarity=?, combat_power=?, streak_good=?, streak_bad=?, best_tier=?, updated_at=NOW() WHERE id=?";
         try (Connection conn = dataSource.getConnection();
@@ -84,6 +90,7 @@ public class UserProfessionRepository {
         }
     }
 
+    /** 将ResultSet映射为UserProfession对象 */
     private UserProfession mapRow(ResultSet rs) throws SQLException {
         UserProfession p = new UserProfession();
         p.setId(rs.getLong("id"));
@@ -136,6 +143,7 @@ public class UserProfessionRepository {
 
     // ── 每日变动日志 ──
 
+    /** 插入或更新每日职业变动日志（幂等写入） */
     public void upsertDailyLog(ProfessionDailyLog log) {
         String sql = "INSERT INTO profession_daily_logs (user_id, group_id, log_date, profession_path, profession_name, tier, rarity, yesterday_power, base_power, power_from_luck, power_from_pk, final_power, luck_value, change_summary) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE base_power=VALUES(base_power), power_from_luck=VALUES(power_from_luck), power_from_pk=VALUES(power_from_pk), final_power=VALUES(final_power), luck_value=VALUES(luck_value), change_summary=VALUES(change_summary)";
         try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
@@ -159,6 +167,7 @@ public class UserProfessionRepository {
         }
     }
 
+    /** 查询指定日期的每日变动日志 */
     public ProfessionDailyLog getDailyLog(long userId, String groupId, LocalDate date) {
         String sql = "SELECT * FROM profession_daily_logs WHERE user_id=? AND group_id=? AND log_date=?";
         try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
@@ -189,6 +198,7 @@ public class UserProfessionRepository {
         return null;
     }
 
+    /** 更新每日日志中的PK战力变化 */
     public void updateDailyLogPK(long userId, String groupId, LocalDate date, int pkDelta, int newFinalPower) {
         String sql = "UPDATE profession_daily_logs SET power_from_pk = power_from_pk + ?, final_power = ? WHERE user_id=? AND group_id=? AND log_date=?";
         try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
@@ -222,14 +232,16 @@ public class UserProfessionRepository {
         static final String[] RARITY_NAMES = {"普通", "普通", "稀有", "史诗", "传说"};
 
         // 每个位阶的战力范围
-        static final int[][] POWER_RANGES = {
+        public static final int[][] POWER_RANGES = {
             {100, 300}, {300, 800}, {800, 2000}, {2000, 5000}, {5000, 10000}
         };
 
+        /** 根据用户ID随机分配脉系（确定性算法） */
         public static String randomPath(long userId) {
             return PATHS[(int) (Math.abs(userId * 0x9E3779B9L) % PATHS.length)];
         }
 
+        /** 获取指定脉系和阶位的职业名称 */
         public static String entryName(String path, int tier) {
             for (int i = 0; i < PATHS.length; i++) {
                 if (PATHS[i].equals(path)) return NAMES[i][Math.min(tier, 5) - 1];
@@ -237,10 +249,12 @@ public class UserProfessionRepository {
             return NAMES[0][0];
         }
 
+        /** 根据阶位获取稀有度名称 */
         public static String rarityForTier(int tier) {
             return RARITY_NAMES[Math.min(Math.max(tier, 1), 5) - 1];
         }
 
+        /** 根据阶位和用户信息生成随机战力（确定性算法） */
         public static int randomPower(int tier, long userId, String groupId) {
             long seed = com.start.util.SeedUtil.seed(String.valueOf(userId), groupId, "power", java.time.LocalDate.now().toString());
             java.util.Random rand = new java.util.Random(seed);

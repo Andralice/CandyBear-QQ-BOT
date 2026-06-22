@@ -37,8 +37,8 @@ public class UserPortraitService {
     Logger logger = LoggerFactory.getLogger(UserPortraitService.class);
     private final BaiLianService baiLianService; // 假设你有这个类
     private final MessageRepository messageRepo;
-    private final UserProfileRepository profileRepo = new UserProfileRepository();
-    private final UserAffinityRepository affinityRepo = new UserAffinityRepository();
+    private final UserProfileRepository profileRepo = new UserProfileRepository(DatabaseConfig.getDataSource());
+    private final UserAffinityRepository affinityRepo = new UserAffinityRepository(DatabaseConfig.getDataSource());
     private static final ObjectMapper jsonMapper = new ObjectMapper();
 
     private static final int MIN_NEW_MESSAGES = 20;

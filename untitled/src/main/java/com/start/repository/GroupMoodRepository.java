@@ -6,9 +6,12 @@ import javax.sql.DataSource;
 import java.sql.*;
 import java.util.Optional;
 
-public class GroupMoodRepository {
+public class GroupMoodRepository implements Repository {
 
     private final DataSource dataSource;
+
+    @Override
+    public DataSource getDataSource() { return dataSource; }
 
     public GroupMoodRepository(DataSource dataSource) {
         this.dataSource = dataSource;

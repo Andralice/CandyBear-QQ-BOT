@@ -1,6 +1,3 @@
-
-// service/AIDatabaseService.java - 专门补充BaiLianService
-// service/AIDatabaseService.java
 package com.start.service;
 
 import com.start.Main;
@@ -19,7 +16,7 @@ public class AIDatabaseService {
     private final UserRepository userRepo = new UserRepository();
     private final MessageRepository messageRepo = new MessageRepository();
     private final ConversationThreadRepository threadRepo = new ConversationThreadRepository();
-    private static final Logger logger = LoggerFactory.getLogger(Main.class);
+    private static final Logger logger = LoggerFactory.getLogger(AIDatabaseService.class);
     /**
      * 记录用户消息
      */

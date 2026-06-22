@@ -1,6 +1,5 @@
 package com.start.model;
 
-// UserProfile.java
 import java.time.LocalDateTime;
 
 public class UserProfile {

@@ -1,9 +1,8 @@
- // service/BehaviorAnalyzer.java - 新文件
 package com.start.service;
 
 import java.time.LocalDateTime;
 import java.util.*;
-        import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 // 👇 新增导入（根据你的实际路径调整）
 import com.start.Main;
@@ -22,7 +21,7 @@ import org.slf4j.LoggerFactory;
 
      // ✅ 内存指标（完全保留）
      private final Map<String, BehaviorMetrics> groupMetrics = new ConcurrentHashMap<>();
-     private static final Logger logger = LoggerFactory.getLogger(Main.class);
+     private static final Logger logger = LoggerFactory.getLogger(BehaviorAnalyzer.class);
      // ✅ 数据库访问层（可为空，表示只使用内存模式）
      private final MessageRepository messageRepo;
 

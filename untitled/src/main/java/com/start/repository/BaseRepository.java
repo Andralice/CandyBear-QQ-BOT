@@ -1,10 +1,9 @@
-
- // repository/BaseRepository.java
 package com.start.repository;
 
 import com.start.config.DatabaseConfig;
+import javax.sql.DataSource;
 import java.sql.*;
-        import java.util.ArrayList;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Function;
 
@@ -12,7 +11,12 @@ import java.util.function.Function;
 /**
  * 数据库操作抽象类
  */
-public abstract class BaseRepository {
+public abstract class BaseRepository implements Repository {
+
+    @Override
+    public DataSource getDataSource() {
+        return DatabaseConfig.getDataSource();
+    }
 
     /**
      * 安全的数据库操作包装器

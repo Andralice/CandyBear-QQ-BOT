@@ -10,11 +10,14 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-public class EvolutionRecordRepository {
+public class EvolutionRecordRepository implements Repository {
 
     private static final Logger logger = LoggerFactory.getLogger(EvolutionRecordRepository.class);
 
     private final DataSource dataSource;
+
+    @Override
+    public DataSource getDataSource() { return dataSource; }
 
     public EvolutionRecordRepository(DataSource dataSource) {
         this.dataSource = dataSource;

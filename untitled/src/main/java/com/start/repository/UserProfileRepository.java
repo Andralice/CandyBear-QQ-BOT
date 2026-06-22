@@ -1,22 +1,29 @@
 package com.start.repository;
 
-
-import com.start.config.DatabaseConfig;
 import com.start.model.UserProfile;
 
+import javax.sql.DataSource;
 import java.sql.*;
 import java.util.Optional;
-
 
 /**
  * 用户资料仓库
  */
-public class UserProfileRepository {
+public class UserProfileRepository implements Repository {
+
+    private final DataSource dataSource;
+
+    @Override
+    public DataSource getDataSource() { return dataSource; }
+
+    public UserProfileRepository(DataSource dataSource) {
+        this.dataSource = dataSource;
+    }
 
     public Optional<UserProfile> findByUserIdAndGroupId(String userId, String groupId) throws SQLException {
         String sql = "SELECT * FROM user_profiles WHERE user_id = ? AND group_id " +
                 (groupId == null ? "IS NULL" : "= ?");
-        try (Connection conn = DatabaseConfig.getConnection();
+        try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, userId);
             if (groupId != null) {
@@ -40,7 +47,7 @@ public class UserProfileRepository {
     }
 
     public void saveOrUpdate(UserProfile profile) throws SQLException {
-        try (Connection conn = DatabaseConfig.getConnection()) {
+        try (Connection conn = dataSource.getConnection()) {
             conn.setAutoCommit(false);
             String updateSql = "UPDATE user_profiles SET profile_text = ?, message_count_snapshot = ?, last_message_id = ?, updated_at = NOW() " +
                     "WHERE user_id = ? AND group_id " + (profile.getGroupId() == null ? "IS NULL" : "= ?");

@@ -1,5 +1,3 @@
-// repository/MessageRepository.java
-// repository/MessageRepository.java
 package com.start.repository;
 
 import com.start.config.DatabaseConfig;

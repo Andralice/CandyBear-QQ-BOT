@@ -1,5 +1,3 @@
-// repository/ConversationThreadRepository.java
-// repository/ConversationThreadRepository.java
 package com.start.repository;
 
 import java.sql.*;

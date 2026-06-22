@@ -1,4 +1,3 @@
-// util/DatabaseErrorHandler.java
 package com.start.util;
 
 /**

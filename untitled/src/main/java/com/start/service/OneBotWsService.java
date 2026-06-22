@@ -1,5 +1,3 @@
-// com/start/service/OneBotWsService.java
-
 package com.start.service;
 
 import com.fasterxml.jackson.databind.JsonNode;

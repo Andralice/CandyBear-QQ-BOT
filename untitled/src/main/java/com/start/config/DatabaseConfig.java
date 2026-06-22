@@ -1,5 +1,3 @@
-// config/DatabaseConfig.java
-// config/DatabaseConfig.java
 package com.start.config;
 
 import com.zaxxer.hikari.HikariConfig;

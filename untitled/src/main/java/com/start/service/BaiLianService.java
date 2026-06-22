@@ -133,7 +133,7 @@ public class BaiLianService {
     );
 
     private final BehaviorAnalyzer behaviorAnalyzer = new BehaviorAnalyzer();
-    private final UserProfileRepository profileRepo = new UserProfileRepository();
+    private final UserProfileRepository profileRepo = new UserProfileRepository(DatabaseConfig.getDataSource());
     private final UserAliasRepository userAliasRepo = new UserAliasRepository();
     private BotMoodService moodService;
     private CandyBearLifeEngine lifeEngine;
