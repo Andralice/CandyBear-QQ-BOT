@@ -2,11 +2,14 @@ package com.start.repository;
 
 import com.start.config.DatabaseConfig;
 import com.start.model.ChatMessage;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import java.sql.*;
 import java.time.LocalDateTime;
 import java.util.*;
 import static com.start.config.DatabaseConfig.getConnection;
 public class MessageRepository extends BaseRepository {
+    private static final Logger logger = LoggerFactory.getLogger(MessageRepository.class);
 
     /**
      * 保存消息
@@ -201,7 +204,7 @@ public class MessageRepository extends BaseRepository {
     public DatabaseResult<List<ChatMessage>> searchMessages(String groupId, String keyword, String userId,
                                                             String dateFrom, String dateTo, int limit) {
         return safeExecute(() -> {
-            StringBuilder sql = new StringBuilder("SELECT * FROM messages WHERE group_id = ? AND is_robot_reply = FALSE ");
+            StringBuilder sql = new StringBuilder("SELECT * FROM messages WHERE group_id = ? ");
             List<Object> params = new ArrayList<>();
             params.add(groupId);
 
@@ -240,6 +243,7 @@ public class MessageRepository extends BaseRepository {
                     ChatMessage msg = mapToChatMessage(rs);
                     if (msg != null) messages.add(msg);
                 }
+                logger.debug("searchMessages: sql={}, params={}, found={}", sql, params, messages.size());
                 return messages;
             } finally {
                 closeResources(conn, pstmt, rs);

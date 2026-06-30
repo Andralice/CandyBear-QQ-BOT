@@ -42,6 +42,12 @@ public class LongTermMemoryRepository implements Repository {
 
     /** 按用户+群检索记忆，关键词模糊匹配，排除已触发的定时事件 */
     public List<LongTermMemory> search(String userId, String groupId, String keyword, int limit) throws SQLException {
+        return search(userId, groupId, keyword, limit, null, null);
+    }
+
+    /** 按用户+群检索记忆，支持日期范围过滤 */
+    public List<LongTermMemory> search(String userId, String groupId, String keyword, int limit,
+                                       String dateFrom, String dateTo) throws SQLException {
         StringBuilder sql = new StringBuilder(
                 "SELECT * FROM long_term_memories WHERE user_id = ? AND group_id ");
         boolean hasGroup = groupId != null && !groupId.isBlank();
@@ -54,6 +60,15 @@ public class LongTermMemoryRepository implements Repository {
             sql.append("AND (content LIKE ? OR keywords LIKE ?) ");
             params.add("%" + keyword + "%");
             params.add("%" + keyword + "%");
+        }
+
+        if (dateFrom != null && !dateFrom.isBlank()) {
+            sql.append("AND created_at >= ? ");
+            params.add(normalizeDateFrom(dateFrom));
+        }
+        if (dateTo != null && !dateTo.isBlank()) {
+            sql.append("AND created_at <= ? ");
+            params.add(normalizeDateTo(dateTo));
         }
 
         sql.append("ORDER BY importance DESC, recall_count DESC, created_at DESC LIMIT ?");
@@ -76,6 +91,12 @@ public class LongTermMemoryRepository implements Repository {
 
     /** 按群组检索记忆（不限用户），关键词模糊匹配 */
     public List<LongTermMemory> searchByGroup(String groupId, String keyword, int limit) throws SQLException {
+        return searchByGroup(groupId, keyword, limit, null, null);
+    }
+
+    /** 按群组检索记忆（不限用户），支持日期范围过滤 */
+    public List<LongTermMemory> searchByGroup(String groupId, String keyword, int limit,
+                                              String dateFrom, String dateTo) throws SQLException {
         StringBuilder sql = new StringBuilder(
                 "SELECT * FROM long_term_memories WHERE group_id ");
         boolean hasGroup = groupId != null && !groupId.isBlank();
@@ -87,6 +108,15 @@ public class LongTermMemoryRepository implements Repository {
             sql.append("AND (content LIKE ? OR keywords LIKE ?) ");
             params.add("%" + keyword + "%");
             params.add("%" + keyword + "%");
+        }
+
+        if (dateFrom != null && !dateFrom.isBlank()) {
+            sql.append("AND created_at >= ? ");
+            params.add(normalizeDateFrom(dateFrom));
+        }
+        if (dateTo != null && !dateTo.isBlank()) {
+            sql.append("AND created_at <= ? ");
+            params.add(normalizeDateTo(dateTo));
         }
 
         sql.append("ORDER BY importance DESC, created_at DESC LIMIT ?");
@@ -151,6 +181,18 @@ public class LongTermMemoryRepository implements Repository {
         }
     }
 
+    /** "2026-06-05" → "2026-06-05 00:00:00" */
+    private String normalizeDateFrom(String s) {
+        s = s.trim();
+        if (s.matches("\\d{4}-\\d{2}-\\d{2}")) s += " 00:00:00";
+        return s;
+    }
+    private String normalizeDateTo(String s) {
+        s = s.trim();
+        if (s.matches("\\d{4}-\\d{2}-\\d{2}")) s += " 23:59:59";
+        return s;
+    }
+
     private LongTermMemory mapRow(ResultSet rs) throws SQLException {
         LongTermMemory m = new LongTermMemory();
         m.setId(rs.getLong("id"));
@@ -168,8 +210,10 @@ public class LongTermMemoryRepository implements Repository {
         Timestamp ta = rs.getTimestamp("trigger_at");
         if (ta != null) m.setTriggerAt(ta.toLocalDateTime());
         m.setTriggered(rs.getBoolean("triggered"));
-        m.setCreatedAt(rs.getTimestamp("created_at").toLocalDateTime());
-        m.setUpdatedAt(rs.getTimestamp("updated_at").toLocalDateTime());
+        Timestamp ca = rs.getTimestamp("created_at");
+        if (ca != null) m.setCreatedAt(ca.toLocalDateTime());
+        Timestamp ua = rs.getTimestamp("updated_at");
+        if (ua != null) m.setUpdatedAt(ua.toLocalDateTime());
         return m;
     }
 }

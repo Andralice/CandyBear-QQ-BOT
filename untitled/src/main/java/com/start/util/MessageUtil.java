@@ -177,6 +177,28 @@ public class MessageUtil {
     }
 
     /**
+     * 提取消息中的文件信息（file_id, file_name, file_size, busid）
+     */
+    public static List<Map<String, String>> extractFiles(JsonNode messageNode) {
+        List<Map<String, String>> files = new ArrayList<>();
+        if (messageNode == null || !messageNode.isArray()) return files;
+        for (JsonNode seg : messageNode) {
+            if (!"file".equals(seg.path("type").asText())) continue;
+            JsonNode data = seg.path("data");
+            if (data == null || !data.isObject()) continue;
+            String fileId = data.path("file_id").asText("");
+            if (fileId.isEmpty()) continue;
+            Map<String, String> info = new HashMap<>();
+            info.put("file_id", fileId);
+            info.put("file_name", data.path("file").asText(""));
+            info.put("file_size", data.path("file_size").asText(""));
+            info.put("busid", data.path("busid").asText(""));
+            files.add(info);
+        }
+        return files;
+    }
+
+    /**
      * 提取消息中的分享卡片（type=="share"），含 url/title/content
      */
     public static List<Map<String, String>> extractShares(JsonNode messageNode) {

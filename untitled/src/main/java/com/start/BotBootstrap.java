@@ -48,9 +48,6 @@ public final class BotBootstrap {
         bot.baiLianService.setMoodService(bot.moodService);
         bot.baiLianService.setBotInstance(bot);
 
-        // 智能代理
-        bot.agentService = new AgentService(bot.baiLianService, bot.keywordKnowledgeService, bot.userAffinityRepo);
-
         // 异常监控
         bot.errorMonitorService = new ErrorMonitorService(bot.baiLianService);
 
@@ -59,7 +56,8 @@ public final class BotBootstrap {
         ServerAdminService shellService = new ServerAdminService();
 
         // Handler 注册中心
-        bot.handlerRegistry = new HandlerRegistry(bot.agentService, bot.baiLianService, groupExecutor, bot, shellService);
+        ConversationManager conversationManager = new ConversationManager();
+        bot.handlerRegistry = new HandlerRegistry(bot.baiLianService, groupExecutor, bot, shellService, conversationManager);
 
         // DashScope API Key
         if (BotConfig.getBaiLianApiKey() != null && !BotConfig.getBaiLianApiKey().isBlank()) {

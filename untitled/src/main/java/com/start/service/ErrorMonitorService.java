@@ -40,6 +40,9 @@ public class ErrorMonitorService {
     private static final int SCAN_INTERVAL_MINUTES = 5;
     private static final int MAX_ERRORS_PER_SCAN = 20;
     private static final int DEDUP_WINDOW_SECONDS = 1800;
+    private static final int AUDIT_MAX_RETRIES = 3;
+    private static final int AUDIT_RETRY_DELAY_MS = 2000;
+    private static final int ALERT_CONSECUTIVE_THRESHOLD = 3;
 
     private final BaiLianService aiService;
     private Main botInstance;
@@ -51,6 +54,7 @@ public class ErrorMonitorService {
     private long lastFilePos = 0;
     private Path lastLogPath = null;
     private final Map<String, Long> notifiedSignatures = new ConcurrentHashMap<>();
+    private int consecutiveQuotaErrors = 0;
 
     private final HttpClient httpClient;
 
@@ -188,43 +192,65 @@ public class ErrorMonitorService {
         sb.append("2. 是否有需要立即修复的问题\n");
         sb.append("回复格式：'[严重程度] 结论。需要修复：是/否。原因：...'");
 
-        try {
-            String requestBody = buildRequestBody(sb.toString());
-            HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(BotConfig.getAuditBaseUrl()))
-                    .header("Authorization", "Bearer " + BotConfig.getAuditApiKey())
-                    .header("Content-Type", "application/json")
-                    .timeout(Duration.ofMillis(BotConfig.getAuditTimeoutMs()))
-                    .POST(HttpRequest.BodyPublishers.ofString(requestBody))
-                    .build();
+        String requestBody = buildRequestBody(sb.toString());
 
-            HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+        for (int attempt = 0; attempt < AUDIT_MAX_RETRIES; attempt++) {
+            try {
+                HttpRequest req = HttpRequest.newBuilder()
+                        .uri(URI.create(BotConfig.getAuditBaseUrl()))
+                        .header("Authorization", "Bearer " + BotConfig.getAuditApiKey())
+                        .header("Content-Type", "application/json")
+                        .timeout(Duration.ofMillis(BotConfig.getAuditTimeoutMs()))
+                        .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                        .build();
 
-            if (isQuotaError(resp.statusCode(), resp.body())) {
-                logger.error("审计 API 余额/配额耗尽: HTTP {} body={}", resp.statusCode(),
-                        resp.body() != null ? resp.body().substring(0, Math.min(200, resp.body().length())) : "");
-                sendAlert("[审计API余额告警] mytokenland 可能欠费或配额耗尽，HTTP " + resp.statusCode());
+                HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+
+                if (isQuotaError(resp.statusCode(), resp.body())) {
+                    logger.warn("审计 API 疑似配额问题 (attempt {}/{}): HTTP {} body={}",
+                            attempt + 1, AUDIT_MAX_RETRIES, resp.statusCode(),
+                            resp.body() != null ? resp.body().substring(0, Math.min(200, resp.body().length())) : "");
+                    if (attempt < AUDIT_MAX_RETRIES - 1) {
+                        try { Thread.sleep(AUDIT_RETRY_DELAY_MS); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return; }
+                        continue;
+                    }
+                    consecutiveQuotaErrors++;
+                    logger.error("审计 API 连续 {} 次配额错误（累计 {} 次），HTTP {}",
+                            AUDIT_MAX_RETRIES, consecutiveQuotaErrors, resp.statusCode());
+                    if (consecutiveQuotaErrors >= ALERT_CONSECUTIVE_THRESHOLD) {
+                        sendAlert("[审计API余额告警] mytokenland 疑似欠费或配额耗尽（已重试多次），HTTP " + resp.statusCode());
+                    }
+                    return;
+                }
+
+                // 调用成功，重置计数
+                consecutiveQuotaErrors = 0;
+
+                if (resp.statusCode() != 200) {
+                    logger.warn("审计 API 返回非200: {}", resp.statusCode());
+                    return;
+                }
+
+                JsonNode json = MAPPER.readTree(resp.body());
+                String content = json.path("choices").get(0).path("message").path("content").asText("");
+                logger.info("📊 审计API: 结论={}", content.substring(0, Math.min(content.length(), 100)));
+
+                if (needsRepair(content)) {
+                    logger.warn("🔧 审计 API 判定需要修复，触发主 AI");
+                    triggerMainAiFix(errors, content);
+                } else {
+                    logger.info("✅ 审计 API 判定无需修复，跳过");
+                }
                 return;
+
+            } catch (IOException | InterruptedException e) {
+                logger.warn("审计 API 调用失败 (attempt {}/{}): {}", attempt + 1, AUDIT_MAX_RETRIES, e.getMessage());
+                if (attempt < AUDIT_MAX_RETRIES - 1) {
+                    try { Thread.sleep(AUDIT_RETRY_DELAY_MS); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return; }
+                } else {
+                    logger.error("审计 API 重试耗尽: {}", e.getMessage());
+                }
             }
-
-            if (resp.statusCode() != 200) {
-                logger.warn("审计 API 返回非200: {}", resp.statusCode());
-                return;
-            }
-
-            JsonNode json = MAPPER.readTree(resp.body());
-            String content = json.path("choices").get(0).path("message").path("content").asText("");
-            logger.info("📊 审计API: 结论={}", content.substring(0, Math.min(content.length(), 100)));
-
-            if (needsRepair(content)) {
-                logger.warn("🔧 审计 API 判定需要修复，触发主 AI");
-                triggerMainAiFix(errors, content);
-            } else {
-                logger.info("✅ 审计 API 判定无需修复，跳过");
-            }
-
-        } catch (IOException | InterruptedException e) {
-            logger.error("审计 API 调用失败: {}", e.getMessage());
         }
     }
 
@@ -270,9 +296,13 @@ public class ErrorMonitorService {
             prompt.append("```\n\n");
             prompt.append("请执行：\n");
             prompt.append("1. audit_logs action=errors 看详细堆栈\n");
-            prompt.append("2. 定位问题代码 → read_code\n");
-            prompt.append("3. self_evolve 修复\n");
-            prompt.append("4. 修完后 send_private_msg 告诉归儿修了什么\n");
+            prompt.append("2. 定位问题代码 → read_code（只读，不要改）\n");
+            prompt.append("3. 分析完后用 send_private_msg 告诉归儿：\n");
+            prompt.append("   - 异常是什么、严重程度\n");
+            prompt.append("   - 问题出在哪个文件的哪个方法\n");
+            prompt.append("   - 建议怎么修（给出具体的 old_snippet → new_snippet）\n");
+            prompt.append("   - 如果简单的话也说明一下需要几行改动\n");
+            prompt.append("⚠️ 不要调用 self_evolve，只分析+报告。归儿会自己决定要不要修。\n");
             prompt.append("如果审计判断有误或无需修，也说一声。");
 
             logger.info("🤖 触发主 AI 修复: sessionId={}", sessionId);
@@ -280,7 +310,7 @@ public class ErrorMonitorService {
 
             if (result != null && !result.trim().isEmpty() && botInstance != null) {
                 String shortResult = result.length() > 300 ? result.substring(0, 300) + "..." : result;
-                botInstance.sendPrivateReply(adminQQ, "[自动修复]\n" + shortResult);
+                botInstance.sendPrivateReply(adminQQ, "[异常报告]\n" + shortResult);
             }
         } catch (Exception e) {
             logger.error("主 AI 修复触发失败", e);
@@ -300,12 +330,15 @@ public class ErrorMonitorService {
     }
 
     private static boolean isQuotaError(int statusCode, String body) {
-        if (statusCode == 429 || statusCode == 402 || statusCode == 403) return true;
+        if (statusCode == 402) return true;
         if (body == null) return false;
         String lower = body.toLowerCase();
-        return lower.contains("insufficient") || lower.contains("quota") || lower.contains("balance")
+        if (lower.contains("insufficient") || lower.contains("quota") || lower.contains("balance")
             || lower.contains("余额不足") || lower.contains("配额不足") || lower.contains("欠费")
-            || lower.contains("rate limit") || lower.contains("billing");
+            || lower.contains("rate limit") || lower.contains("billing")) {
+            return true;
+        }
+        return false;
     }
 
     private static void sendAlert(String msg) {

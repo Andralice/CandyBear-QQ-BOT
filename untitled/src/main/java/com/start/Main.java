@@ -91,9 +91,6 @@ public class Main extends WebSocketClient {
     /** 关键词知识库服务，支持基于关键词的快速问答匹配。 */
     KeywordKnowledgeService keywordKnowledgeService;
 
-    /** 智能代理服务，整合大模型、知识库与用户画像。 */
-    AgentService agentService;
-
     // ===== 事件处理器与辅助组件 =====
 
     /** 事件处理器注册中心，用于动态绑定不同消息类型的处理逻辑。 */
@@ -277,6 +274,22 @@ public class Main extends WebSocketClient {
                     } else {
                         logger.warn("⚠️ SpamDetector 未初始化，跳过防刷检测");
                     }
+                }
+
+                // 全量存储消息（群聊+私聊），供 search_chat_history 查询
+                try {
+                    String saveSessionId;
+                    String saveGroupId = null;
+                    boolean isPrivate = "private".equals(messageType);
+                    if (isPrivate) {
+                        saveSessionId = "private_" + userId;
+                    } else {
+                        saveGroupId = String.valueOf(event.path("group_id").asLong());
+                        saveSessionId = "group_" + saveGroupId + "_" + userId;
+                    }
+                    messageService.saveUserMessage(saveSessionId, String.valueOf(userId), saveGroupId, rawMessage, isPrivate);
+                } catch (Exception e) {
+                    logger.warn("保存消息失败: {}", e.getMessage());
                 }
 
                 // 分发事件给注册的处理器

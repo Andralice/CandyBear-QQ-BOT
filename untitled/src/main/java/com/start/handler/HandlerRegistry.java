@@ -2,9 +2,9 @@ package com.start.handler;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.start.Main;
+import com.start.service.ConversationManager;
 import com.start.service.EggGroupDataCenter;
 import com.start.repository.MerchantRepository;
-import com.start.service.AgentService;
 import com.start.service.BaiLianService;
 import com.start.service.GroupSerialExecutor;
 import com.start.service.MerchantApiService;
@@ -25,11 +25,7 @@ public class HandlerRegistry {
     private final EggGroupDataCenter dataCenter = new EggGroupDataCenter();
     private final TravelingMerchantHandler merchantHandler;
     private final MerchantApiService merchantApiService;
-    private final AgentService agentService;
-
-    public HandlerRegistry(AgentService agentService, BaiLianService baiLianService, GroupSerialExecutor groupExecutor, Main bot, ServerAdminService shellService) {
-        this.agentService = agentService;
-
+    public HandlerRegistry(BaiLianService baiLianService, GroupSerialExecutor groupExecutor, Main bot, ServerAdminService shellService, ConversationManager conversationManager) {
         // 远行商人：数据库 + API
         MerchantRepository merchantRepo = new MerchantRepository();
         merchantRepo.initTables();
@@ -51,10 +47,9 @@ public class HandlerRegistry {
         handlers.add(new DailyCpHandler());
         handlers.add(new RankHandler());
         handlers.add(new EggGroupSearchHandler(dataCenter));
-        handlers.add(new AgentHandler(agentService, groupExecutor));
         handlers.add(merchantHandler);
         handlers.add(new ProfessionPKHandler());
-        handlers.add(new AIHandler(baiLianService, groupExecutor));
+        handlers.add(new AIHandler(baiLianService, groupExecutor, conversationManager));
     }
 
     public void dispatch(JsonNode message, Main bot) {

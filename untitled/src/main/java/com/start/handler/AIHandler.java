@@ -2,11 +2,14 @@ package com.start.handler;
 
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.start.Main;
 import com.start.config.BotConfig;
 import com.start.service.BaiLianService;
+import com.start.service.ConversationManager;
+import com.start.service.ConversationState;
 import com.start.service.GroupSerialExecutor;
 import com.start.service.LinkPreviewService;
 import com.start.util.MessageUtil;
@@ -14,13 +17,20 @@ import com.start.vision.ImageUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 import static com.start.util.MessageUtil.extractAts;
 
@@ -34,15 +44,17 @@ public class AIHandler implements MessageHandler {
 
     private final BaiLianService aiService;
     private final GroupSerialExecutor groupExecutor;
+    private final ConversationManager conversationManager;
     private final Random random = new Random();
     private final ConcurrentHashMap<String, Long> lastReactionTime = new ConcurrentHashMap<>();
     private static final long USER_REACTION_COOLDOWN_MS = 2000;
     private final ConcurrentHashMap<String, Long> lastGroupReplyTime = new ConcurrentHashMap<>();
     private static final long GROUP_REPLY_COOLDOWN_MS = 12_000;
 
-    public AIHandler(BaiLianService aiService, GroupSerialExecutor groupExecutor) {
+    public AIHandler(BaiLianService aiService, GroupSerialExecutor groupExecutor, ConversationManager conversationManager) {
         this.aiService = aiService;
         this.groupExecutor = groupExecutor;
+        this.conversationManager = conversationManager;
     }
 
     @Override
@@ -85,6 +97,15 @@ public class AIHandler implements MessageHandler {
         // 提取图片信息（只在 WebSocket 线程提取 URL，下载在 executor 内完成）
         List<Map<String, String>> imageInfos = MessageUtil.extractImages(msg.path("message"));
 
+        // 提取文件信息 → 存入缓存，由副 AI 处理，主 AI 通过 query_file 工具主动获取
+        List<Map<String, String>> fileInfos = MessageUtil.extractFiles(msg.path("message"));
+        if (!fileInfos.isEmpty()) {
+            String fileKey = "group".equals(messageType)
+                    ? "group_" + groupId + "_" + userId
+                    : "private_" + userId;
+            aiService.addPendingFiles(fileKey, fileInfos);
+        }
+
         // 提取链接（分享卡片 + 纯文本 URL）
         List<String> linksToFetch = new ArrayList<>();
         for (Map<String, String> share : MessageUtil.extractShares(msg.path("message"))) {
@@ -110,18 +131,46 @@ public class AIHandler implements MessageHandler {
         );
 
         String gid = String.valueOf(groupId);
+        String uid = String.valueOf(userId);
+
+        // 缓冲消息到 ConversationState（WebSocket 线程）
+        ConversationState conv = conversationManager.getOrCreate(gid, uid);
+        conv.addMessage(plainText);
+        if (!imageInfos.isEmpty()) {
+            for (Map<String, String> img : imageInfos) {
+                conv.addImageInfo(img.get("url"), img.get("file"));
+            }
+        }
+        for (String link : linksToFetch) {
+            conv.addLink(link);
+        }
+        Long replyId = MessageUtil.extractReplyId(msg.path("message"));
+        if (replyId != null) conv.setReplyToMessageId(replyId);
+        conv.incrementRevision();
 
         // 明确触发（#ai / !ai / @）
         if (isExplicitTrigger(msg, rawMessage)) {
-            aiService.cancelPendingAwait(gid, String.valueOf(userId));
-            handleExplicitAIRequest(bot, msg, userId, groupId, rawMessage, plainText, nickname, imageInfos, linksToFetch);
+            aiService.cancelPendingAwait(gid, uid);
+            String strippedPrompt = extractPrompt(rawMessage, plainText);
+            if (isClearCommand(strippedPrompt)) {
+                aiService.clearContext("group_" + groupId + "_" + uid);
+                bot.sendReply(msg, "已清除我们的聊天记忆！");
+                conversationManager.remove(gid, uid);
+                return;
+            }
+            if (strippedPrompt.isEmpty() && imageInfos.isEmpty()) {
+                bot.sendReply(msg, "问点什么吧～");
+                conversationManager.remove(gid, uid);
+                return;
+            }
+            runGroupConversation(bot, groupId, gid, uid, nickname, ats);
             return;
         }
 
         // 主动插话判断（WebSocket 线程，无竞争）
         Optional<BaiLianService.Reaction> reaction = aiService.shouldReactToGroupMessage(
                 gid,
-                String.valueOf(userId),
+                uid,
                 senderNick,
                 plainText,
                 ats
@@ -129,7 +178,7 @@ public class AIHandler implements MessageHandler {
 
         // 纯图片消息的追问处理（移动端QQ无法同时发送文字+图片，用户可能在"发图吧"之后单独发图）
         boolean imageFollowUp = !imageInfos.isEmpty() && reaction.isEmpty()
-                && aiService.isWithinFollowUpWindow(gid, String.valueOf(userId));
+                && aiService.isWithinFollowUpWindow(gid, uid);
 
         if (reaction.isPresent() || imageFollowUp) {
             long now = System.currentTimeMillis();
@@ -150,28 +199,180 @@ public class AIHandler implements MessageHandler {
             lastGroupReplyTime.put(gid, now);
 
             boolean needsAI = imageFollowUp || reaction.map(r -> r.needsAI).orElse(false);
-            String prompt = imageFollowUp ? "看一下这张图片" : reaction.get().prompt;
             if (needsAI) {
-                groupExecutor.execute(gid, () -> {
-                    List<String> imageDataUris = downloadImages(imageInfos);
-                    String imageDesc = aiService.describeImages(imageDataUris);
-                    String linkContext = buildLinkContext(linksToFetch);
-                    String fullPrompt = prompt;
-                    if (!imageDesc.isEmpty()) fullPrompt = fullPrompt + "\n\n" + imageDesc;
-                    if (!linkContext.isEmpty()) fullPrompt = fullPrompt + "\n\n" + linkContext;
-                    String reply = aiService.generate("group_" + groupId + "_" + userId, String.valueOf(userId), fullPrompt, gid, String.valueOf(nickname), ats);
-                    if (!reply.trim().isEmpty() && !reply.equals("抱歉，刚才走神了...") && !reply.equals("嗯...再问一次吧")) {
-                        sendSplitGroupReplies(bot, groupId, reply);
-                        aiService.recordUserInteraction(gid, String.valueOf(userId), reply);
-                        aiService.recordGroupContext(gid, String.valueOf(userId), "糖果熊", reply, "ai_reply");
-                    } else {
-                        bot.sendGroupReply(groupId, "刚刚走神了，再说一遍？");
-                    }
-                });
+                runGroupConversation(bot, groupId, gid, uid, nickname, ats);
             } else {
                 sendSplitGroupReplies(bot, groupId, reaction.get().text);
+                conversationManager.remove(gid, uid);
             }
         }
+    }
+
+    private static final int MAX_REGENERATE = 2;
+    private static final HttpClient auditHttpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofMillis(5000))
+            .build();
+
+    /** 从 ConversationState 读取累积消息，生成回复并发送。在 executor 线程中执行。 */
+    private void runGroupConversation(Main bot, long groupId, String gid, String userId, String nickname, List<Long> ats) {
+        groupExecutor.execute(gid, () -> {
+            ConversationState state = conversationManager.get(gid, userId);
+            if (state == null || !state.hasContent()) return;
+
+            long startRevision = state.getMessageRevision();
+            int startMsgCount = state.getPendingMessages().size();
+            state.incrementGeneration();
+            String reply = null;
+
+            // 图片 + 链接上下文在一次对话中不变，提到循环外避免重复下载/描述
+            String replyContext = "";
+            Long replyToMsgId = state.getReplyToMessageId();
+            if (replyToMsgId != null) {
+                replyContext = fetchReplyContext(replyToMsgId, bot);
+            }
+            List<Map<String, String>> imageInfoMaps = new ArrayList<>();
+            for (ConversationState.ImageInfo img : state.getImageInfos()) {
+                Map<String, String> m = new HashMap<>();
+                m.put("url", img.url());
+                m.put("file", img.file());
+                imageInfoMaps.add(m);
+            }
+            List<String> imageDataUris = downloadImages(imageInfoMaps);
+            String imageDesc = aiService.describeImages(imageDataUris);
+            String linkContext = buildLinkContext(state.getLinksToFetch());
+
+            for (int attempt = 0; attempt <= MAX_REGENERATE; attempt++) {
+                if (attempt > 0) {
+                    startRevision = state.getMessageRevision();
+                    startMsgCount = state.getPendingMessages().size();
+                    state.incrementGeneration();
+                    state.incrementRegenerateCount();
+                    logger.debug("Conversation regenerate gen={} rev={} count={} gid={} uid={}",
+                            state.getGeneration(), state.getMessageRevision(), state.getRegenerateCount(), gid, userId);
+                }
+
+                // 从 buffer 读取累积的消息文本（每次循环可能变化）
+                String mergedText = state.getMergedText();
+                String prompt = replyContext.isEmpty() ? mergedText : replyContext + mergedText;
+                if (prompt.isEmpty() && !state.getImageInfos().isEmpty()) {
+                    prompt = "看一下这张图片";
+                }
+                if (!imageDesc.isEmpty()) prompt = prompt + "\n\n" + imageDesc;
+                if (!linkContext.isEmpty()) prompt = prompt + "\n\n" + linkContext;
+
+                String sessionId = "group_" + groupId + "_" + userId;
+                aiService.setSuppressSessionWrite(true);
+                try {
+                    reply = aiService.generate(sessionId, userId, prompt, gid, nickname, ats);
+                } finally {
+                    aiService.setSuppressSessionWrite(false);
+                }
+
+                // 检查 LLM 调用期间是否有新消息到达
+                if (state.getMessageRevision() == startRevision) {
+                    break; // 无变化，回复可用
+                }
+                if (attempt >= MAX_REGENERATE) {
+                    logger.debug("Max regenerate reached, sending anyway gid={} uid={}", gid, userId);
+                    break;
+                }
+
+                // 有新消息 → audit 模型判断是否合并再生
+                String oldText = getMergedTextRange(state.getPendingMessages(), 0, startMsgCount);
+                String newText = getMergedTextRange(state.getPendingMessages(), startMsgCount, state.getPendingMessages().size());
+                String auditResult = classifyMessageRelation(oldText, newText, reply);
+                logger.debug("Audit classify: {} old=[{}] new=[{}] gid={} uid={}", auditResult, oldText, newText, gid, userId);
+
+                if ("C".equals(auditResult)) {
+                    continue; // 补充/修正 → 合并再生
+                }
+                // S（重复）或 N（独立话题）→ 发送原回复
+                break;
+            }
+
+            if (reply != null && !reply.trim().isEmpty() && !reply.equals("抱歉，刚才走神了...") && !reply.equals("嗯...再问一次吧")) {
+                sendSplitGroupReplies(bot, groupId, reply);
+                aiService.commitGeneration("group_" + groupId + "_" + userId, userId,
+                        state.getMergedText(), reply, gid);
+            } else {
+                bot.sendGroupReply(groupId, "刚刚走神了，再说一遍？");
+            }
+
+            conversationManager.remove(gid, userId);
+        });
+    }
+
+    private static String getMergedTextRange(List<ConversationState.MessageEntry> msgs, int start, int end) {
+        int from = Math.max(0, start);
+        int to = Math.min(msgs.size(), end);
+        if (from >= to) return "";
+        return msgs.subList(from, to).stream()
+                .map(ConversationState.MessageEntry::text)
+                .filter(t -> !t.isEmpty())
+                .collect(Collectors.joining("\n"));
+    }
+
+    /** 调用 audit 模型（便宜）判断后半部分消息的性质。返回 S / C / N */
+    private String classifyMessageRelation(String oldText, String newText, String generatedReply) {
+        if (newText.isEmpty()) return "S";
+        try {
+            String prompt = "用户连续发了消息，AI已为前半部分生成了回复，但后半部分在回复生成后才到达。\n"
+                    + "\n【前半部分消息】\n" + (oldText.isEmpty() ? "（空）" : oldText)
+                    + "\n\n【后半部分新增消息】\n" + newText
+                    + "\n\n【AI已生成的回复】\n" + generatedReply
+                    + "\n\n请判断后半部分消息的性质，只回复一个大写字母：\n"
+                    + "S - 后半部分是前半部分的重复/同义/废话，不需要额外回复\n"
+                    + "C - 后半部分是前半部分的补充/修正/延续，应该合并后重新生成回复\n"
+                    + "N - 后半部分是新的独立话题，与前半部分无关\n\n只回复一个字母：";
+
+            ObjectNode body = JsonNodeFactory.instance.objectNode();
+            body.put("model", BotConfig.getAuditModel());
+            ArrayNode msgs = body.putArray("messages");
+            ObjectNode msg = msgs.addObject();
+            msg.put("role", "user");
+            msg.put("content", prompt);
+            body.put("max_tokens", 10);
+            body.put("temperature", 0.0);
+
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(BotConfig.getAuditBaseUrl()))
+                    .header("Authorization", "Bearer " + BotConfig.getAuditApiKey())
+                    .header("Content-Type", "application/json")
+                    .timeout(Duration.ofMillis(BotConfig.getAuditTimeoutMs()))
+                    .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
+                    .build();
+
+            HttpResponse<String> resp = auditHttpClient.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() == 200) {
+                JsonNode json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(resp.body());
+                String content = json.path("choices").get(0).path("message").path("content").asText("S").trim();
+                if (content.startsWith("S")) return "S";
+                if (content.startsWith("C")) return "C";
+                if (content.startsWith("N")) return "N";
+                return "S"; // 默认不再生
+            }
+            logger.warn("Audit classify HTTP error: {}", resp.statusCode());
+        } catch (Exception e) {
+            logger.warn("Audit classify failed: {}", e.getMessage());
+        }
+        return "S"; // 出错时保守处理：不重新生成
+    }
+
+    /** 获取引用消息的文本上下文 */
+    private String fetchReplyContext(Long replyMsgId, Main bot) {
+        try {
+            var params = new ObjectNode(JsonNodeFactory.instance);
+            params.put("message_id", replyMsgId);
+            var future = bot.callOneBotApi("get_msg", params);
+            var resp = future.get(5, java.util.concurrent.TimeUnit.SECONDS);
+            if (resp != null && resp.has("data")) {
+                String repliedText = resp.path("data").path("raw_message").asText();
+                if (!repliedText.isEmpty()) {
+                    return "（对方正在回复这条消息：\"" + repliedText + "\"）";
+                }
+            }
+        } catch (Exception ignored) {}
+        return "";
     }
 
     private String buildReplyContext(JsonNode msg, Main bot) {
@@ -209,27 +410,6 @@ public class AIHandler implements MessageHandler {
         if (prompt.isEmpty()) prompt = "看一下这张图片";
 
         replyWithAI(bot, msg, sessionId, String.valueOf(userId), prompt, null, nickname, Collections.emptyList(), imageInfos, linksToFetch);
-    }
-
-    private void handleExplicitAIRequest(Main bot, JsonNode msg, long userId, long groupId, String rawMessage, String plainText, String nickname, List<Map<String, String>> imageInfos, List<String> linksToFetch) {
-        String replyCtx = buildReplyContext(msg, bot);
-        String prompt = replyCtx.isEmpty() ? extractPrompt(rawMessage, plainText) : replyCtx + extractPrompt(rawMessage, plainText);
-        String sessionId = "group_" + groupId + "_" + userId;
-
-        if (isClearCommand(prompt)) {
-            aiService.clearContext(sessionId);
-            bot.sendReply(msg, "已清除我们的聊天记忆！");
-            return;
-        }
-
-        if (prompt.isEmpty() && imageInfos.isEmpty()) {
-            bot.sendReply(msg, "问点什么吧～");
-            return;
-        }
-        if (prompt.isEmpty()) prompt = "看一下这张图片";
-
-        List<Long> ats = MessageUtil.extractAts(msg.path("message"));
-        replyWithAI(bot, msg, sessionId, String.valueOf(userId), prompt, String.valueOf(groupId), nickname, ats, imageInfos, linksToFetch);
     }
 
     private boolean isExplicitTrigger(JsonNode msg, String rawMessage) {

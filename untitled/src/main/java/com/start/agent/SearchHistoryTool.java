@@ -4,6 +4,8 @@ import com.start.model.ChatMessage;
 import com.start.model.LongTermMemory;
 import com.start.repository.LongTermMemoryRepository;
 import com.start.repository.MessageRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -13,6 +15,7 @@ import java.util.*;
  * 支持任意时间范围查询。
  */
 public class SearchHistoryTool implements Tool {
+    private static final Logger logger = LoggerFactory.getLogger(SearchHistoryTool.class);
     private final MessageRepository messageRepo;
     private final LongTermMemoryRepository memoryRepo;
 
@@ -26,7 +29,9 @@ public class SearchHistoryTool implements Tool {
     @Override public String getDescription() {
         return "搜索群聊历史记录（包括AI提炼的记忆和原始消息）。支持任意时间范围。" +
                "当用户问'刚才谁说了XXX''今天大家聊了什么''昨天XX说过什么''上周有没有人提过XXX'时调用。" +
-               "参数：keyword(搜索关键词), user_id(指定某人QQ), count(返回条数，默认10), date_from(起始日期，如2026-06-05或2026-06-05 14:30), date_to(结束日期，如2026-06-05或2026-06-05 23:59)";
+               "参数：keyword(搜索关键词), user_id(指定某人QQ), count(返回条数，默认10), " +
+               "date_from(起始日期，格式yyyy-MM-dd，如2026-06-05。查今天/昨天/某天时必填，否则只能扫到全表最近N条，无法区分日期), " +
+               "date_to(结束日期，格式yyyy-MM-dd，如2026-06-05。查今天/昨天/某天时必填)";
     }
 
     @Override
@@ -54,20 +59,25 @@ public class SearchHistoryTool implements Tool {
         String dateFrom = (String) args.get("date_from");
         String dateTo = (String) args.get("date_to");
 
+        int memLimit = Math.min(count, 20);
+        logger.info("search_chat_history: group={}, keyword={}, userId={}, dateFrom={}, dateTo={}, count={}",
+                groupId, keyword, userId, dateFrom, dateTo, count);
         StringBuilder result = new StringBuilder();
 
         // 1. 先查结构化记忆（long_term_memories）
         try {
             List<LongTermMemory> memories;
             if (userId != null && !userId.isBlank()) {
-                memories = memoryRepo.search(userId, groupId, blankToNull(keyword), Math.min(count, 20));
+                memories = memoryRepo.search(userId, groupId, blankToNull(keyword), memLimit, dateFrom, dateTo);
             } else {
-                memories = memoryRepo.searchByGroup(groupId, blankToNull(keyword), Math.min(count, 20));
+                memories = memoryRepo.searchByGroup(groupId, blankToNull(keyword), memLimit, dateFrom, dateTo);
             }
 
             if (memories != null && !memories.isEmpty()) {
                 DateTimeFormatter fmt = DateTimeFormatter.ofPattern("MM-dd HH:mm");
-                result.append("【结构化记忆】找到 ").append(memories.size()).append(" 条：\n");
+                result.append("【结构化记忆】找到 ").append(memories.size()).append(" 条");
+                if (memories.size() >= memLimit) result.append("（已达上限，可能不全，请缩小时间范围）");
+                result.append("：\n");
                 for (int i = 0; i < memories.size(); i++) {
                     LongTermMemory m = memories.get(i);
                     result.append(i + 1).append(". [").append(m.getMemoryType()).append("] ");
@@ -107,7 +117,9 @@ public class SearchHistoryTool implements Tool {
         }
 
         DateTimeFormatter fmt = DateTimeFormatter.ofPattern("MM-dd HH:mm:ss");
-        result.append("【原始记录】找到 ").append(messages.size()).append(" 条：\n");
+        result.append("【原始记录】找到 ").append(messages.size()).append(" 条");
+        if (messages.size() >= count) result.append("（已达上限，可能不全，请缩小时间范围）");
+        result.append("：\n");
         for (int i = messages.size() - 1; i >= 0; i--) {
             ChatMessage msg = messages.get(i);
             result.append("- [").append(msg.getCreatedAt() != null ? msg.getCreatedAt().format(fmt) : "??");

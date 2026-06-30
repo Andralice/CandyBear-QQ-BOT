@@ -3,6 +3,7 @@ package com.start.agent;
 import com.start.model.LongTermMemory;
 import com.start.repository.LongTermMemoryRepository;
 
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 /**
@@ -26,7 +27,8 @@ public class RecallMemoryTool implements Tool {
 
     @Override public String getDescription() {
         return "检索关于某个用户的长期记忆。当用户说还记得我之前说过什么吗、你上次说、或者对话需要回忆以前的上下文时调用。" +
-               "参数：user_id(用户QQ), group_id(群号), keyword(可选搜索关键词，不填则自动提取), count(返回条数，默认5)";
+               "参数：user_id(用户QQ), group_id(群号), keyword(可选搜索关键词，不填则自动提取), count(返回条数，默认5), " +
+               "date_from(可选，起始日期如2026-06-05), date_to(可选，结束日期)";
     }
 
     @Override
@@ -36,7 +38,9 @@ public class RecallMemoryTool implements Tool {
                         "user_id", Map.of("type", "string", "description", "用户QQ号"),
                         "group_id", Map.of("type", "string", "description", "群号"),
                         "keyword", Map.of("type", "string", "description", "可选搜索关键词，不填则自动从当前消息提取"),
-                        "count", Map.of("type", "string", "description", "返回条数，默认5")
+                        "count", Map.of("type", "string", "description", "返回条数，默认5"),
+                        "date_from", Map.of("type", "string", "description", "可选，起始日期，如'2026-06-05'"),
+                        "date_to", Map.of("type", "string", "description", "可选，结束日期，如'2026-06-05'")
                 ),
                 "required", Arrays.asList("user_id", "group_id"));
     }
@@ -47,6 +51,8 @@ public class RecallMemoryTool implements Tool {
         String groupId = (String) args.get("group_id");
         String keyword = (String) args.get("keyword");
         int count = parseIntSafe((String) args.get("count"), 5);
+        String dateFrom = (String) args.get("date_from");
+        String dateTo = (String) args.get("date_to");
 
         if (userId == null) return "缺少 user_id";
 
@@ -59,20 +65,22 @@ public class RecallMemoryTool implements Tool {
         try {
             List<LongTermMemory> results;
             if (keyword != null && !keyword.isBlank()) {
-                // LLM 明确指定了关键词，直接用
-                results = repo.search(userId, groupId, keyword, count);
+                // LLM 明确指定了关键词，直接用（支持日期范围）
+                results = repo.search(userId, groupId, keyword, count, dateFrom, dateTo);
             } else if (!keywords.isEmpty()) {
                 // 用预注入的关键词多词搜索
-                results = searchMultiKeyword(userId, groupId, keywords, count);
+                results = searchMultiKeyword(userId, groupId, keywords, count, dateFrom, dateTo);
             } else {
                 // 什么都没有，无关键词搜索
-                results = repo.search(userId, groupId, null, count);
+                results = repo.search(userId, groupId, null, count, dateFrom, dateTo);
             }
 
             if (results.isEmpty()) {
-                return keyword != null && !keyword.isBlank()
-                        ? "未找到关于 " + keyword + " 的记忆"
-                        : "暂无该用户的长期记忆";
+                StringBuilder hint = new StringBuilder();
+                if (keyword != null && !keyword.isBlank()) hint.append("未找到关于 \"").append(keyword).append("\" 的记忆");
+                else hint.append("暂无该用户的长期记忆");
+                if (dateFrom != null) hint.append("（时间范围：").append(dateFrom).append(" ~ ").append(dateTo != null ? dateTo : "现在").append("）");
+                return hint.toString();
             }
 
             // 标记为已召回
@@ -80,12 +88,16 @@ public class RecallMemoryTool implements Tool {
                 try { repo.markRecalled(m.getId()); } catch (Exception ignored) {}
             }
 
+            DateTimeFormatter fmt = DateTimeFormatter.ofPattern("MM-dd");
             StringBuilder sb = new StringBuilder("关于该用户的记忆：\n");
             for (int i = 0; i < results.size(); i++) {
                 LongTermMemory m = results.get(i);
                 sb.append(i + 1).append(". [").append(m.getMemoryType()).append("] ");
                 sb.append(m.getContent());
-                sb.append(" (重要性:").append(m.getImportance()).append(", 回忆").append(m.getRecallCount() + 1).append("次)\n");
+                if (m.getCreatedAt() != null) {
+                    sb.append(" （").append(m.getCreatedAt().format(fmt)).append("）");
+                }
+                sb.append(" (重要性:").append(m.getImportance()).append(")\n");
             }
             return sb.toString();
         } catch (Exception e) {
@@ -94,12 +106,13 @@ public class RecallMemoryTool implements Tool {
     }
 
     /** 用多个关键词分别搜索，合并去重，限制条数 */
-    private List<LongTermMemory> searchMultiKeyword(String userId, String groupId, List<String> keywords, int count) throws Exception {
+    private List<LongTermMemory> searchMultiKeyword(String userId, String groupId, List<String> keywords, int count,
+                                                     String dateFrom, String dateTo) throws Exception {
         Set<Long> seen = new LinkedHashSet<>();
         List<LongTermMemory> merged = new ArrayList<>();
         for (String kw : keywords) {
             if (merged.size() >= count) break;
-            List<LongTermMemory> batch = repo.search(userId, groupId, kw, count);
+            List<LongTermMemory> batch = repo.search(userId, groupId, kw, count, dateFrom, dateTo);
             for (LongTermMemory m : batch) {
                 if (seen.add(m.getId())) {
                     merged.add(m);
