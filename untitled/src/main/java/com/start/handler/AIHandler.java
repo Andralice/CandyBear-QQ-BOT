@@ -17,6 +17,7 @@ import com.start.service.GenerationResult;
 import com.start.service.GroupSerialExecutor;
 import com.start.service.LinkPreviewService;
 import com.start.model.DecisionTrace;
+import com.start.runtime.trace.WebDashboardListener;
 import com.start.util.MessageUtil;
 import com.start.vision.ImageUtils;
 import org.slf4j.Logger;
@@ -181,6 +182,7 @@ public class AIHandler implements MessageHandler {
 
         // 记录群聊节奏
         metrics.recordMessage(gid, uid);
+        WebDashboardListener.recordMessage(gid, uid);
 
         // ConversationInterpreter 识别事件类型
         ConversationInterpreter.InterpretResult result = interpreter.interpret(
@@ -246,6 +248,8 @@ public class AIHandler implements MessageHandler {
         DecisionTrace trace = new DecisionTrace(System.currentTimeMillis(), gid, uid, eventType,
                 decision, reason, toolCalls, tokensUsed, latencyMs, 0, 0, false);
         DECISION_LOGGER.info(trace.toLogLine());
+        WebDashboardListener.recordDecision(gid, uid, eventType, decision, reason,
+                toolCalls, tokensUsed, latencyMs);
     }
 
     private static final int MAX_REGENERATE = 2;

@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.start.agent.Tool;
 import com.start.Main;
+import com.start.runtime.trace.WebDashboardListener;
 import com.start.agent.social.LuckTool;
 import com.start.agent.MemoryTool;
 import com.start.agent.social.PokeTool;
@@ -883,6 +884,7 @@ public class BaiLianService {
 
                         String result = tool.execute(args);
                         toolCalls++;
+                        WebDashboardListener.recordToolCall(toolName);
                         logger.info("🔧 [原生工具] {} args={} → {}", toolName, args,
                                 result.length() > 120 ? result.substring(0, 120) + "..." : result);
                         toolResults.add(new ToolResult(toolName, result));
@@ -1198,7 +1200,7 @@ public class BaiLianService {
             Map<String, Object> body = new HashMap<>();
             body.put("model", bailianChatModel);
             body.put("messages", messages);
-            body.put("max_tokens", 512);
+            body.put("max_tokens", 8192);
             body.put("temperature", 0.8);
 
             String jsonBody = MAPPER.writeValueAsString(body);
@@ -1207,7 +1209,7 @@ public class BaiLianService {
                     .header("Authorization", "Bearer " + baiLianApiKey)
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
-                    .timeout(Duration.ofSeconds(30))
+                    .timeout(Duration.ofSeconds(120))
                     .build();
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());

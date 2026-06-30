@@ -331,13 +331,13 @@ public class DatabaseConfig {
             // 糖果熊人生状态（单行表，随剧情演进更新）
             "CREATE TABLE IF NOT EXISTS candy_bear_life_state (" +
                 "id BIGINT AUTO_INCREMENT PRIMARY KEY," +
-                "school VARCHAR(100) DEFAULT '人大附中国际班'," +
+                "school VARCHAR(100) DEFAULT ''," +
                 "grade VARCHAR(20) DEFAULT '高二'," +
                 "friends VARCHAR(500) DEFAULT '小雨,阿乐'," +
                 "hobbies VARCHAR(500) DEFAULT '三角洲行动,洛克王国,崩铁,追番,画画,看小说'," +
                 "recent_problem TEXT," +
                 "current_goal TEXT," +
-                "location VARCHAR(100) DEFAULT '北京海淀'," +
+                "location VARCHAR(100) DEFAULT '北京'," +
                 "health_note VARCHAR(500) DEFAULT '轻微心脏问题，不需每天上学'," +
                 "updated_at DATE NOT NULL," +
                 "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +

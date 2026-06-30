@@ -4,6 +4,7 @@ import com.start.config.BotConfig;
 import com.start.config.DatabaseConfig;
 import com.start.handler.CPTracker;
 import com.start.handler.HandlerRegistry;
+import com.start.runtime.trace.WebDashboardListener;
 import com.start.model.LongTermMemory;
 import com.start.model.RecurringTask;
 import com.start.repository.*;
@@ -87,6 +88,12 @@ public final class BotBootstrap {
         startEventChecker(bot);
         startRecurringScheduler(bot);
         startErrorMonitor(bot);
+        startDashboard();
+    }
+
+    private static void startDashboard() {
+        WebDashboardListener dashboard = new WebDashboardListener();
+        dashboard.start();
     }
 
     private static void startLifeEngineThread(Main bot, CandyBearLifeEngine lifeEngine) {

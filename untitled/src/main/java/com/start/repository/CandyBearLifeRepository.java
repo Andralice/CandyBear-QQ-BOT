@@ -84,7 +84,8 @@ public class CandyBearLifeRepository implements Repository {
     }
 
     public boolean hasWeeklyDiary(LocalDate weekStart) throws SQLException {
-        try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement("SELECT COUNT(*) FROM candy_bear_weekly_diaries WHERE week_start=?")) {
+        String sql = "SELECT COUNT(*) FROM candy_bear_weekly_diaries WHERE week_start=? AND summary IS NOT NULL AND summary != ''";
+        try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setDate(1, Date.valueOf(weekStart));
             ResultSet rs = ps.executeQuery();
             return rs.next() && rs.getInt(1) > 0;
@@ -126,7 +127,8 @@ public class CandyBearLifeRepository implements Repository {
     }
 
     public boolean hasJournal(LocalDate date) throws SQLException {
-        try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement("SELECT COUNT(*) FROM candy_bear_daily_journals WHERE journal_date=?")) {
+        String sql = "SELECT COUNT(*) FROM candy_bear_daily_journals WHERE journal_date=? AND summary IS NOT NULL AND summary != ''";
+        try (Connection c = dataSource.getConnection(); PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setDate(1, Date.valueOf(date));
             ResultSet rs = ps.executeQuery();
             return rs.next() && rs.getInt(1) > 0;

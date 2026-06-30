@@ -37,7 +37,7 @@ public class CandyBearLifeEngine {
 
     /** 硬编码的默认人设（DB不可用时 fallback） */
     private static final String HARDCODED_LIFE_STATE =
-            "糖果熊，17岁人类女孩，人大附中国际班高二学生，住在北京海淀。" +
+            "糖果熊，17岁人类女孩，高二学生，住在北京。" +
             "家庭富裕，爸爸是工程师，妈妈是医生。有轻微心脏问题，不需每天上学（一周去2~3天），学校对她出勤宽容。" +
             "好朋友有同桌小雨（学霸）、隔壁班阿乐（打球很厉害）。" +
             "爱好：三角洲行动、洛克王国、崩铁、追番、画点小画、看小说。" +
@@ -208,6 +208,10 @@ public class CandyBearLifeEngine {
                 "要求：延续之前的日记内容，不要矛盾。糖果熊的生活轻松自由但也要有真实少女的烦恼和快乐。";
 
         String response = ai.generateRaw(prompt);
+        if (response == null || response.isBlank()) {
+            System.err.println("[LifeEngine] arc 生成失败: AI 返回为空");
+            return;
+        }
         CandyBearStoryArc arc = parseArcResponse(response);
         repo.insertArc(arc);
 
@@ -258,6 +262,10 @@ public class CandyBearLifeEngine {
                 "要求：延续之前的日记内容，不要矛盾。语气像17岁女孩，可以吐槽、可以开心、可以emo。要有具体数字和细节，不要笼统概括。";
 
         String response = ai.generateRaw(prompt);
+        if (response == null || response.isBlank()) {
+            System.err.println("[LifeEngine] 周记生成失败: AI 返回为空");
+            return;
+        }
         CandyBearWeeklyDiary diary = parseWeekResponse(response, weekStart, weekEnd);
         repo.insertWeeklyDiary(diary);
     }
@@ -314,6 +322,10 @@ public class CandyBearLifeEngine {
                 "6. 上学日与否以日程为准；无日程时上学日概率约40%（一周2~3天）。";
 
         String response = ai.generateRaw(prompt);
+        if (response == null || response.isBlank()) {
+            System.err.println("[LifeEngine] 日记生成失败 " + date + ": AI 返回为空");
+            return;
+        }
         CandyBearDailyJournal journal = parseJournalResponse(response, date);
         repo.insertJournal(journal);
     }
@@ -443,7 +455,11 @@ public class CandyBearLifeEngine {
             if (state.isPresent()) {
                 CandyBearLifeState s = state.get();
                 StringBuilder sb = new StringBuilder();
-                sb.append("糖果熊，17岁人类女孩，").append(s.getSchool()).append(s.getGrade()).append("学生，住在").append(s.getLocation()).append("。");
+                sb.append("糖果熊，17岁人类女孩，");
+                if (s.getSchool() != null && !s.getSchool().isEmpty()) {
+                    sb.append(s.getSchool());
+                }
+                sb.append(s.getGrade()).append("学生，住在").append(s.getLocation()).append("。");
                 sb.append("家庭富裕，爸爸是工程师，妈妈是医生。").append(s.getHealthNote()).append("（一周去2~3天），学校对她出勤宽容。");
                 sb.append("好朋友有").append(formatFriends(s.getFriends())).append("。");
                 if (s.getHobbies() != null && !s.getHobbies().isEmpty()) {
@@ -549,7 +565,7 @@ public class CandyBearLifeEngine {
                 "按以下格式输出（每行一条，竖线|分隔，共42行）：\n" +
                 "日期|时段|开始时间|结束时间|活动|地点|心情|是否上学日\n\n" +
                 "===== 上学日示例（活动要具体，写出上的什么课）=====\n" +
-                weekStart + "|morning|07:30|12:00|早读+语文课+数学课+英语课|人大附中教室|还行|true\n" +
+                weekStart + "|morning|07:30|12:00|早读+语文课+数学课+英语课|教室|还行|true\n" +
                 weekStart + "|lunch|12:00|13:30|和小雨去食堂吃饭，顺便吐槽数学好难|学校食堂|开心|true\n" +
                 weekStart + "|afternoon|13:30|17:00|物理实验课+自习写数学卷子|教室/实验室|累|true\n" +
                 weekStart + "|evening|17:00|19:00|放学回家路上听歌，到家吃饭|地铁/家里|放松|true\n" +
@@ -568,6 +584,10 @@ public class CandyBearLifeEngine {
                 "一定要写满7天42行，每天6个时段一个不少。";
 
         String response = ai.generateRaw(prompt);
+        if (response == null || response.isBlank()) {
+            System.err.println("[LifeEngine] 日程生成失败: AI 返回为空");
+            return;
+        }
 
         // 清除旧周，插入新日程
         scheduleRepo.deleteWeek(weekStart, weekEnd);

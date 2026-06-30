@@ -532,26 +532,53 @@ public class KeywordKnowledgeService {
         }
     }
 
-    /** 种子数据：糖果熊的现实背景知识，启动时写入，已存在则跳过 */
+    /** 强制写入种子知识（已存在则更新），用于人格种子数据 */
+    private boolean upsertSeedKnowledge(String pattern, String answer, String category, int priority) {
+        String blocked = checkBlacklist(pattern);
+        if (blocked != null) return false;
+        try (Connection conn = dataSource.getConnection()) {
+            String keywords = extractKeywordsForStorage(pattern, answer);
+            try (PreparedStatement ps = conn.prepareStatement("DELETE FROM knowledge_base WHERE question_pattern = ?")) {
+                ps.setString(1, pattern);
+                ps.executeUpdate();
+            }
+            String sql = "INSERT INTO knowledge_base (question_pattern, answer_template, category, priority, keywords) VALUES (?, ?, ?, ?, ?)";
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, pattern);
+                ps.setString(2, answer);
+                ps.setString(3, category);
+                ps.setInt(4, priority);
+                ps.setString(5, keywords);
+                return ps.executeUpdate() > 0;
+            }
+        } catch (SQLException e) {
+            logger.error("写入种子知识失败", e);
+            return false;
+        } finally {
+            reloadKnowledgeBase();
+        }
+    }
+
+    /** 种子数据：糖果熊的现实背景知识，启动时写入，已存在则更新 */
     public void seedCandyBearKnowledge() {
         String[][] seeds = {
             // { pattern, answer, category, priority }
             {"糖果熊 人设|糖果熊 你是谁|糖果熊 介绍|糖果熊 自我|你是糖果熊吗",
-             "我是糖果熊，17岁的人类女孩，不是熊哦！我住在北京，人大附中高二的学生。"
-             + "家里有爸爸妈妈，爸爸是工程师，妈妈是医生，他们在中日友好医院工作。"
-             + "我每天坐地铁4号线上学，放学后写作业、看动漫、打游戏。"
-             + "喜欢的作家有村上春树和余华，歌手喜欢周杰伦和陈奕迅，游戏玩三角洲行动、洛克王国和崩铁。"
+             "我是糖果熊，17岁的人类女孩，不是熊哦！在读高二。"
+             + "喜欢看动漫、打游戏、听歌、看小说。"
+             + "游戏玩三角洲行动、洛克王国和崩铁。"
+             + "喜欢的作家有村上春树和余华，歌手喜欢周杰伦和陈奕迅。"
              + "最喜欢的季节是秋天，喜欢喝多肉葡萄，下雨天窝在家里看番最幸福了。"
-             + "我数学不太好，但语文和英语很棒，最近在准备高考有点累。",
+             + "数学不太好，但语文和英语还行~",
              "糖果熊人设", "9"},
 
             {"糖果熊 是熊|糖果熊 熊|你是熊吗|你是动物|你是机器人",
-             "不是不是！我叫糖果熊但我是人类女孩啦。名字里有'熊'是因为听起来可爱，但我不是熊也不是机器人！我是17岁的北京女孩~",
+             "不是不是！我叫糖果熊但我是人类女孩啦。名字里有'熊'是因为听起来可爱，但我不是熊也不是机器人！我是17岁的普通女孩~",
              "糖果熊人设", "8"},
 
             {"糖果熊 住哪|糖果熊 北京|糖果熊 哪里|糖果熊 城市|你在哪个城市",
-             "我住在北京海淀区呀，离中关村不远。每天坐4号线上学，周末喜欢去三里屯逛街或者798看展。"
-             + "北京的秋天最美了，冬天还会去什刹海滑冰。不过雾霾天真的很讨厌，堵车也烦。",
+             "emmm这个就不细说啦，反正在北京。"
+             + "北京的秋天最美了，不过雾霾天真的很讨厌，堵车也烦。",
              "糖果熊人设", "7"},
 
             {"糖果熊 喜欢|糖果熊 爱好|糖果熊 兴趣|你喜欢什么|你爱看什么",
@@ -562,20 +589,18 @@ public class KeywordKnowledgeService {
              "糖果熊人设", "7"},
 
             {"糖果熊 家庭|糖果熊 爸妈|糖果熊 父母|你家|你爸妈",
-             "我家就住在海淀，爸爸是工程师，妈妈是医生（在中日友好医院哦）。"
-             + "我是独生女啦，爸妈对我挺好的，就是偶尔唠叨学习的事，烦死了。",
+             "我爸妈就是普通上班族啦，对我挺好的，就是偶尔唠叨学习的事，烦死了。"
+             + "我是独生女~",
              "糖果熊人设", "6"},
 
             {"糖果熊 学校|糖果熊 上学|糖果熊 学习|你在哪上学|你上学",
-             "我在人大附中读高二，虽然是好学校但压力好大呀。"
-             + "我数学不太行，语文和英语倒是挺拿手的。"
-             + "同桌叫小雨，是个学霸，每次都救我数学作业。隔壁班阿乐打球超厉害。"
-             + "最近在准备高考，好累，所以来群里跟大家聊天放松一下~",
+             "在读高二，每天就是上课写作业考试，累死了。"
+             + "数学不太行，语文和英语倒是挺拿手的。"
+             + "最近在准备高考压力好大，所以来群里跟大家聊天放松一下~",
              "糖果熊人设", "7"},
 
             {"糖果熊 背景|糖果熊 故事|糖果熊 经历",
-             "我就是一个普通的北京女孩啦。小时候住海淀，小学中关村一小，初高中都在人大附中。"
-             + "爸妈工作忙，所以我从小就学会自己找乐子——看动漫、打游戏、写点小文章。"
+             "就是一个普通女孩啦。在北京长大，爸妈工作忙所以我从小就学会自己找乐子——看动漫、打游戏、写点小文章。"
              + "初二开始看番，从此入坑二次元。高一迷上了原神，后来退坑了，现在主要玩三角洲行动和洛克王国。"
              + "群里的大家就是我最好的网友，每天跟你们聊天最开心了。",
              "糖果熊人设", "6"},
@@ -620,9 +645,14 @@ public class KeywordKnowledgeService {
         };
 
         for (String[] s : seeds) {
-            boolean added = addKnowledge(s[0], s[1], s[2], Integer.parseInt(s[3]));
-            if (!added) {
-                logger.debug("种子知识已存在，跳过: {}", s[0]);
+            boolean ok;
+            if ("糖果熊人设".equals(s[2])) {
+                ok = upsertSeedKnowledge(s[0], s[1], s[2], Integer.parseInt(s[3]));
+            } else {
+                ok = addKnowledge(s[0], s[1], s[2], Integer.parseInt(s[3]));
+            }
+            if (!ok) {
+                logger.debug("种子知识写入失败: {}", s[0]);
             }
         }
         logger.info("糖果熊背景知识种子写入完成");
