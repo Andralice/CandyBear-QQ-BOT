@@ -243,10 +243,10 @@ public class BaiLianService {
         return files != null ? files : Collections.emptyList();
     }
 
-    // 内部类
-    private static class UserThread {
-        long lastInteraction;      // 最近一次 AI 回复时间
-        String lastBotReply;       // AI 上次回复内容
+    // 内部类 — package-private 供 ConversationInterpreter 访问
+    static class UserThread {
+        final long lastInteraction;
+        final String lastBotReply;
 
         UserThread(long time, String reply) {
             this.lastInteraction = time;
@@ -254,12 +254,12 @@ public class BaiLianService {
         }
     }
 
-    private static class ContextEvent {
-        long timestamp;
-        String type;               // "ai_reply", "mention", "user_message"
-        String content;
-        String userId;
-        String senderNick;
+    static class ContextEvent {
+        final long timestamp;
+        final String type;
+        final String content;
+        final String userId;
+        final String senderNick;
 
         ContextEvent(long ts, String type, String content, String userId, String nick) {
             this.timestamp = ts;
@@ -286,13 +286,13 @@ public class BaiLianService {
     // === 异步等待回复 ===
     private final Map<String, PendingAwait> pendingAwaits = new ConcurrentHashMap<>(); // key = groupId_userId
 
-    private static class PendingAwait {
+    static class PendingAwait {
         final String groupId;
         final String targetUserId;
         final String targetNickname;
-        final String question;   // AI 发出的问题
-        final String context;    // AI 自己想了解的内容
-        final String sessionId;  // 关联的会话 ID
+        final String question;
+        final String context;
+        final String sessionId;
         final long createdAt;
         final long timeoutMs;
 
@@ -331,9 +331,23 @@ public class BaiLianService {
     }
 
     /** 清理所有过期的异步等待 */
-    private void purgeExpiredAwaits() {
+    void purgeExpiredAwaits() {
         pendingAwaits.entrySet().removeIf(e -> e.getValue().isExpired());
     }
+
+    // ===== ConversationInterpreter 访问器（package-private） =====
+
+    UserThread getUserThread(String key) { return userThreads.get(key); }
+
+    Deque<ContextEvent> getGroupContext(String groupId) { return groupContexts.get(groupId); }
+
+    BehaviorAnalyzer.BehaviorAdvice getBehaviorAdvice(String groupId) { return behaviorAnalyzer.getAdvice(groupId); }
+
+    Map<String, Object> getCandyBearPersonality() { return aiDatabaseService.getCandyBearPersonality(); }
+
+    boolean shouldJoinTopic(String message, String groupId) { return aiDatabaseService.shouldJoinTopic(message, groupId); }
+
+    PendingAwait removePendingAwait(String key) { return pendingAwaits.remove(key); }
 
     // ===== 公共方法 =====
 
@@ -634,7 +648,7 @@ public class BaiLianService {
 
     ===== 回复原则 =====
     - 默认1~2句话。2~6个字也OK。实在说不清才用长内容。
-    - 回复里别留空行。真要换话题才用 |---| 分两段。同一话题（比如评论同一条消息或同一张图片）不要拆成多条，在一段里说完。
+    - 回复里别留空行。像真人聊天一样自然分段，用 |---| 分隔。反问对方（"你呢""你那边呢"）时单独发一条；一句话说完了等对方接话就停；短句连发比一大段更像真人。
     - 不懂就说不知道。群聊节奏快的时候别硬插嘴。
     - @ 人用 [CQ:at,qq=QQ号] 格式。
     - 好感度影响态度：高→亲近暖甜；低→礼貌但疏远。
@@ -1721,7 +1735,7 @@ public class BaiLianService {
     }
 
     /** 清理回复中的 |---| 和空行，用于构建上下文 prompt，避免把分隔符带入 LLM 对话 */
-    private String normalizeForContext(String rawReply) {
+    String normalizeReplyForContext(String rawReply) {
         if (rawReply == null) return "";
         return rawReply
                 .replace("|---|", "\n")
@@ -1819,7 +1833,7 @@ public class BaiLianService {
                     pendingAwaits.remove(fullUserId);
                     if (canReact(groupId)) {
                         recordReaction(groupId);
-                        String cleanReply = normalizeForContext(thread.lastBotReply);
+                        String cleanReply = normalizeReplyForContext(thread.lastBotReply);
                         String prompt = "你之前说：" + cleanReply + "\n对方现在说：" + message + "\n请用一句自然的话回应。";
                         logger.debug("candyBear: 触发追问，用户 {}，群 {}，消息：{}", userId, groupId, message);
                         return Optional.of(Reaction.withAI(prompt));
@@ -1884,7 +1898,7 @@ public class BaiLianService {
                 if (isResponseToAIMessage(message, lastAi.get().content)) {
                     if (canReact(groupId)) {
                         recordReaction(groupId);
-                        String cleanReply = normalizeForContext(lastAi.get().content);
+                        String cleanReply = normalizeReplyForContext(lastAi.get().content);
                         String prompt = "你之前说：" + cleanReply + "\n另一个群友评论：" + message + "\n请友好地回应。";
                         return Optional.of(Reaction.withAI(prompt));
                     }
@@ -1936,7 +1950,7 @@ public class BaiLianService {
 
     // ===== 辅助判断 =====
 
-    private boolean isFollowUpMessage(String msg) {
+    boolean isFollowUpMessage(String msg) {
         if (msg == null || msg.trim().isEmpty()) {
             return false;
         }
@@ -2019,7 +2033,7 @@ public class BaiLianService {
     }
 
     // ✅ 修复：移除宽松兜底条件，仅保留明确意图
-    private boolean isResponseToAIMessage(String userMsg, String aiMsg) {
+    boolean isResponseToAIMessage(String userMsg, String aiMsg) {
         if (userMsg.length() > 50) return false;
         String lower = userMsg.toLowerCase();
         return lower.contains("不对") || lower.contains("错") ||
@@ -2031,7 +2045,7 @@ public class BaiLianService {
                 (lower.contains("你") && userMsg.length() <= 20);
     }
 
-    private Optional<String> checkPassiveReactions(String groupId, String message) {
+    Optional<String> checkPassiveReactions(String groupId, String message) {
         String lower = message.toLowerCase();
         if (message.contains("[CQ:redbag")) {
 
@@ -2061,13 +2075,13 @@ public class BaiLianService {
     }
 
     // 将上限从 20 改为 2（更合理）
-    private boolean canReact(String groupId) {
+    boolean canReact(String groupId) {
         List<Long> history = groupReactionHistory.computeIfAbsent(groupId, k -> new ArrayList<>());
         history.removeIf(ts -> System.currentTimeMillis() - ts > 300_000); // 5分钟窗口
         return history.size() < 10; // 每5分钟最多2次主动插话
     }
 
-    private void recordReaction(String groupId) {
+    void recordReaction(String groupId) {
         groupReactionHistory.computeIfAbsent(groupId, k -> new ArrayList<>())
                 .add(System.currentTimeMillis());
     }
