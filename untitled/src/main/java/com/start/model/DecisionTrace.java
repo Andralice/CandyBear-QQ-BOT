@@ -1,5 +1,9 @@
 package com.start.model;
 
+import com.start.runtime.RuntimeEvent;
+import com.start.service.GenerationMetadata;
+import com.start.service.GenerationResult;
+
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -15,9 +19,13 @@ public class DecisionTrace {
     private final int toolCalls;
     private final int tokensUsed;
     private final long latencyMs;
+    private final long generation;
+    private final long revision;
+    private final boolean allowSilence;
 
     public DecisionTrace(long timestamp, String groupId, String userId, String eventType,
-                         String decision, String reason, int toolCalls, int tokensUsed, long latencyMs) {
+                         String decision, String reason, int toolCalls, int tokensUsed,
+                         long latencyMs, long generation, long revision, boolean allowSilence) {
         this.timestamp = timestamp;
         this.groupId = groupId;
         this.userId = userId;
@@ -27,30 +35,40 @@ public class DecisionTrace {
         this.toolCalls = toolCalls;
         this.tokensUsed = tokensUsed;
         this.latencyMs = latencyMs;
+        this.generation = generation;
+        this.revision = revision;
+        this.allowSilence = allowSilence;
     }
 
-    public long getTimestamp() { return timestamp; }
-    public String getGroupId() { return groupId; }
-    public String getUserId() { return userId; }
-    public String getEventType() { return eventType; }
-    public String getDecision() { return decision; }
-    public String getReason() { return reason; }
-    public int getToolCalls() { return toolCalls; }
-    public int getTokensUsed() { return tokensUsed; }
-    public long getLatencyMs() { return latencyMs; }
+    /** 从 CommitFinished 事件构造 */
+    public static DecisionTrace from(RuntimeEvent.CommitFinished f) {
+        GenerationResult r = f.result();
+        GenerationMetadata m = r != null ? r.metadata() : null;
+        String dec = r != null && r.isSilent() ? "SILENT"
+                : r != null && r.isError() ? "ERROR" : "REPLY";
+        return new DecisionTrace(
+                System.currentTimeMillis(), f.groupId(), f.userId(),
+                "COMMIT", dec,
+                r != null && r.isSilent() ? "model_no_reply" : "ok",
+                m != null ? m.toolCalls() : 0,
+                m != null ? m.tokensUsed() : 0,
+                f.latencyMs(),
+                m != null ? m.generation() : 0,
+                m != null ? m.revision() : 0,
+                false);
+    }
 
     /** 紧凑的单行日志格式 */
     public String toLogLine() {
         String time = Instant.ofEpochMilli(timestamp)
                 .atZone(ZoneId.of("Asia/Shanghai"))
                 .format(DateTimeFormatter.ofPattern("HH:mm:ss"));
-        return String.format("[%s] gid=%s uid=%s event=%s → %s (%s) tools=%d tok=%d %dms",
+        return String.format("[%s] gid=%s uid=%s gen=%d rev=%d event=%s → %s (%s) tools=%d tok=%d %dms",
                 time, groupId != null ? groupId : "-", userId,
+                generation, revision,
                 eventType, decision, reason, toolCalls, tokensUsed, latencyMs);
     }
 
     @Override
-    public String toString() {
-        return toLogLine();
-    }
+    public String toString() { return toLogLine(); }
 }

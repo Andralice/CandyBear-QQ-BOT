@@ -8,10 +8,15 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.start.Main;
 import com.start.config.BotConfig;
 import com.start.service.BaiLianService;
+import com.start.service.ConversationEvent;
+import com.start.service.ConversationInterpreter;
 import com.start.service.ConversationManager;
+import com.start.service.ConversationMetrics;
 import com.start.service.ConversationState;
+import com.start.service.GenerationResult;
 import com.start.service.GroupSerialExecutor;
 import com.start.service.LinkPreviewService;
+import com.start.model.DecisionTrace;
 import com.start.util.MessageUtil;
 import com.start.vision.ImageUtils;
 import org.slf4j.Logger;
@@ -27,7 +32,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -45,16 +49,22 @@ public class AIHandler implements MessageHandler {
     private final BaiLianService aiService;
     private final GroupSerialExecutor groupExecutor;
     private final ConversationManager conversationManager;
+    private final ConversationInterpreter interpreter;
+    private final ConversationMetrics metrics;
     private final Random random = new Random();
     private final ConcurrentHashMap<String, Long> lastReactionTime = new ConcurrentHashMap<>();
     private static final long USER_REACTION_COOLDOWN_MS = 2000;
     private final ConcurrentHashMap<String, Long> lastGroupReplyTime = new ConcurrentHashMap<>();
     private static final long GROUP_REPLY_COOLDOWN_MS = 12_000;
+    private static final Logger DECISION_LOGGER = LoggerFactory.getLogger("com.start.decision");
 
-    public AIHandler(BaiLianService aiService, GroupSerialExecutor groupExecutor, ConversationManager conversationManager) {
+    public AIHandler(BaiLianService aiService, GroupSerialExecutor groupExecutor, ConversationManager conversationManager,
+                     ConversationInterpreter interpreter, ConversationMetrics metrics) {
         this.aiService = aiService;
         this.groupExecutor = groupExecutor;
         this.conversationManager = conversationManager;
+        this.interpreter = interpreter;
+        this.metrics = metrics;
     }
 
     @Override
@@ -156,6 +166,7 @@ public class AIHandler implements MessageHandler {
                 aiService.clearContext("group_" + groupId + "_" + uid);
                 bot.sendReply(msg, "已清除我们的聊天记忆！");
                 conversationManager.remove(gid, uid);
+                logDecision(gid, uid, "MENTION", "REPLY", "clear", 0, 0, 0);
                 return;
             }
             if (strippedPrompt.isEmpty() && imageInfos.isEmpty()) {
@@ -163,49 +174,78 @@ public class AIHandler implements MessageHandler {
                 conversationManager.remove(gid, uid);
                 return;
             }
-            runGroupConversation(bot, groupId, gid, uid, nickname, ats);
+            long t0 = System.currentTimeMillis();
+            runGroupConversation(bot, groupId, gid, uid, nickname, ats, false, t0);
             return;
         }
 
-        // 主动插话判断（WebSocket 线程，无竞争）
-        Optional<BaiLianService.Reaction> reaction = aiService.shouldReactToGroupMessage(
-                gid,
-                uid,
-                senderNick,
-                plainText,
-                ats
-        );
+        // 记录群聊节奏
+        metrics.recordMessage(gid, uid);
 
-        // 纯图片消息的追问处理（移动端QQ无法同时发送文字+图片，用户可能在"发图吧"之后单独发图）
-        boolean imageFollowUp = !imageInfos.isEmpty() && reaction.isEmpty()
+        // ConversationInterpreter 识别事件类型
+        ConversationInterpreter.InterpretResult result = interpreter.interpret(
+                gid, uid, senderNick, plainText, ats);
+
+        // 纯图片消息的追问处理
+        boolean imageFollowUp = !imageInfos.isEmpty() && result.isNothing()
                 && aiService.isWithinFollowUpWindow(gid, uid);
 
-        if (reaction.isPresent() || imageFollowUp) {
-            long now = System.currentTimeMillis();
-
-            // 群级冷却：上次回复后12秒内不触发新回复，避免频繁切人导致语言碎片化
-            Long lastGroupReply = lastGroupReplyTime.get(gid);
-            if (lastGroupReply != null && now - lastGroupReply < GROUP_REPLY_COOLDOWN_MS) {
-                return;
-            }
-
-            // 同一用户2秒内冷却，避免连续短消息触发多次回复
-            String userKey = gid + "_" + userId;
-            Long last = lastReactionTime.get(userKey);
-            if (last != null && now - last < USER_REACTION_COOLDOWN_MS) {
-                return;
-            }
-            lastReactionTime.put(userKey, now);
-            lastGroupReplyTime.put(gid, now);
-
-            boolean needsAI = imageFollowUp || reaction.map(r -> r.needsAI).orElse(false);
-            if (needsAI) {
-                runGroupConversation(bot, groupId, gid, uid, nickname, ats);
-            } else {
-                sendSplitGroupReplies(bot, groupId, reaction.get().text);
-                conversationManager.remove(gid, uid);
-            }
+        if (result.isNothing() && !imageFollowUp) {
+            logDecision(gid, uid, "NOTHING", "SILENT", "no_trigger", 0, 0, 0);
+            return;
         }
+
+        long now = System.currentTimeMillis();
+
+        // 速率限制（PASSIVE_TRIGGER 可以绕过）
+        boolean rateLimited = false;
+        if (result.event() != ConversationEvent.PASSIVE_TRIGGER && !imageFollowUp) {
+            rateLimited = !aiService.canReact(gid);
+        }
+
+        // 群级冷却
+        Long lastGroupReply = lastGroupReplyTime.get(gid);
+        if (lastGroupReply != null && now - lastGroupReply < GROUP_REPLY_COOLDOWN_MS) {
+            rateLimited = true;
+        }
+
+        // 同一用户2秒冷却
+        String userKey = gid + "_" + userId;
+        Long last = lastReactionTime.get(userKey);
+        if (last != null && now - last < USER_REACTION_COOLDOWN_MS) {
+            rateLimited = true;
+        }
+
+        if (rateLimited) {
+            logDecision(gid, uid, result.event().name(), "SILENT", "rate_limited", 0, 0, 0);
+            return;
+        }
+
+        lastReactionTime.put(userKey, now);
+
+        if (result.isDirect()) {
+            // 被动触发直接回复，不走 AI
+            lastGroupReplyTime.put(gid, now);
+            aiService.recordReaction(gid);
+            sendSplitGroupReplies(bot, groupId, result.directReply());
+            conversationManager.remove(gid, uid);
+            logDecision(gid, uid, result.event().name(), "REPLY", "direct", 0, 0, now - System.currentTimeMillis());
+            return;
+        }
+
+        // 需要 AI 生成：只有 PROBABILISTIC 允许沉默
+        lastGroupReplyTime.put(gid, now);
+        aiService.recordReaction(gid);
+        boolean allowSilence = result.event().allowsSilence();
+        long startMs = System.currentTimeMillis();
+        runGroupConversation(bot, groupId, gid, uid, nickname, ats, allowSilence, startMs);
+    }
+
+    private void logDecision(String gid, String uid, String eventType, String decision,
+                             String reason, int toolCalls, int tokensUsed, long latencyMs) {
+        DecisionTrace trace = new DecisionTrace(System.currentTimeMillis(), gid, uid, eventType,
+                decision, reason, toolCalls, tokensUsed, latencyMs, 0, 0, false);
+        DECISION_LOGGER.info(trace.toLogLine());
     }
 
     private static final int MAX_REGENERATE = 2;
@@ -214,7 +254,8 @@ public class AIHandler implements MessageHandler {
             .build();
 
     /** 从 ConversationState 读取累积消息，生成回复并发送。在 executor 线程中执行。 */
-    private void runGroupConversation(Main bot, long groupId, String gid, String userId, String nickname, List<Long> ats) {
+    private void runGroupConversation(Main bot, long groupId, String gid, String userId, String nickname,
+                                       List<Long> ats, boolean allowSilence, long startMs) {
         groupExecutor.execute(gid, () -> {
             ConversationState state = conversationManager.get(gid, userId);
             if (state == null || !state.hasContent()) return;
@@ -222,7 +263,7 @@ public class AIHandler implements MessageHandler {
             long startRevision = state.getMessageRevision();
             int startMsgCount = state.getPendingMessages().size();
             state.incrementGeneration();
-            String reply = null;
+            GenerationResult genResult = null;
 
             // 图片 + 链接上下文在一次对话中不变，提到循环外避免重复下载/描述
             String replyContext = "";
@@ -263,14 +304,25 @@ public class AIHandler implements MessageHandler {
                 String sessionId = "group_" + groupId + "_" + userId;
                 aiService.setSuppressSessionWrite(true);
                 try {
-                    reply = aiService.generate(sessionId, userId, prompt, gid, nickname, ats);
+                    genResult = aiService.generate(sessionId, userId, prompt, gid, nickname, ats, allowSilence);
                 } finally {
                     aiService.setSuppressSessionWrite(false);
                 }
 
+                String reply = genResult.reply();
+
+                // 模型沉默 — 直接退出
+                if (genResult.isSilent()) {
+                    long elapsed = System.currentTimeMillis() - startMs;
+                    logDecision(gid, userId, allowSilence ? "PROBABILISTIC" : "OTHER",
+                            "SILENT", "model_no_reply", genResult.toolCalls(), genResult.tokensUsed(), elapsed);
+                    conversationManager.remove(gid, userId);
+                    return;
+                }
+
                 // 检查 LLM 调用期间是否有新消息到达
                 if (state.getMessageRevision() == startRevision) {
-                    break; // 无变化，回复可用
+                    break;
                 }
                 if (attempt >= MAX_REGENERATE) {
                     logger.debug("Max regenerate reached, sending anyway gid={} uid={}", gid, userId);
@@ -284,18 +336,25 @@ public class AIHandler implements MessageHandler {
                 logger.debug("Audit classify: {} old=[{}] new=[{}] gid={} uid={}", auditResult, oldText, newText, gid, userId);
 
                 if ("C".equals(auditResult)) {
-                    continue; // 补充/修正 → 合并再生
+                    continue;
                 }
-                // S（重复）或 N（独立话题）→ 发送原回复
                 break;
             }
+
+            String reply = genResult != null ? genResult.reply() : "";
+            long elapsed = System.currentTimeMillis() - startMs;
 
             if (reply != null && !reply.trim().isEmpty() && !reply.equals("抱歉，刚才走神了...") && !reply.equals("嗯...再问一次吧")) {
                 sendSplitGroupReplies(bot, groupId, reply);
                 aiService.commitGeneration("group_" + groupId + "_" + userId, userId,
                         state.getMergedText(), reply, gid);
+                metrics.recordAiReply(gid);
+                logDecision(gid, userId, allowSilence ? "PROBABILISTIC" : "OTHER",
+                        "REPLY", "ok", genResult.toolCalls(), genResult.tokensUsed(), elapsed);
             } else {
                 bot.sendGroupReply(groupId, "刚刚走神了，再说一遍？");
+                logDecision(gid, userId, allowSilence ? "PROBABILISTIC" : "OTHER",
+                        "REPLY", "fallback", genResult != null ? genResult.toolCalls() : 0, 0, elapsed);
             }
 
             conversationManager.remove(gid, userId);

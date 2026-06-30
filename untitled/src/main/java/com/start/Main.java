@@ -64,11 +64,6 @@ public class Main extends WebSocketClient {
     /** 消息持久化与查询服务。 */
     MessageService messageService;
 
-    /** 对话上下文管理服务，用于维护多轮对话状态。 */
-    ConversationService conversationService;
-
-    /** 人格化回复生成服务，根据用户历史调整语气与风格。 */
-    PersonalityService personalityService;
 
     /** AI 知识库与向量检索服务。 */
     AIDatabaseService aiDatabaseService;

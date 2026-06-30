@@ -32,8 +32,7 @@ public final class BotBootstrap {
         // 基础服务
         bot.userService = new UserService();
         bot.messageService = new MessageService();
-        bot.conversationService = new ConversationService();
-        bot.personalityService = new PersonalityService();
+
         bot.aiDatabaseService = new AIDatabaseService();
 
         // 知识库 & 情绪

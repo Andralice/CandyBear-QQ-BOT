@@ -2,7 +2,9 @@ package com.start.handler;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.start.Main;
+import com.start.service.ConversationInterpreter;
 import com.start.service.ConversationManager;
+import com.start.service.ConversationMetrics;
 import com.start.service.EggGroupDataCenter;
 import com.start.repository.MerchantRepository;
 import com.start.service.BaiLianService;
@@ -49,7 +51,12 @@ public class HandlerRegistry {
         handlers.add(new EggGroupSearchHandler(dataCenter));
         handlers.add(merchantHandler);
         handlers.add(new ProfessionPKHandler());
-        handlers.add(new AIHandler(baiLianService, groupExecutor, conversationManager));
+        var stateStore = baiLianService.createSharedStateStore();
+        ConversationInterpreter interpreter = new ConversationInterpreter(
+                stateStore, baiLianService.getAiDatabaseService());
+        ConversationMetrics metrics = new ConversationMetrics();
+        baiLianService.setConversationMetrics(metrics);
+        handlers.add(new AIHandler(baiLianService, groupExecutor, conversationManager, interpreter, metrics));
     }
 
     public void dispatch(JsonNode message, Main bot) {

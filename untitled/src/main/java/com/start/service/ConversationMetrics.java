@@ -31,7 +31,7 @@ public class ConversationMetrics {
     }
 
     public record Snapshot(int messagesLast30s, int aiMessagesLast5m, int activeParticipants) {
-        static final Snapshot EMPTY = new Snapshot(0, 0, 0);
+        public static final Snapshot EMPTY = new Snapshot(0, 0, 0);
 
         public String toPromptHint() {
             if (messagesLast30s == 0) return "";
@@ -39,10 +39,7 @@ public class ConversationMetrics {
             sb.append("\n最近30秒消息数: ").append(messagesLast30s);
             sb.append("\n参与人数: ").append(activeParticipants);
             if (aiMessagesLast5m > 0) {
-                sb.append("\n糖果熊最近5分钟已发言 ").append(aiMessagesLast5m).append(" 次");
-                if (aiMessagesLast5m >= 3) {
-                    sb.append("（已经说得比较多了，考虑少说或沉默）");
-                }
+                sb.append("\n你最近5分钟说了 ").append(aiMessagesLast5m).append(" 次话");
             }
             return sb.toString();
         }
