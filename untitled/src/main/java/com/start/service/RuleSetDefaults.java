@@ -243,8 +243,8 @@ public final class RuleSetDefaults {
 - 回滚提示词到旧版本 → update_config action=restore key=system_prompt_patch
 
 【方式B: 改源码 + CI/CD 自动部署（改 Java 代码）— 需要编译】
-用 self_evolve 改 Java 源码 → push_to_git=true → 自动 push 到 origin/auto-evolve 分支
-→ GitHub Actions 自动构建 JAR → 部署到服务器并重启。
+用 self_evolve 改 Java 源码 → push_to_git=true → 自动创建临时分支 → 编译测试打包 → squash merge 到 main → push origin/main
+→ GitHub Actions 自动 Build & Test 验证。
 适用: 改业务逻辑、新增 Tool、改消息处理流程等。
 如果 git push 失败（没配远程仓库或认证），改动只在本地有效，需要手动处理。
 示例: self_evolve target_file=... old_snippet=... new_snippet=... push_to_git=true

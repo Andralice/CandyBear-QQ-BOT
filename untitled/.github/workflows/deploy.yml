@@ -1,12 +1,12 @@
-name: Auto Deploy
+name: CI — Build & Test
 
 on:
   push:
-    branches: [auto-evolve]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
-  build-and-deploy:
+  build-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,74 +18,74 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
+      - name: Maven Compile
+        run: mvn compile -q
+
+      - name: Maven Test
+        run: mvn test
+
       - name: Maven Package
         run: mvn package -DskipTests -q
 
-      - name: Backup old JAR on server
-        uses: appleboy/ssh-action@v1.2.1
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: root
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          script: |
-            cd /opt/qq-bot
-            if [ -f untitled-1.0-SNAPSHOT.jar ]; then
-              cp untitled-1.0-SNAPSHOT.jar untitled-1.0-SNAPSHOT.jar.bak.$(date +%Y%m%d_%H%M%S)
-              echo "backup done"
-            else
-              echo "no existing JAR to backup"
-            fi
+      # —— 以下为自动部署步骤，当前关闭。需要时取消注释即可恢复 ——
+      # - name: Backup old JAR on server
+      #   uses: appleboy/ssh-action@v1.2.1
+      #   with:
+      #     host: ${{ secrets.DEPLOY_HOST }}
+      #     username: root
+      #     key: ${{ secrets.DEPLOY_SSH_KEY }}
+      #     script: |
+      #       cd /opt/qq-bot
+      #       if [ -f untitled-1.0-SNAPSHOT.jar ]; then
+      #         cp untitled-1.0-SNAPSHOT.jar untitled-1.0-SNAPSHOT.jar.bak.$(date +%Y%m%d_%H%M%S)
+      #         echo "backup done"
+      #       else
+      #         echo "no existing JAR to backup"
+      #       fi
 
-      - name: Deploy JAR to Server
-        uses: appleboy/scp-action@v0.1.10
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: root
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          source: "target/untitled-1.0-SNAPSHOT.jar"
-          target: "/opt/qq-bot/"
-          strip_components: 1
-          rm: true
+      # - name: Deploy JAR to Server
+      #   uses: appleboy/scp-action@v0.1.10
+      #   with:
+      #     host: ${{ secrets.DEPLOY_HOST }}
+      #     username: root
+      #     key: ${{ secrets.DEPLOY_SSH_KEY }}
+      #     source: "target/untitled-1.0-SNAPSHOT.jar"
+      #     target: "/opt/qq-bot/"
+      #     strip_components: 1
+      #     rm: true
 
-      - name: Restart Bot
-        uses: appleboy/ssh-action@v1.2.1
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: root
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          script: |
-            cd /opt/qq-bot
-            set -e
-
-            # 停止旧进程
-            if screen -list | grep -q "qq-bot"; then
-              echo "stopping screen session..."
-              screen -S qq-bot -X quit
-              sleep 2
-            fi
-            pkill -f "java.*untitled-1.0-SNAPSHOT.jar" 2>/dev/null || true
-            sleep 2
-
-            # 加载环境变量
-            if [ -f .env ]; then
-              source .env
-              echo "env loaded"
-            else
-              echo "WARNING: .env not found"
-            fi
-
-            # 启动
-            JAVA_OPTS="${JAVA_OPTS:--Xms256m -Xmx768m}"
-            screen -S qq-bot -d -m bash -c "
-              source /opt/qq-bot/.env 2>/dev/null || true
-              java ${JAVA_OPTS} -jar /opt/qq-bot/untitled-1.0-SNAPSHOT.jar >> /opt/qq-bot/qq-bot.log 2>&1
-            "
-
-            sleep 3
-            if screen -list | grep -q "qq-bot"; then
-              echo "DEPLOY OK"
-            else
-              echo "DEPLOY FAILED — last 40 lines of log:"
-              tail -40 /opt/qq-bot/qq-bot.log || true
-              exit 1
-            fi
+      # - name: Restart Bot
+      #   uses: appleboy/ssh-action@v1.2.1
+      #   with:
+      #     host: ${{ secrets.DEPLOY_HOST }}
+      #     username: root
+      #     key: ${{ secrets.DEPLOY_SSH_KEY }}
+      #     script: |
+      #       cd /opt/qq-bot
+      #       set -e
+      #       if screen -list | grep -q "qq-bot"; then
+      #         echo "stopping screen session..."
+      #         screen -S qq-bot -X quit
+      #         sleep 2
+      #       fi
+      #       pkill -f "java.*untitled-1.0-SNAPSHOT.jar" 2>/dev/null || true
+      #       sleep 2
+      #       if [ -f .env ]; then
+      #         source .env
+      #         echo "env loaded"
+      #       else
+      #         echo "WARNING: .env not found"
+      #       fi
+      #       JAVA_OPTS="${JAVA_OPTS:--Xms256m -Xmx768m}"
+      #       screen -S qq-bot -d -m bash -c "
+      #         source /opt/qq-bot/.env 2>/dev/null || true
+      #         java ${JAVA_OPTS} -jar /opt/qq-bot/untitled-1.0-SNAPSHOT.jar >> /opt/qq-bot/qq-bot.log 2>&1
+      #       "
+      #       sleep 3
+      #       if screen -list | grep -q "qq-bot"; then
+      #         echo "DEPLOY OK"
+      #       else
+      #         echo "DEPLOY FAILED — last 40 lines of log:"
+      #         tail -40 /opt/qq-bot/qq-bot.log || true
+      #         exit 1
+      #       fi
