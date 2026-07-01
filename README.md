@@ -5,7 +5,7 @@
 [![Maven](https://img.shields.io/badge/Maven-3.6+-C71A36.svg)](https://maven.apache.org/)
 [![OneBot](https://img.shields.io/badge/OneBot-v11-black)](https://github.com/botuniverse/onebot-11)
 
-基于 Java 17 与 OneBot v11 协议的企业级智能 QQ 群机器人，集成双模型 LLM 对话、Agent 工具调用、用户画像分析、情绪感知与群互动生态。
+基于 Java 17 与 OneBot v11 协议的 Conversation Runtime —— 一个可自我进化的智能 QQ 群机器人。集成四层 LLM 模型、Agent 工具调用、用户画像分析、情绪感知、Web 可观测面板与群互动生态。**核心设计哲学：Java 维护事实与状态，LLM 负责决策。**
 
 ---
 
@@ -28,14 +28,21 @@
 
 ## 1. 项目概览
 
-糖果熊是一个面向 QQ 群聊场景的多模态智能机器人，具备以下核心能力：
+糖果熊不是一个聊天机器人，而是一个 **Conversation Runtime**。
 
-- **自然语言对话** — 双模型架构，日常聊天与复杂任务分离，支持多轮上下文与追问识别
-- **主动社交参与** — 基于话题兴趣与群活跃度的主动插话机制，冷场检测与话题引导
-- **Agent 工具调用** — 24 个可调用工具覆盖天气、搜索、提醒、排行榜、知识库、记忆等场景
+- **Java 维护事实（State）** — 数据持久化、状态管理、事件分发
+- **LLM 负责决策（Decision）** — 是否回复、回复什么、怎么回复
+- **Runtime 管理生命周期** — `ConversationRuntime` 协调 Receive → Interpret → Observe → Build Context → Generate → Commit → Trace 七阶段
+- **Listener 消费事件** — 统计、日志、Trace、WebDashboard 全部通过 `RuntimeListener`，不侵入 Runtime
+
+核心能力：
+
+- **自然语言对话** — 四层模型架构（bailian / agent / audit / vision），支持多轮上下文与追问识别
+- **自我进化** — L1 热重载（DB 配置秒生效）→ L2 改源码编译部署 → L3 自审修 bug，三层次递进
+- **Agent 工具调用** — 30+ 可调用工具覆盖天气、搜索、提醒、排行榜、知识库、记忆、Shell 运维等场景
+- **Web 可观测面板** — 内嵌 HTTP 服务器（端口 8765），实时决策链路追踪、群聊指标、系统健康
 - **用户画像与好感度** — 定时分析群聊记录生成兴趣标签及动态好感度
 - **群互动生态** — 每日 CP 配对、职业/命格抽卡、幸运值、排行榜等轻量社交玩法
-- **游戏辅助** — 洛克王国宠物数据库、远行商人查询、三角洲行动截图
 - **情绪感知** — 分群独立情绪系统（0–100），@、互动、冷场等事件驱动情绪变化
 
 ---
@@ -44,46 +51,65 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        NapCat (OneBot v11)                  │
-│                     WebSocket (ws://host:port)              │
+│                       NapCat (OneBot v11)                   │
+│                    WebSocket (ws://host:port)               │
 └──────────────────────────┬──────────────────────────────────┘
                            │ JSON Events
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                      Main (WebSocket Client)                │
-│  ┌─────────────┐  ┌──────────────┐  ┌───────────────────┐   │
-│  │ SpamDetector│  │ OneBotWS     │  │ PendingRequests   │   │
-│  │ (防刷检测)  │  │ (API 封装)   │  │ (异步应答映射)    │  │
-│  └─────────────┘  └──────────────┘  └───────────────────┘  │
+│                     Main (WebSocket Client)                 │
+│  ┌────────────┐  ┌──────────────┐  ┌────────────────────┐   │
+│  │SpamDetector│  │ OneBotWS     │  │ PendingRequests    │   │
+│  │(防刷检测)  │  │ (API 封装)   │  │ (异步应答映射)     │   │
+│  └────────────┘  └──────────────┘  └────────────────────┘  │
 └──────────────────────────┬──────────────────────────────────┘
                            │ dispatch()
                            ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   HandlerRegistry (责任链)                  │
-│                                                             │
-│  Hello → Luck → Joke → Reminder → Sanjiao → DailyProfession │
-│  → DailyCp → Rank → EggGroupSearch → Agent → Merchant → AI │
-│                                                             │
-│  命中即停止 (first-match wins)                              │
-└──────────────────────────┬──────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                    HandlerRegistry (责任链)                   │
+│  Hello → Luck → Joke → Reminder → Sanjiao → DailyProfession  │
+│  → DailyCp → Rank → EggGroupSearch → Merchant → AIHandler    │
+│                                                              │
+│  AIHandler ──委托──▶ ConversationRuntime                     │
+└──────────────────────────────────────────────────────────────┘
                            │
-          ┌────────────────┼────────────────┐
-          ▼                ▼                ▼
-┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│ BaiLianService│  │ AgentService │  │ 24 × Tool   │
-│ (日常对话)    │  │ (智能助手)   │  │ (工具调用)   │
-│ glm-5.1      │  │ gemini-3-flash│  │              │
-└──────┬───────┘  └──────┬───────┘  └──────────────┘
-       │                 │
-       └────────┬────────┘
-                ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    数据 & 基础设施层                        │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────────┐  │
-│  │ MySQL    │  │ HikariCP │  │ HanLP    │  │ Java2D     │  │
-│  │ (H2 兼容) │  │ (连接池)  │  │ (NLP)    │  │ (图像渲染)  │  │
-│  └──────────┘  └──────────┘  └──────────┘  └────────────┘  │
-└─────────────────────────────────────────────────────────────┘
+                           ▼
+┌──────────────────────────────────────────────────────────────┐
+│              ConversationRuntime (七阶段生命周期)            │
+│                                                              │
+│  Receive ──▶ Interpret ──▶ Observe ──▶ Build Context        │
+│       (消息)    (事件分类)    (状态快照)    (Prompt组装)     │
+│                                                              │
+│                          ──▶ Generate ──▶ Commit ──▶ Trace  │
+│                              (LLM调用)    (状态持久)  (监听器) │
+└──────────────────┬───────────────────────────────────────────┘
+                   │
+    ┌──────────────┼──────────────┐
+    ▼              ▼              ▼
+┌──────────┐ ┌──────────┐ ┌──────────────┐
+│Interpreter│ │Generator │ │   Listener   │
+│(事件分类) │ │(LLM调用) │ │(WebDashboard │
+│          │ │          │ │ DecisionTrace│
+│          │ │          │ │ Metrics)     │
+└──────────┘ └──────────┘ └──────────────┘
+                   │
+    ┌──────────────┼──────────────┐
+    ▼              ▼              ▼
+┌──────────┐ ┌──────────┐ ┌──────────────┐
+│ bailian  │ │ agent    │ │ audit/vision │
+│(DeepSeek │ │(DeepSeek │ │(Claude/Qwen  │
+│ v4-pro)  │ │ v4-pro)  │ │ VL Max)      │
+│ 主对话   │ │ 自进化   │ │ 审计/图片    │
+└──────────┘ └──────────┘ └──────────────┘
+                   │
+                   ▼
+┌──────────────────────────────────────────────────────────────┐
+│                     数据 & 基础设施层                        │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────────┐   │
+│  │ MySQL    │  │ HikariCP │  │ HanLP    │  │ Java2D     │   │
+│  │ (8.0+)   │  │ (连接池)  │  │ (NLP)    │  │ (图像渲染)  │   │
+│  └──────────┘  └──────────┘  └──────────┘  └────────────┘   │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 **线程模型：**
@@ -181,24 +207,57 @@ AI 可通过 `<tool_call>` XML 块动态调用以下 24 个工具：
 
 | 服务 | 职责 |
 |------|------|
-| **BaiLianService** | 双模型 AI 核心：glm-5.1 负责日常聊天，gemini-3-flash 负责 Agent/工具调用。包含多模态上下文管理、RAG 知识库增强、主动插话决策、频率控制、人设注入 |
-| **AgentService** | 智能助手决策引擎：接收"请帮我"请求，交由 AI 决策工具调用链路（24 个工具注册于 BaiLianService） |
-| **BotMoodService** | 分群情绪系统：每群独立维护 0–100 心情值 (低落/平静/开心/兴奋)，持久化至 `group_mood` 表。冷场检测 + 自动话题投放 |
-| **UserPortraitService** | 用户画像引擎：定时批处理分析聊天记录，生成兴趣标签，动态调整好感度 (–5 ~ +5/次)，持久化至 `user_profiles` / `user_affinity` |
-| **ReminderService** | 提醒调度引擎：`ScheduledThreadPoolExecutor` (3 线程) 驱动，支持周期/单次/每日/延迟四种模式。用户回复私聊自动停止 |
-| **TtsService** | 语音合成：调用 `text-to-speech.cn` API，支持重试 (3 次)、Token 缓存、MP3 输出 |
-| **MerchantApiService** | 远行商人 API 服务：定时拉取商品数据，缓存至数据库，支持高价值物资筛选与通知推送 |
-| **WebScreenshotService** | 网页截图：调用外部 Python 脚本异步截图，自动清理临时文件 |
+| **ConversationRuntime** | 会话运行时核心：协调 Receive → Interpret → Observe → Build Context → Generate → Commit → Trace 七阶段生命周期，所有群消息处理必经入口 |
+| **ConversationInterpreter** | 事件分类器：识别 FOLLOW_UP / MENTION / PROBABILISTIC / NOTHING，不依赖 Generator，只依赖 StateStore + BehaviorAnalyzer |
+| **BaiLianService** | LLM 调用核心（Generator 角色）：Prompt 组装 → Tool Calling 循环 → API 调用，不依赖 Runtime。四层模型：bailian (DeepSeek v4-pro) / agent (自进化) / audit (Claude Sonnet 4.6) / vision (Qwen VL Max) |
+| **WebDashboardListener** | Web 可观测面板：内嵌 HTTP 服务器（端口 8765），实时决策链路、群聊指标、系统健康，作为 RuntimeListener 不侵入 Runtime |
+| **DecisionTraceListener** | 决策追踪：消费 CommitFinished 事件 → 记录 DecisionTrace |
+| **MetricsListener** | 指标收集：消费 MessageReceived + CommitFinished → ConversationMetrics |
+| **PromptBuilder** | Prompt 组装器：所有动态内容来自 PromptContext，只拼接不改逻辑 |
+| **SelfEvolveTool** | 自我进化执行器：临时分支 → 修改源码 → 编译 → 测试 → 打包 → squash merge 到 main → push，失败自动回滚 |
+| **BotMoodService** | 分群情绪系统：每群独立维护 0–100 心情值，持久化至 `group_mood` 表 |
+| **UserPortraitService** | 用户画像引擎：定时批处理分析聊天记录，生成兴趣标签，动态调整好感度 |
+| **ReminderService** | 提醒调度引擎：支持周期/单次/每日/延迟四种模式 |
+| **TtsService** | 语音合成：调用 edge-tts / ChatTTS，MP3 输出 |
+| **WebScreenshotService** | 网页截图：Selenium + Python 异步截图 |
 | **SpamDetector** | 防刷检测：群聊消息频率监控与打断 |
-| **GroupSerialExecutor** | 群聊串行执行器：同群内 AI 调用与游戏逻辑串行化，避免竞态 |
+| **GroupSerialExecutor** | 群聊串行执行器：同群内 AI 调用与游戏逻辑串行化 |
 | **KeywordKnowledgeService** | 关键词知识库：基于关键词的快速问答匹配 |
-| **BotMemoryService** | 短期记忆：记录 AI 近期行为 (说了什么、调了什么工具) |
-| **ConversationService** | 对话上下文管理 |
-| **PersonalityService** | 人格化回复风格调整 |
+| **CandyBearLifeEngine** | 糖果熊人生引擎：四层架构（章节 → 周记 → 日记 → 工具查询），模拟长期人生状态演进 |
+| **MemoryProvider** | 长期记忆提供者：语义检索历史记忆，注入 PromptContext |
+| **ErrorMonitorService** | 异常自动监控：定时巡检日志，audit API 诊断并修复 |
 
 ---
 
-### 3.4 图像渲染
+### 3.4 自我进化系统
+
+糖果熊具备三层自进化能力：
+
+| 层级 | 方式 | 生效速度 | 说明 |
+|:---:|------|:---:|------|
+| **L1** | `update_config` 工具 → 改 DB 配置 | 秒级 | 热重载，不需重启。修改 Prompt、规则集、阈值等 |
+| **L2** | `self_evolve` 工具 → 改源码 → 编译 → 部署 | 分钟级 | 临时分支 → 编译测试打包 → squash merge 到 main → 替换 JAR |
+| **L3** | `audit_logs` → 诊断异常 → `read_code` → 修复 | 自动 | ErrorMonitor 定时巡检，audit API 诊断，self_evolve 修复 |
+
+安全机制：
+- `CommandPolicy` 对 `shell_exec` 做三层过滤（危险模式/黑名单/需确认/白名单）
+- `SelfEvolveTool` 硬阻断修改 `BotConfig.java`、`CommandPolicy.java`、`*.properties`、`*.env`
+- 非管理员所有写操作全 DENY
+- 编译失败自动回滚（文件 + git）
+
+### 3.5 Web 可观测面板
+
+内嵌 HTTP 服务器 `WebDashboardListener`（端口 8765，可通过 `DASHBOARD_PORT` 环境变量配置），作为 `RuntimeListener` 不侵入 Runtime。
+
+提供以下 API：
+- `GET /` — 实时 HTML 面板
+- `GET /api/decisions` — 最近 300 条决策链路（REPLY/SILENT/ERROR + 耗时 + Token 用量）
+- `GET /api/groups` — 各群消息量、回复率、错误率
+- `GET /api/system` — JVM 内存、线程数、运行时长
+
+支持 `DASHBOARD_TOKEN` 环境变量启用 Token 鉴权。
+
+### 3.6 图像渲染
 
 | 组件 | 功能 |
 |------|------|
@@ -229,10 +288,12 @@ AI 可通过 `<tool_call>` XML 块动态调用以下 24 个工具：
 | **部署** | Bash 脚本 + GNU Screen | — |
 
 **设计原则：**
-- 手动依赖注入 — 无 Spring/DI 框架，`Main` 构造函数负责全量装配
-- Repository 模式 — `BaseRepository` 提供连接管理与重试逻辑，手写 SQL，无 ORM
+- **架构宪法** — 详见 [CLAUDE.md](untitled/CLAUDE.md)：Java 不做语义决策、Interpreter 不依赖 Generator、Generator 不依赖 Runtime
+- 手动依赖注入 — 无 Spring/DI 框架，`BotBootstrap` 负责全量装配
+- Repository 模式 — 手写 SQL，`?` 占位符，try-with-resources，无 ORM
 - 责任链模式 — Handler 按优先级排列，首匹配即处理
-- 异步应答 — `CompletableFuture` + `ConcurrentHashMap` 将 WebSocket 异步通信转为请求-响应模型
+- RuntimeListener — 新增横切关注点优先做成 Listener，不修改 Runtime
+- `main` 是唯一 Source of Truth — 不再使用长期功能分支
 - 配置安全 — 敏感值通过 `${ENV_VAR:default}` 注入，不硬编码
 
 ---
@@ -251,8 +312,8 @@ AI 可通过 `<tool_call>` XML 块动态调用以下 24 个工具：
 
 ```bash
 # 克隆项目
-git clone https://github.com/Andralice/A-QQ-bot-based-on-Java-and-NapCat.git
-cd A-QQ-bot-based-on-Java-and-NapCat/untitled
+git clone git@github.com:Andralice/CandyBear-QQ-BOT.git
+cd CandyBear-QQ-BOT/untitled
 
 # 构建 fat JAR
 mvn clean package -DskipTests
@@ -343,37 +404,50 @@ java -Xms256m -Xmx768m -jar target/untitled-1.0-SNAPSHOT.jar
 
 ## 7. 部署与运维
 
-### 7.1 部署到服务器
+### 7.1 Git 分支策略
 
-项目提供 `deploy.sh` 自动化部署脚本（本地使用，不上传 GitHub）。你需要根据自己服务器信息创建：
-
-```bash
-# 1. 设置服务器连接信息
-export DEPLOY_HOST=你的服务器IP
-export DEPLOY_USER=root
-
-# 2. 在服务器上创建 .env 文件
-# /opt/qq-bot/.env 包含所有环境变量
-
-# 3. 执行部署
-chmod +x deploy.sh && ./deploy.sh
+```
+main 是唯一 Source of Truth
+    │
+    ├── SelfEvolveTool: 临时分支 evolve/YYYYMMDD-HHmm → squash merge → push origin/main
+    │   (编译/测试/打包均通过后才合并)
+    │
+    └── git-push.sh: git pull --ff-only → git add → git commit → git push origin/main
+        (日常自动同步，每次先拉最新代码)
 ```
 
-脚本执行流程：Maven 打包 → 上传 JAR → 停止旧实例 → 替换 JAR（保留 3 个备份）→ 加载 .env 并启动 screen 会话。
+已取消 `auto-evolve` 长期分支。AI 修改后的代码直接进入 main。
 
-### 7.2 远程服务器结构
+### 7.2 CI/CD
+
+GitHub Actions (`deploy.yml`) 监听 `main` 分支 push 事件，执行 **云端质量检查**（不负责生产部署）：
+
+| 步骤 | 说明 |
+|------|------|
+| `mvn compile` | 编译检查 |
+| `mvn test` | 单元测试 |
+| `mvn package` | 打包验证 |
+
+服务器部署由 `SelfEvolveTool` 直接负责：编译通过后本地替换 JAR 到 `/opt/qq-bot/`。
+
+### 7.3 远程服务器结构
 
 ```
 /opt/qq-bot/
-├── untitled-1.0-SNAPSHOT.jar       # 当前运行 JAR
-├── untitled-1.0-SNAPSHOT.jar.bak.* # 历史备份 (保留 3 个)
-├── .env                             # 环境变量 (API Keys, DB 密码等)
-├── watchdog.sh                      # 可选：看门狗自动重启脚本
-├── qq-bot.log                       # 运行日志
-└── watchdog.log                     # 看门狗日志
+├── untitled-1.0-SNAPSHOT.jar        # 当前运行 JAR
+├── untitled-1.0-SNAPSHOT.jar.bak.*  # 历史备份
+├── .env                              # 环境变量 (API Keys, DB 密码等)
+├── Note/git-push.sh                  # 自动同步脚本
+├── _deploy/                          # Git worktree (源码检出)
+│   └── untitled/
+│       ├── pom.xml
+│       └── src/
+├── qq-bot.log                        # 运行日志
+├── tts/                              # TTS 音频输出
+└── tmp/                              # 临时文件
 ```
 
-### 7.3 运维命令
+### 7.4 运维命令
 
 ```bash
 # 查看运行状态
@@ -393,7 +467,7 @@ source /opt/qq-bot/.env
 java -Xms256m -Xmx768m -jar /opt/qq-bot/untitled-1.0-SNAPSHOT.jar
 ```
 
-### 7.4 数据库表
+### 7.5 数据库表
 
 核心业务表：
 
@@ -403,12 +477,17 @@ java -Xms256m -Xmx768m -jar /opt/qq-bot/untitled-1.0-SNAPSHOT.jar
 | `user_affinity` | 用户好感度 (0–100，含变化日志) |
 | `group_mood` | 分群情绪值 |
 | `group_message_stats` | 群消息统计 (发言数) |
-| `long_term_memory` | 长期记忆与定时事件 |
-| `keyword_knowledge` | 关键词知识库 |
-| `merchant_cache` | 远行商人商品缓存 |
-| `merchant_subscription` | 远行商人订阅记录 |
+| `long_term_memories` | 长期记忆与定时事件（含 trigger_at / triggered 列） |
+| `keyword_knowledge` / `knowledge_base` | 关键词知识库 |
+| `candy_bear_life_state` | 糖果熊人生状态 (单行表) |
+| `candy_bear_weekly_diaries` | 每周日记 |
+| `candy_bear_daily_journals` | 每日日记 |
+| `recurring_tasks` | 周期任务（cron 表达式驱动） |
+| `evolution_records` | 自我进化历史记录 |
+| `bot_config` | 运行时配置 (热重载) |
 | `users` | 用户昵称缓存 |
 | `messages` | 原始消息归档 |
+| `active_reply_logs` | 主动回复决策日志 |
 
 ---
 
@@ -465,21 +544,32 @@ public class MyTool implements Tool {
 untitled/
 ├── src/main/java/com/start/
 │   ├── Main.java              # 入口 + WebSocket 生命周期
+│   ├── BotBootstrap.java      # 服务装配 + 后台任务启动
 │   ├── config/
 │   │   ├── BotConfig.java     # 配置加载 (含环境变量替换)
-│   │   └── DatabaseConfig.java # 数据源配置
+│   │   └── DatabaseConfig.java # 数据源配置 + 表迁移
 │   ├── handler/               # 消息处理器 (责任链节点)
 │   ├── agent/                 # AI 工具实现 (Tool 接口)
+│   │   └── evo/               # 自进化工具 (SelfEvolveTool, AuditTool, etc.)
+│   ├── runtime/               # Conversation Runtime
+│   │   ├── conversation/      # ConversationRuntime, ConversationStateStore
+│   │   └── trace/             # WebDashboardListener, DecisionTraceListener, MetricsListener
 │   ├── service/               # 核心业务服务
-│   ├── repository/            # 数据访问层 (BaseRepository)
-│   ├── model/                 # 数据模型
+│   ├── repository/            # 数据访问层
+│   ├── model/                 # 数据模型 (POJO)
 │   ├── vision/                # 图像渲染 (Java2D)
 │   └── util/                  # 工具类
 ├── src/main/resources/
 │   ├── application.properties.example  # 配置模板
 │   ├── assets/fonts/          # HarmonyOS Sans 字体
 │   ├── assets/bg/             # 背景图
+│   ├── stickers/              # 表情包资源
 │   └── logback.xml            # 日志配置
+├── src/test/java/             # 测试代码
+├── Note/
+│   └── git-push.sh            # Git 自动同步脚本
+├── CLAUDE.md                  # 架构宪法（架构设计文档）
+├── deploy.sh                  # 部署脚本
 └── pom.xml
 ```
 
@@ -501,7 +591,7 @@ untitled/
 
 本项目采用 **MIT License** 开源。使用者应遵守 QQ 平台及 OneBot 协议的相关规定。
 
-Copyright (c) 2025 糖果熊 (CandyBear)
+Copyright (c) 2025-2026 糖果熊 (CandyBear)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 
