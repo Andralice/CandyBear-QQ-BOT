@@ -97,8 +97,8 @@
     ▼              ▼              ▼
 ┌──────────┐ ┌──────────┐ ┌──────────────┐
 │ bailian  │ │ agent    │ │ audit/vision │
-│(DeepSeek │ │(DeepSeek │ │(Claude/Qwen  │
-│ v4-pro)  │ │ v4-pro)  │ │ VL Max)      │
+│(DeepSeek │ │(DeepSeek │ │(审计/视觉    │
+│ v4-pro)  │ │ v4-pro)  │ │ 模型)        │
 │ 主对话   │ │ 自进化   │ │ 审计/图片    │
 └──────────┘ └──────────┘ └──────────────┘
                    │
@@ -209,7 +209,7 @@ AI 可通过 `<tool_call>` XML 块动态调用以下 24 个工具：
 |------|------|
 | **ConversationRuntime** | 会话运行时核心：协调 Receive → Interpret → Observe → Build Context → Generate → Commit → Trace 七阶段生命周期，所有群消息处理必经入口 |
 | **ConversationInterpreter** | 事件分类器：识别 FOLLOW_UP / MENTION / PROBABILISTIC / NOTHING，不依赖 Generator，只依赖 StateStore + BehaviorAnalyzer |
-| **BaiLianService** | LLM 调用核心（Generator 角色）：Prompt 组装 → Tool Calling 循环 → API 调用，不依赖 Runtime。四层模型：bailian (DeepSeek v4-pro) / agent (自进化) / audit (Claude Sonnet 4.6) / vision (Qwen VL Max) |
+| **BaiLianService** | LLM 调用核心（Generator 角色）：Prompt 组装 → Tool Calling 循环 → API 调用，不依赖 Runtime。四层模型：bailian (主对话) / agent (自进化) / audit (审计诊断) / vision (图片识别) |
 | **WebDashboardListener** | Web 可观测面板：内嵌 HTTP 服务器（端口 8765），实时决策链路、群聊指标、系统健康，作为 RuntimeListener 不侵入 Runtime |
 | **DecisionTraceListener** | 决策追踪：消费 CommitFinished 事件 → 记录 DecisionTrace |
 | **MetricsListener** | 指标收集：消费 MessageReceived + CommitFinished → ConversationMetrics |
@@ -288,7 +288,7 @@ AI 可通过 `<tool_call>` XML 块动态调用以下 24 个工具：
 | **部署** | Bash 脚本 + GNU Screen | — |
 
 **设计原则：**
-- **架构宪法** — 详见 [CLAUDE.md](untitled/CLAUDE.md)：Java 不做语义决策、Interpreter 不依赖 Generator、Generator 不依赖 Runtime
+- **架构宪法** — 详见架构设计文档：Java 不做语义决策、Interpreter 不依赖 Generator、Generator 不依赖 Runtime
 - 手动依赖注入 — 无 Spring/DI 框架，`BotBootstrap` 负责全量装配
 - Repository 模式 — 手写 SQL，`?` 占位符，try-with-resources，无 ORM
 - 责任链模式 — Handler 按优先级排列，首匹配即处理
@@ -568,7 +568,7 @@ untitled/
 ├── src/test/java/             # 测试代码
 ├── Note/
 │   └── git-push.sh            # Git 自动同步脚本
-├── CLAUDE.md                  # 架构宪法（架构设计文档）
+├── ARCHITECTURE.md            # 架构设计文档
 ├── deploy.sh                  # 部署脚本
 └── pom.xml
 ```
