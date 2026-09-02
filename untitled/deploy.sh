@@ -3,7 +3,7 @@
 # 糖果熊 QQ Bot 一键部署脚本
 # 直接运行: ./deploy.sh
 # 前提: 本机能 SSH 到 154.8.213.134，且 SSH 密钥已配置
-# 服务器需安装: apt install -y maven openjdk-17-jdk-headless screen
+# 本机需安装 Maven；服务器需安装: apt install -y openjdk-17-jdk-headless screen
 # ============================================
 set -euo pipefail
 
@@ -26,8 +26,8 @@ else
   echo "❌ 未找到 SSH 私钥 (~/.ssh/id_ed25519 或 ~/.ssh/id_rsa)"
   exit 1
 fi
-SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=10"
-SCP_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=10"
+SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
+SCP_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
 
 echo "🚀 部署到 ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}"
 echo ""
