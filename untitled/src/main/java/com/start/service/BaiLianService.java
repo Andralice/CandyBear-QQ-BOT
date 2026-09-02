@@ -201,7 +201,7 @@ public class BaiLianService {
         try {
             getThreadManager().processMessage(groupId, userId, message, BOT_QQ);
         } catch (Exception e) {
-            logger.debug("Thread processing skipped: {}", e.getMessage());
+            logger.warn("Thread processing failed, groupId={}, userId={}", groupId, userId, e);
         }
     }
 
@@ -446,7 +446,6 @@ public class BaiLianService {
 
         if (groupId != null) {
             recordUserInteraction(groupId, userId, reply);
-            aiDatabaseService.updateConversationThread(groupId, userId, reply);
 
             Deque<Long> msgHistory = botMessageHistory.computeIfAbsent(groupId, k -> new ConcurrentLinkedDeque<>());
             synchronized (msgHistory) {
@@ -676,7 +675,7 @@ public class BaiLianService {
                         }
                     }
                 } catch (Exception e) {
-                    logger.debug("Scene loading skipped: {}", e.getMessage());
+                    logger.warn("Scene loading failed, groupId={}, userId={}", groupId, userId, e);
                 }
             }
 
@@ -1241,7 +1240,6 @@ public class BaiLianService {
 
                 if (groupId != null) {
                     recordUserInteraction(groupId, userId, reply);
-                    aiDatabaseService.updateConversationThread(groupId, userId, reply);
 
                     if (!reply.equals("抱歉，刚才走神了...") &&
                             !reply.equals("嗯...再问一次吧") &&

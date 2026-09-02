@@ -8,11 +8,11 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Base64;
-import java.util.Collections;
-import java.util.HashMap;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -26,7 +26,7 @@ public class StickerTool implements Tool {
     private static final Logger logger = LoggerFactory.getLogger(StickerTool.class);
 
     private final Main bot;
-    private final Map<String, Long> lastSendTime = new HashMap<>();
+    private final Map<String, Long> lastSendTime = new ConcurrentHashMap<>();
     private static final long COOLDOWN_MS = 30_000;
 
     // QQ 内置表情 face id 映射（file 字段空时的回退）
@@ -98,8 +98,6 @@ public class StickerTool implements Tool {
         if (last != null && now - last < COOLDOWN_MS) {
             return "表情包冷却中，稍后再发";
         }
-        lastSendTime.put(cooldownKey, now);
-
         String keywords = (String) args.get("keywords");
 
         try {
@@ -129,6 +127,8 @@ public class StickerTool implements Tool {
             } else {
                 bot.sendPrivateReply(Long.parseLong(userId), cqCode);
             }
+            // 只有真正走到发送调用后才开始冷却，选择/读文件失败不应锁住用户。
+            lastSendTime.put(cooldownKey, System.currentTimeMillis());
             return "已发送表情包: " + String.join(",", selected.keywords);
         } catch (Exception e) {
             logger.warn("发送表情包失败", e);
@@ -158,27 +158,27 @@ public class StickerTool implements Tool {
             return realStickers.get(ThreadLocalRandom.current().nextInt(realStickers.size()));
         }
         // 关键词匹配打分
-        List<StickerRecord> scored = new ArrayList<>(realStickers);
-        scored.sort((a, b) -> {
-            int sa = matchScore(b, keywords) - matchScore(a, keywords);
-            if (sa != 0) return sa;
-            return ThreadLocalRandom.current().nextInt(3) - 1;
-        });
-        int limit = Math.min(3, scored.size());
-        return scored.get(ThreadLocalRandom.current().nextInt(limit));
+        return selectScoredSticker(realStickers, keywords);
     }
 
-    /** 仅在没真图时兜底用：返回一条 legacy（file=""），execute() 走 faceFallback 路径。 */
-    private StickerRecord pickFaceFallback(List<StickerRecord> all) {
-        for (StickerRecord r : all) {
-            if (r.file == null || r.file.isBlank()) {
-                return r;
-            }
+    /** 使用稳定顺序完成评分/排序，再从最高分前三名中随机选择。 */
+    static StickerRecord selectScoredSticker(List<StickerRecord> stickers, String keywords) {
+        List<ScoredSticker> scored = new ArrayList<>(stickers.size());
+        for (StickerRecord sticker : stickers) {
+            scored.add(new ScoredSticker(sticker, matchScore(sticker, keywords)));
         }
-        return null;
+        scored.sort(Comparator.comparingInt(ScoredSticker::score)
+                .reversed()
+                .thenComparing(s -> stableStickerKey(s.sticker())));
+
+        // 关键词完全没有命中时，不要从前三张真图中随机发一张无关图片。
+        if (scored.isEmpty() || scored.get(0).score() <= 0) return null;
+
+        int limit = Math.min(3, scored.size());
+        return scored.get(ThreadLocalRandom.current().nextInt(limit)).sticker();
     }
 
-    private int matchScore(StickerRecord entry, String input) {
+    private static int matchScore(StickerRecord entry, String input) {
         int score = 0;
         String lower = input.toLowerCase(Locale.ROOT);
         // 优先匹配管理员修正后的 keywords，回退到 LLM 出的 auto_keywords
@@ -191,6 +191,24 @@ public class StickerTool implements Tool {
             if (kw.toLowerCase(Locale.ROOT).contains(lower)) score += 2;
         }
         return score;
+    }
+
+    private static String stableStickerKey(StickerRecord sticker) {
+        if (sticker == null) return "";
+        if (sticker.id != null && !sticker.id.isBlank()) return sticker.id;
+        return sticker.file != null ? sticker.file : "";
+    }
+
+    private record ScoredSticker(StickerRecord sticker, int score) {}
+
+    /** 仅在没真图时兜底用：返回一条 legacy（file=""），execute() 走 faceFallback 路径。 */
+    private StickerRecord pickFaceFallback(List<StickerRecord> all) {
+        for (StickerRecord r : all) {
+            if (r.file == null || r.file.isBlank()) {
+                return r;
+            }
+        }
+        return null;
     }
 
     private String faceFallback(StickerRecord entry) {

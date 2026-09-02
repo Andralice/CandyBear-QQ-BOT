@@ -1,6 +1,0 @@
-#NOTE: This is a Maven Resolver internal implementation file, its format can be changed without prior notice.
-#Mon Aug 10 11:25:16 CST 2026
-classworlds-1.1.jar>nexus-tencentyun=
-classworlds-1.1.pom>nexus-tencentyun=
-classworlds-1.1.jar>aliyunmaven=
-classworlds-1.1.pom>aliyunmaven=

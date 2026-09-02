@@ -10,6 +10,9 @@ import java.util.List;
 /** 群聊 Thread 存储。表在构造时自动创建。 */
 public class ThreadRepository implements Repository {
 
+    /** 新主题线程模型使用独立表，避免复用旧表的用户线程数据。 */
+    private static final String TABLE_NAME = "conversation_threads_v2";
+
     private final DataSource dataSource;
 
     @Override
@@ -22,7 +25,7 @@ public class ThreadRepository implements Repository {
 
     private void ensureTable() {
         String sql = """
-            CREATE TABLE IF NOT EXISTS conversation_threads (
+            CREATE TABLE IF NOT EXISTS conversation_threads_v2 (
                 id BIGINT AUTO_INCREMENT PRIMARY KEY,
                 group_id VARCHAR(64) NOT NULL,
                 topic VARCHAR(255),
@@ -42,12 +45,12 @@ public class ThreadRepository implements Repository {
              Statement stmt = conn.createStatement()) {
             stmt.execute(sql);
         } catch (SQLException e) {
-            throw new RuntimeException("Failed to create conversation_threads table", e);
+            throw new RuntimeException("Failed to create " + TABLE_NAME + " table", e);
         }
     }
 
     public void save(ConversationThread thread) {
-        String sql = "INSERT INTO conversation_threads (group_id, topic, status, merged_into_id, participant_ids, last_message_at, message_count, attention_weight, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())";
+        String sql = "INSERT INTO " + TABLE_NAME + " (group_id, topic, status, merged_into_id, participant_ids, last_message_at, message_count, attention_weight, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             ps.setString(1, thread.getGroupId());
@@ -69,7 +72,7 @@ public class ThreadRepository implements Repository {
 
     /** 查询群内所有活跃 Thread，按权重降序。 */
     public List<ConversationThread> findActiveByGroup(String groupId) {
-        String sql = "SELECT * FROM conversation_threads WHERE group_id = ? AND status IN ('ACTIVE', 'IDLE') ORDER BY attention_weight DESC";
+        String sql = "SELECT * FROM " + TABLE_NAME + " WHERE group_id = ? AND status IN ('ACTIVE', 'IDLE') ORDER BY attention_weight DESC";
         List<ConversationThread> list = new ArrayList<>();
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -85,7 +88,7 @@ public class ThreadRepository implements Repository {
 
     /** 按 ID 查询单条 Thread。 */
     public ConversationThread findById(long id) {
-        String sql = "SELECT * FROM conversation_threads WHERE id = ?";
+        String sql = "SELECT * FROM " + TABLE_NAME + " WHERE id = ?";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, id);
@@ -101,8 +104,8 @@ public class ThreadRepository implements Repository {
     /** 更新 Thread 状态（ACTIVE → IDLE → RESOLVED / MERGED）。 */
     public void updateStatus(long id, String status, Long mergedIntoId) {
         String sql = mergedIntoId != null
-                ? "UPDATE conversation_threads SET status = ?, merged_into_id = ?, updated_at = NOW() WHERE id = ?"
-                : "UPDATE conversation_threads SET status = ?, updated_at = NOW() WHERE id = ?";
+                ? "UPDATE " + TABLE_NAME + " SET status = ?, merged_into_id = ?, updated_at = NOW() WHERE id = ?"
+                : "UPDATE " + TABLE_NAME + " SET status = ?, updated_at = NOW() WHERE id = ?";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, status);
@@ -120,7 +123,7 @@ public class ThreadRepository implements Repository {
 
     /** 消息到达后更新 Thread：增加计数、更新时间、更新参与者和权重。 */
     public void updateAfterMessage(long id, String participantIds, double newWeight) {
-        String sql = "UPDATE conversation_threads SET message_count = message_count + 1, last_message_at = NOW(), participant_ids = ?, attention_weight = ?, updated_at = NOW() WHERE id = ?";
+        String sql = "UPDATE " + TABLE_NAME + " SET message_count = message_count + 1, last_message_at = NOW(), participant_ids = ?, attention_weight = ?, updated_at = NOW() WHERE id = ?";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, participantIds);
@@ -134,7 +137,7 @@ public class ThreadRepository implements Repository {
 
     /** 更新 Thread topic（聚合重算后持久化）。 */
     public void updateTopic(long id, String topic) {
-        String sql = "UPDATE conversation_threads SET topic = ?, updated_at = NOW() WHERE id = ?";
+        String sql = "UPDATE " + TABLE_NAME + " SET topic = ?, updated_at = NOW() WHERE id = ?";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, topic);
@@ -147,7 +150,7 @@ public class ThreadRepository implements Repository {
 
     /** 合并后更新 target Thread：参与者、消息数、最后消息时间，不增加计数。 */
     public void updateMergeTarget(long id, String participantIds, int messageCount, java.time.Instant lastMessageAt) {
-        String sql = "UPDATE conversation_threads SET participant_ids = ?, message_count = ?, last_message_at = ?, updated_at = NOW() WHERE id = ?";
+        String sql = "UPDATE " + TABLE_NAME + " SET participant_ids = ?, message_count = ?, last_message_at = ?, updated_at = NOW() WHERE id = ?";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, participantIds);
@@ -162,7 +165,7 @@ public class ThreadRepository implements Repository {
 
     /** 将超过指定分钟数无消息的 ACTIVE Thread 标记为 IDLE。 */
     public int markIdle(long idleMinutes) {
-        String sql = "UPDATE conversation_threads SET status = 'IDLE', updated_at = NOW() WHERE status = 'ACTIVE' AND last_message_at < DATE_SUB(NOW(), INTERVAL ? MINUTE)";
+        String sql = "UPDATE " + TABLE_NAME + " SET status = 'IDLE', updated_at = NOW() WHERE status = 'ACTIVE' AND last_message_at < DATE_SUB(NOW(), INTERVAL ? MINUTE)";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, idleMinutes);
@@ -174,7 +177,7 @@ public class ThreadRepository implements Repository {
 
     /** 将超过指定分钟数无消息的 IDLE Thread 标记为 RESOLVED。 */
     public int markResolved(long resolveMinutes) {
-        String sql = "UPDATE conversation_threads SET status = 'RESOLVED', updated_at = NOW() WHERE status = 'IDLE' AND last_message_at < DATE_SUB(NOW(), INTERVAL ? MINUTE)";
+        String sql = "UPDATE " + TABLE_NAME + " SET status = 'RESOLVED', updated_at = NOW() WHERE status = 'IDLE' AND last_message_at < DATE_SUB(NOW(), INTERVAL ? MINUTE)";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, resolveMinutes);

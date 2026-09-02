@@ -45,6 +45,7 @@ public class ErrorMonitorService {
     private static final int AUDIT_MAX_RETRIES = 3;
     private static final int AUDIT_RETRY_DELAY_MS = 2000;
     private static final int ALERT_CONSECUTIVE_THRESHOLD = 3;
+    private static final long AUDIT_QUOTA_COOLDOWN_MS = 30 * 60_000L;
 
     // logback.xml pattern: %d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n
     // 严格要求两个 pattern 保持一致，否则判定会失效。
@@ -66,6 +67,8 @@ public class ErrorMonitorService {
     private Path lastLogPath = null;
     private final Map<String, Long> notifiedSignatures = new ConcurrentHashMap<>();
     private int consecutiveQuotaErrors = 0;
+    private long auditQuotaCooldownUntil = 0L;
+    private boolean quotaAlertSent = false;
 
     private final HttpClient httpClient;
 
@@ -231,6 +234,13 @@ public class ErrorMonitorService {
     // ==================== 审计 API 调用（便宜模型） ====================
 
     private void callAuditApi(List<String> errors) {
+        long now = System.currentTimeMillis();
+        if (now < auditQuotaCooldownUntil) {
+            logger.debug("审计 API 处于配额冷却期，跳过本轮调用（剩余约 {} 分钟）",
+                    Math.max(1, (auditQuotaCooldownUntil - now + 59_999L) / 60_000L));
+            return;
+        }
+
         StringBuilder sb = new StringBuilder();
         sb.append("你是一个日志分析器。以下是服务器日志中发现的 ").append(errors.size()).append(" 条异常。\n\n");
         sb.append("```\n");
@@ -267,16 +277,20 @@ public class ErrorMonitorService {
                         continue;
                     }
                     consecutiveQuotaErrors++;
+                    auditQuotaCooldownUntil = System.currentTimeMillis() + AUDIT_QUOTA_COOLDOWN_MS;
                     logger.error("审计 API 连续 {} 次配额错误（累计 {} 次），HTTP {}",
                             AUDIT_MAX_RETRIES, consecutiveQuotaErrors, resp.statusCode());
-                    if (consecutiveQuotaErrors >= ALERT_CONSECUTIVE_THRESHOLD) {
+                    if (!quotaAlertSent && consecutiveQuotaErrors >= ALERT_CONSECUTIVE_THRESHOLD) {
                         sendAlert("[审计API余额告警] mytokenland 疑似欠费或配额耗尽（已重试多次），HTTP " + resp.statusCode());
+                        quotaAlertSent = true;
                     }
                     return;
                 }
 
                 // 调用成功，重置计数
                 consecutiveQuotaErrors = 0;
+                auditQuotaCooldownUntil = 0L;
+                quotaAlertSent = false;
 
                 if (resp.statusCode() != 200) {
                     logger.warn("审计 API 返回非200: {}", resp.statusCode());

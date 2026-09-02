@@ -1,6 +1,0 @@
-#NOTE: This is a Maven Resolver internal implementation file, its format can be changed without prior notice.
-#Mon Aug 10 11:25:25 CST 2026
-surefire-junit-platform-3.2.5.jar>nexus-tencentyun=
-surefire-junit-platform-3.2.5.pom>aliyunmaven=
-surefire-junit-platform-3.2.5.jar>aliyunmaven=
-surefire-junit-platform-3.2.5.pom>nexus-tencentyun=

@@ -15,7 +15,6 @@ public class AIDatabaseService {
 
     private final UserRepository userRepo = new UserRepository();
     private final MessageRepository messageRepo = new MessageRepository();
-    private final ConversationThreadRepository threadRepo = new ConversationThreadRepository();
     private static final Logger logger = LoggerFactory.getLogger(AIDatabaseService.class);
     /**
      * 记录用户消息
@@ -105,26 +104,8 @@ public class AIDatabaseService {
 
             messageRepo.saveMessage(messageData);
 
-            // 2. 更新对话线程
-            if (groupId != null) {
-                String threadKey = "group_" + groupId + "_" + userId;
-                threadRepo.createOrUpdateThread(threadKey, groupId, userId, fullReply);
-            }
-
         } catch (Exception e) {
             logger.error("记录AI回复失败", e);
-        }
-    }
-
-    /** 更新对话线程（不重复保存消息，仅更新 thread 记录） */
-    public void updateConversationThread(String groupId, String userId, String lastBotReply) {
-        try {
-            if (groupId != null) {
-                String threadKey = "group_" + groupId + "_" + userId;
-                threadRepo.createOrUpdateThread(threadKey, groupId, userId, lastBotReply);
-            }
-        } catch (Exception e) {
-            logger.error("更新对话线程失败", e);
         }
     }
 

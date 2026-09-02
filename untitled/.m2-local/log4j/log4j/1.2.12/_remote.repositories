@@ -1,6 +1,0 @@
-#NOTE: This is a Maven Resolver internal implementation file, its format can be changed without prior notice.
-#Mon Aug 10 11:25:21 CST 2026
-log4j-1.2.12.jar>aliyunmaven=
-log4j-1.2.12.pom>nexus-tencentyun=
-log4j-1.2.12.jar>nexus-tencentyun=
-log4j-1.2.12.pom>aliyunmaven=

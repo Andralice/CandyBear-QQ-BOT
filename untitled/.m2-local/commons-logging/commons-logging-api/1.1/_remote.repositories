@@ -1,6 +1,0 @@
-#NOTE: This is a Maven Resolver internal implementation file, its format can be changed without prior notice.
-#Mon Aug 10 11:25:21 CST 2026
-commons-logging-api-1.1.pom>aliyunmaven=
-commons-logging-api-1.1.jar>aliyunmaven=
-commons-logging-api-1.1.pom>nexus-tencentyun=
-commons-logging-api-1.1.jar>nexus-tencentyun=

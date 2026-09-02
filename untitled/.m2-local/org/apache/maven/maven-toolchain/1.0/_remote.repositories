@@ -1,6 +1,0 @@
-#NOTE: This is a Maven Resolver internal implementation file, its format can be changed without prior notice.
-#Mon Aug 10 11:25:20 CST 2026
-maven-toolchain-1.0.pom>aliyunmaven=
-maven-toolchain-1.0.pom>nexus-tencentyun=
-maven-toolchain-1.0.jar>nexus-tencentyun=
-maven-toolchain-1.0.jar>aliyunmaven=

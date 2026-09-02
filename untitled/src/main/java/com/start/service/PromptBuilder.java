@@ -51,6 +51,11 @@ public class PromptBuilder {
 
         sb.append(basePrompt);
 
+        // 身份锚点独立于 Scene/Thread 数据库，避免场景加载失败时丢失自我指代能力。
+        sb.append("\n\n【糖果熊身份锚点】你的名字是糖果熊，你就是当前这个机器人。"
+                + "用户说‘糖果熊’、‘你’、‘我说的是谁’等指代时，先结合本轮和最近会话判断是否在指你自己。"
+                + "当前会话能回答的问题不要调用 recall_memory；recall_memory 只用于查询用户过去明确保存的长期信息。");
+
         // 情绪
         if (ctx.moodDescription != null && !ctx.moodDescription.isEmpty()) {
             sb.append("\n\n你现在的情绪：").append(ctx.moodDescription);

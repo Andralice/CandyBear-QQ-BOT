@@ -1,6 +1,0 @@
-#NOTE: This is a Maven Resolver internal implementation file, its format can be changed without prior notice.
-#Mon Aug 10 11:25:21 CST 2026
-plexus-compiler-javac-2.2.jar>aliyunmaven=
-plexus-compiler-javac-2.2.pom>aliyunmaven=
-plexus-compiler-javac-2.2.pom>nexus-tencentyun=
-plexus-compiler-javac-2.2.jar>nexus-tencentyun=
