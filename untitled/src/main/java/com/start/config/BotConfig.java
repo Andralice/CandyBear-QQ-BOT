@@ -158,7 +158,8 @@ public class BotConfig {
             auditApiKey = resolveOrEmpty(props.getProperty("audit.api-key", ""));
             auditBaseUrl = resolveOrEmpty(props.getProperty("audit.base-url", "https://api.mytokenland.com/v1/chat/completions"));
             auditModel = resolveOrEmpty(props.getProperty("audit.model", "claude-sonnet-4-6"));
-            auditTimeoutMs = parseInt(resolveOrEmpty(props.getProperty("audit.timeout-ms", "30000")), 30000);
+            // 审计模型允许较长推理时间，默认等待 120 秒；可由 AUDIT_TIMEOUT_MS 覆盖。
+            auditTimeoutMs = parseInt(resolveOrEmpty(props.getProperty("audit.timeout-ms", "120000")), 120000);
 
             workingMemoryDefaultExpireHours = parseInt(
                     resolveOrEmpty(props.getProperty("working_memory.default_expire_hours", "24")), 24);
