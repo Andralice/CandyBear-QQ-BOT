@@ -24,6 +24,12 @@ AGENT_MODEL=deepseek-v4-pro
 AGENT_TIMEOUT_MS=90000
 AGENT_MAX_RETRIES=2
 
+# 审计/日志总结服务（OpenAI 兼容 API）
+AUDIT_API_KEY=sk-your-key
+AUDIT_BASE_URL=https://ai.furry.vg/v1/chat/completions
+AUDIT_MODEL=deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
+AUDIT_TIMEOUT_MS=120000
+
 # 兼容旧版
 DASHSCOPE_API_KEY=sk-your-key
 
