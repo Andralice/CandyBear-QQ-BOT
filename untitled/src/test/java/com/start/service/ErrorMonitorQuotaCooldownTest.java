@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.Deque;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -36,5 +37,9 @@ class ErrorMonitorQuotaCooldownTest {
 
         assertTrue(cooldownUntil.getLong(service) > System.currentTimeMillis(),
                 "冷却期内不应清除配额冷却状态");
+        Field deferred = ErrorMonitorService.class.getDeclaredField("deferredAuditErrors");
+        deferred.setAccessible(true);
+        assertTrue(((Deque<?>) deferred.get(service)).contains("test error"),
+                "冷却期间发现的错误必须保留，待 API 恢复后补审");
     }
 }

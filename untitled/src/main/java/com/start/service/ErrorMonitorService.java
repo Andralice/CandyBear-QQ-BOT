@@ -46,6 +46,7 @@ public class ErrorMonitorService {
     private static final int AUDIT_RETRY_DELAY_MS = 2000;
     private static final int ALERT_CONSECUTIVE_THRESHOLD = 3;
     private static final long AUDIT_QUOTA_COOLDOWN_MS = 30 * 60_000L;
+    private static final int MAX_DEFERRED_AUDIT_ERRORS = 100;
 
     // logback.xml pattern: %d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n
     // 严格要求两个 pattern 保持一致，否则判定会失效。
@@ -69,6 +70,7 @@ public class ErrorMonitorService {
     private int consecutiveQuotaErrors = 0;
     private long auditQuotaCooldownUntil = 0L;
     private boolean quotaAlertSent = false;
+    private final Deque<String> deferredAuditErrors = new ArrayDeque<>();
 
     private final HttpClient httpClient;
 
@@ -234,18 +236,21 @@ public class ErrorMonitorService {
     // ==================== 审计 API 调用（便宜模型） ====================
 
     private void callAuditApi(List<String> errors) {
+        List<String> auditErrors = takeDeferredAuditErrors();
+        auditErrors.addAll(errors);
         long now = System.currentTimeMillis();
         if (now < auditQuotaCooldownUntil) {
+            deferAuditErrors(auditErrors);
             logger.debug("审计 API 处于配额冷却期，跳过本轮调用（剩余约 {} 分钟）",
                     Math.max(1, (auditQuotaCooldownUntil - now + 59_999L) / 60_000L));
             return;
         }
 
         StringBuilder sb = new StringBuilder();
-        sb.append("你是一个日志分析器。以下是服务器日志中发现的 ").append(errors.size()).append(" 条异常。\n\n");
+        sb.append("你是一个日志分析器。以下是服务器日志中发现的 ").append(auditErrors.size()).append(" 条异常。\n\n");
         sb.append("```\n");
-        for (int i = 0; i < Math.min(errors.size(), 10); i++) {
-            String e = errors.get(i);
+        for (int i = 0; i < Math.min(auditErrors.size(), 10); i++) {
+            String e = auditErrors.get(i);
             sb.append(e.length() > 200 ? e.substring(0, 200) + "..." : e).append("\n");
         }
         sb.append("```\n\n");
@@ -276,6 +281,7 @@ public class ErrorMonitorService {
                         try { Thread.sleep(AUDIT_RETRY_DELAY_MS); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return; }
                         continue;
                     }
+                    deferAuditErrors(auditErrors);
                     consecutiveQuotaErrors++;
                     auditQuotaCooldownUntil = System.currentTimeMillis() + AUDIT_QUOTA_COOLDOWN_MS;
                     logger.error("审计 API 连续 {} 次配额错误（累计 {} 次），HTTP {}",
@@ -293,6 +299,7 @@ public class ErrorMonitorService {
                 quotaAlertSent = false;
 
                 if (resp.statusCode() != 200) {
+                    deferAuditErrors(auditErrors);
                     logger.warn("审计 API 返回非200: {}", resp.statusCode());
                     return;
                 }
@@ -306,13 +313,13 @@ public class ErrorMonitorService {
                 if (content == null || content.trim().isEmpty()) {
                     logger.warn("⚠️ 审计 API 未产出结论（content + reasoning_content 都空）");
                     sendAlert("[审计API异常] 调用成功但未产出结论（reasoning 模型可能异常或平台故障），"
-                            + "已发现 " + errors.size() + " 条 ERROR 未分类，请人工检查。");
+                            + "已发现 " + auditErrors.size() + " 条 ERROR 未分类，请人工检查。");
                     return;
                 }
 
                 if (needsRepair(content)) {
                     logger.warn("🔧 审计 API 判定需要修复，触发主 AI");
-                    triggerMainAiFix(errors, content);
+                    triggerMainAiFix(auditErrors, content);
                 } else {
                     logger.info("✅ 审计 API 判定无需修复，跳过");
                 }
@@ -323,9 +330,27 @@ public class ErrorMonitorService {
                 if (attempt < AUDIT_MAX_RETRIES - 1) {
                     try { Thread.sleep(AUDIT_RETRY_DELAY_MS); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return; }
                 } else {
+                    deferAuditErrors(auditErrors);
                     logger.error("审计 API 重试耗尽: {}", e.getMessage());
                 }
             }
+        }
+    }
+
+    private List<String> takeDeferredAuditErrors() {
+        List<String> deferred = new ArrayList<>(deferredAuditErrors);
+        deferredAuditErrors.clear();
+        return deferred;
+    }
+
+    private void deferAuditErrors(List<String> errors) {
+        for (String error : errors) {
+            if (error != null && !deferredAuditErrors.contains(error)) {
+                deferredAuditErrors.addLast(error);
+            }
+        }
+        while (deferredAuditErrors.size() > MAX_DEFERRED_AUDIT_ERRORS) {
+            deferredAuditErrors.removeFirst();
         }
     }
 
