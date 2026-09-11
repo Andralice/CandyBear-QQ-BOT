@@ -12,9 +12,11 @@ import java.util.*;
 public class QueryImagesTool implements Tool {
 
     private final MessageRepository messageRepo;
+    private final String currentGroupId;
 
-    public QueryImagesTool(MessageRepository messageRepo) {
+    public QueryImagesTool(MessageRepository messageRepo, String currentGroupId) {
         this.messageRepo = messageRepo;
+        this.currentGroupId = currentGroupId;
     }
 
     @Override
@@ -43,12 +45,12 @@ public class QueryImagesTool implements Tool {
         if (keyword == null || keyword.trim().isEmpty()) {
             return "请提供搜索关键词";
         }
+        if (currentGroupId == null || currentGroupId.isBlank()) {
+            return "当前不是群聊会话，不能查询群图片";
+        }
 
-        int limit = parseIntSafe((String) args.get("limit"), 5);
-        // 搜索范围：所有群（groupId 暂时传空，后续可扩展到按群过滤）
-        // 实际上 messageRepo 的搜索需要 groupId，这里用全局搜索
-        // 由于当前实现需要 groupId，我们通过搜索所有消息来模拟
-        var result = messageRepo.searchImageDescriptions("", keyword.trim(), limit);
+        int limit = Math.max(1, Math.min(parseIntSafe((String) args.get("limit"), 5), 10));
+        var result = messageRepo.searchImageDescriptions(currentGroupId, keyword.trim(), limit);
 
         if (!result.isSuccess() || result.getData() == null || result.getData().isEmpty()) {
             return "没有找到相关图片记录。";

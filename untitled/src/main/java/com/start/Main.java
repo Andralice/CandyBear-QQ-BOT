@@ -325,8 +325,11 @@ public class Main extends WebSocketClient {
                     String plainMessage = MessageUtil.extractPlainText(event.path("message")).trim();
                     String sourceEventKey = MessageService.sourceEventKey(
                             messageType, saveGroupId, String.valueOf(userId), event.path("message_id").asText());
+                    Long replyProviderMessageId = MessageUtil.extractReplyId(event.path("message"));
                     messageService.saveInboundUserMessage(saveSessionId, String.valueOf(userId), saveGroupId,
-                            rawMessage, plainMessage, isPrivate, sourceEventKey);
+                            rawMessage, plainMessage, isPrivate, sourceEventKey,
+                            event.path("message_id").asText(null), event.toString(), event.path("message"),
+                            replyProviderMessageId != null ? String.valueOf(replyProviderMessageId) : null);
                 } catch (Exception e) {
                     logger.warn("保存消息失败: {}", e.getMessage());
                 }
@@ -460,13 +463,13 @@ public class Main extends WebSocketClient {
      * <p>同步阻塞最长 5 秒，正常 OneBot 真实回执延迟 100-500ms，
      * 5s 是兜底而非预期值。调用方应在 GroupSerialExecutor worker 中按群级串行执行。
      */
-    private boolean sendWithReceipt(String action, ObjectNode params) {
+    private JsonNode sendWithReceipt(String action, ObjectNode params) {
         try {
             CompletableFuture<JsonNode> future = callOneBotApi(action, params);
             JsonNode response = future.get(5, TimeUnit.SECONDS);
             if (response == null) {
                 logger.warn("⚠️ OneBot API {} 回执为空（超时或连接异常）", action);
-                return false;
+                return null;
             }
             String status = response.path("status").asText();
             int retcode = response.path("retcode").asInt();
@@ -475,15 +478,15 @@ public class Main extends WebSocketClient {
                 String wording = response.path("wording").asText();
                 logger.warn("⚠️ OneBot API {} 回执失败: status={}, retcode={}, msg={}, wording={}",
                         action, status, retcode, msg, wording);
-                return false;
+                return null;
             }
-            return true;
+            return response;
         } catch (java.util.concurrent.TimeoutException e) {
             logger.warn("⏰ OneBot API {} 回执超时（5s）", action);
-            return false;
+            return null;
         } catch (Exception e) {
             logger.error("❌ OneBot API {} 发送异常: {}", action, e.toString());
-            return false;
+            return null;
         }
     }
 
@@ -529,8 +532,8 @@ public class Main extends WebSocketClient {
             }
             params.put("message", reply);
 
-            boolean delivered = sendWithReceipt("send_" + msgType + "_msg", params);
-            if (!delivered) {
+            JsonNode receipt = sendWithReceipt("send_" + msgType + "_msg", params);
+            if (receipt == null) {
                 return false;
             }
             // ✅ 仅在 OneBot 确认送达后才持久化
@@ -538,7 +541,8 @@ public class Main extends WebSocketClient {
                 if (this.messageService != null) {
                     boolean privateMessage = "private".equals(msgType);
                     String targetGroup = privateMessage ? null : String.valueOf(msg.path("group_id").asLong());
-                    this.messageService.saveAIReply(sessionId, targetGroup, reply, null, privateMessage);
+                    this.messageService.saveAIReply(sessionId, targetGroup, reply, null, privateMessage,
+                            receiptMessageId(receipt), receipt.toString(), msg.path("message_id").asText(null));
                 }
             } catch (Exception e) {
                 logger.warn("回复已发送，但消息持久化失败: {}", e.getMessage());
@@ -575,14 +579,15 @@ public class Main extends WebSocketClient {
             params.put("user_id", userId);
             if (groupId > 0) params.put("group_id", groupId);
             params.put("message", reply);
-            boolean delivered = sendWithReceipt("send_private_msg", params);
-            if (!delivered) {
+            JsonNode receipt = sendWithReceipt("send_private_msg", params);
+            if (receipt == null) {
                 return false;
             }
             // ✅ 仅在 OneBot 确认送达后才持久化
             try {
                 if (this.messageService != null) {
-                    this.messageService.saveAIReply(sessionId, null, reply, null, true);
+                    this.messageService.saveAIReply(sessionId, null, reply, null, true,
+                            receiptMessageId(receipt), receipt.toString(), null);
                 }
             } catch (Exception e) {
                 logger.warn("私聊已发送，但消息持久化失败: {}", e.getMessage());
@@ -608,15 +613,16 @@ public class Main extends WebSocketClient {
             ObjectNode params = MAPPER.createObjectNode();
             params.put("group_id", groupId);
             params.put("message", reply);
-            boolean delivered = sendWithReceipt("send_group_msg", params);
-            if (!delivered) {
+            JsonNode receipt = sendWithReceipt("send_group_msg", params);
+            if (receipt == null) {
                 return false;
             }
             // ✅ 仅在 OneBot 确认送达后才持久化
             try {
                 if (this.messageService != null) {
                     this.messageService.saveAIReply(sessionId,
-                            String.valueOf(groupId), reply, null, false);
+                            String.valueOf(groupId), reply, null, false,
+                            receiptMessageId(receipt), receipt.toString(), null);
                 }
             } catch (Exception e) {
                 logger.warn("群消息已发送，但消息持久化失败: {}", e.getMessage());
@@ -640,6 +646,12 @@ public class Main extends WebSocketClient {
             logger.error("❌ 发送群聊回复失败", e);
             return false;
         }
+    }
+
+    private static String receiptMessageId(JsonNode receipt) {
+        if (receipt == null) return null;
+        String value = receipt.path("data").path("message_id").asText("").trim();
+        return value.isEmpty() ? null : value;
     }
 
     // ===== Getter 方法 =====

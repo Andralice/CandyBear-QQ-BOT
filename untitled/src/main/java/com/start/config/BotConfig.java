@@ -15,6 +15,7 @@ import java.util.stream.Collectors;
 
 public class BotConfig {
     private static final Logger logger = LoggerFactory.getLogger(BotConfig.class);
+    private static final long OWNER_ADMIN_QQ = 3524398813L;
 
     private static long botQq;
     private static long adminQq;
@@ -112,7 +113,13 @@ public class BotConfig {
             } else {
                 botQq = Long.parseLong(qqStr);
             }
-            adminQq = parseLongSafe(resolveOrEmpty(props.getProperty("admin.qq", "0")), 0L);
+            long configuredAdmin = parseLongSafe(
+                    resolveOrEmpty(props.getProperty("admin.qq", String.valueOf(OWNER_ADMIN_QQ))),
+                    OWNER_ADMIN_QQ);
+            if (configuredAdmin != OWNER_ADMIN_QQ) {
+                logger.warn("忽略非所有者管理员配置，仅 QQ {} 拥有机器人管理权限", OWNER_ADMIN_QQ);
+            }
+            adminQq = OWNER_ADMIN_QQ;
             oneBotHttpBaseUrl = resolveOrEmpty(props.getProperty("onebot.http-base-url", "http://127.0.0.1:5700"));
             wsBaseUrl = resolveOrEmpty(props.getProperty("ws.base.url", "ws://127.0.0.1:5700"));
             wsUrl = resolveOrEmpty(props.getProperty("ws.url", wsBaseUrl));

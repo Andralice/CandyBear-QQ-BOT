@@ -1,7 +1,11 @@
 package com.start.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.hankcs.hanlp.HanLP;
 import com.start.model.ChatMessage;
+import com.start.model.MessagePart;
 import com.start.repository.MessageRepository;
 import com.start.repository.UserRepository;
 import org.slf4j.Logger;
@@ -47,12 +51,31 @@ public class MessageService {
     public void saveInboundUserMessage(String sessionId, String userId, String groupId,
                                        String rawContent, String content, boolean isPrivate,
                                        String sourceEventKey) {
+        saveInboundUserMessage(sessionId, userId, groupId, rawContent, content, isPrivate,
+                sourceEventKey, null, null, null, null);
+    }
+
+    public void saveInboundUserMessage(String sessionId, String userId, String groupId,
+                                       String rawContent, String content, boolean isPrivate,
+                                       String sourceEventKey, String providerMessageId,
+                                       String rawEventJson, JsonNode rawSegments,
+                                       String replyProviderMessageId) {
         Map<String, Object> data = new HashMap<>();
         data.put("sessionId", sessionId);
         data.put("userId", userId);
         data.put("content", content == null ? "" : content);
         if (rawContent != null && !rawContent.equals(content)) data.put("rawContent", rawContent);
         if (sourceEventKey != null && !sourceEventKey.isBlank()) data.put("sourceEventKey", sourceEventKey);
+        if (providerMessageId != null && !providerMessageId.isBlank()) data.put("providerMessageId", providerMessageId);
+        if (rawEventJson != null && !rawEventJson.isBlank()) data.put("rawEventJson", rawEventJson);
+        if (rawSegments != null && !rawSegments.isMissingNode() && !rawSegments.isNull()) {
+            data.put("rawSegmentsJson", rawSegments.toString());
+        }
+        if (replyProviderMessageId != null && !replyProviderMessageId.isBlank()) {
+            data.put("replyProviderMessageId", replyProviderMessageId);
+        }
+        data.put("senderType", "USER");
+        data.put("availabilityStatus", "AVAILABLE");
         data.put("isRobotReply", false);
         data.put("isPrivate", isPrivate);
 
@@ -67,9 +90,55 @@ public class MessageService {
         }
 
         userRepo.createOrUpdateUser(userId, "");
-        var insertResult = messageRepo.insertInboundMessageIfAbsent(data);
+        var insertResult = messageRepo.insertMessageEnvelopeIfAbsent(data, toEvidenceParts(rawSegments));
         if (insertResult.isSuccess() && insertResult.getData() != null && insertResult.getData() == 1) {
             userRepo.incrementMessageCount(userId);
+        }
+    }
+
+    static List<MessagePart> toEvidenceParts(JsonNode segments) {
+        if (segments == null || !segments.isArray()) return List.of();
+        List<MessagePart> parts = new ArrayList<>();
+        int index = 0;
+        for (JsonNode segment : segments) {
+            String type = segment.path("type").asText("unknown");
+            JsonNode partData = segment.path("data");
+            String text = valueOrNull(partData, "text");
+            String url = valueOrNull(partData, "url");
+            String fileId = firstNonBlank(valueOrNull(partData, "file_id"), valueOrNull(partData, "file"));
+            String targetId = switch (type) {
+                case "at" -> valueOrNull(partData, "qq");
+                case "reply" -> valueOrNull(partData, "id");
+                default -> null;
+            };
+            Long byteSize = parseLongOrNull(valueOrNull(partData, "file_size"));
+            String availability = switch (type) {
+                case "image", "record", "video", "file", "share", "forward" ->
+                        url != null || fileId != null ? "PENDING" : "UNAVAILABLE_REFERENCE";
+                default -> "AVAILABLE";
+            };
+            parts.add(new MessagePart(index++, type, segment.toString(), text, url, fileId,
+                    targetId, valueOrNull(partData, "mime"), byteSize, availability));
+        }
+        return List.copyOf(parts);
+    }
+
+    private static String valueOrNull(JsonNode node, String field) {
+        if (node == null || !node.isObject()) return null;
+        String value = node.path(field).asText("").trim();
+        return value.isEmpty() ? null : value;
+    }
+
+    private static String firstNonBlank(String first, String second) {
+        return first != null && !first.isBlank() ? first : second;
+    }
+
+    private static Long parseLongOrNull(String value) {
+        if (value == null) return null;
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException ignored) {
+            return null;
         }
     }
 
@@ -89,6 +158,12 @@ public class MessageService {
      */
     public void saveAIReply(String sessionId, String groupId, String content,
                             Long replyToId, boolean isPrivate) {
+        saveAIReply(sessionId, groupId, content, replyToId, isPrivate, null, null, null);
+    }
+
+    public void saveAIReply(String sessionId, String groupId, String content,
+                            Long replyToId, boolean isPrivate, String providerMessageId,
+                            String rawReceiptJson, String replyProviderMessageId) {
         Map<String, Object> data = new HashMap<>();
         data.put("sessionId", sessionId);
         data.put("userId", "candybear");
@@ -96,12 +171,26 @@ public class MessageService {
         data.put("isRobotReply", true);
         data.put("isPrivate", isPrivate);
         data.put("replyToId", replyToId);
+        data.put("senderType", "BOT");
+        data.put("availabilityStatus", "AVAILABLE");
+        if (providerMessageId != null && !providerMessageId.isBlank()) {
+            data.put("providerMessageId", providerMessageId);
+            String scope = isPrivate ? "private" : "group:" + groupId;
+            data.put("sourceEventKey", "outbound:" + scope + ":" + providerMessageId);
+        }
+        if (rawReceiptJson != null && !rawReceiptJson.isBlank()) data.put("rawEventJson", rawReceiptJson);
+        if (replyProviderMessageId != null && !replyProviderMessageId.isBlank()) {
+            data.put("replyProviderMessageId", replyProviderMessageId);
+        }
 
         if (groupId != null && !isPrivate) {
             data.put("groupId", groupId);
         }
 
-        messageRepo.saveMessage(data);
+        ArrayNode segments = JsonNodeFactory.instance.arrayNode();
+        segments.addObject().put("type", "text").putObject("data").put("text", content);
+        data.put("rawSegmentsJson", segments.toString());
+        messageRepo.insertMessageEnvelopeIfAbsent(data, toEvidenceParts(segments));
     }
 
     /**

@@ -63,6 +63,7 @@ import com.start.agent.WhitelistTool;
 import com.start.model.WorkingMemory;
 import com.start.repository.BeliefRepository;
 import com.start.repository.MessageRepository;
+import com.start.repository.ProfileFactRepository;
 import com.start.repository.RecurringTaskRepository;
 import com.start.repository.ThreadRepository;
 import com.start.repository.WorkingMemoryRepository;
@@ -862,14 +863,16 @@ public class BaiLianService {
                     new LuckTool(),
                     new ProfessionTool(),
                     new ProfessionPKTool(),
-                    new UserProfileTool(profileRepo),
+                    new UserProfileTool(profileRepo,
+                            new ProfileFactRepository(DatabaseConfig.getDataSource()),
+                            new MessageRepository(), userId, groupId),
                     new MemoryTool(botMemory),
                     new KnowledgeBaseTool(knowledgeService),
                     new LearnKnowledgeTool(knowledgeService, userId),
                     new SendGroupTool(botInstance, userId),
                     new SendFileTool(botInstance),
                     new QueryFileTool(botInstance, this, userId, sessionId),
-                    new SearchHistoryTool(ltmRepo),
+                    new SearchHistoryTool(ltmRepo, groupId),
                     new RememberFactTool(ltmRepo, userId, groupId),
                     new EstablishFactTool(ltmRepo),
                     recallMemoryTool,
@@ -890,7 +893,7 @@ public class BaiLianService {
                     new DigestTool(),
                     new SearchDigestTool(),
                     new EvolutionHistoryTool(evoRepo),
-                    new QueryImagesTool(new MessageRepository())
+                    new QueryImagesTool(new MessageRepository(), groupId)
             ));
             // 归儿专属工具（code/audit/shell/self_evolve），非管理员不发，省 token
             if (isAdmin) {

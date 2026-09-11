@@ -184,6 +184,281 @@ public class DatabaseConfig {
             "ALTER TABLE messages ADD COLUMN raw_content TEXT AFTER content",
             "ALTER TABLE messages ADD COLUMN source_event_key VARCHAR(180)",
             "ALTER TABLE messages ADD UNIQUE INDEX uq_msg_source_event (source_event_key)",
+            "ALTER TABLE messages ADD COLUMN provider_message_id VARCHAR(64)",
+            "ALTER TABLE messages ADD COLUMN raw_event_json JSON",
+            "ALTER TABLE messages ADD COLUMN raw_segments_json JSON",
+            "ALTER TABLE messages ADD COLUMN reply_provider_message_id VARCHAR(64)",
+            "ALTER TABLE messages ADD COLUMN sender_type VARCHAR(16) NOT NULL DEFAULT 'USER'",
+            "ALTER TABLE messages ADD COLUMN availability_status VARCHAR(32) NOT NULL DEFAULT 'AVAILABLE'",
+            "ALTER TABLE messages ADD COLUMN received_at DATETIME(3) NULL",
+            "ALTER TABLE messages ADD COLUMN retracted_at DATETIME(3) NULL",
+            "ALTER TABLE messages ADD COLUMN redacted_at DATETIME(3) NULL",
+            "ALTER TABLE messages ADD INDEX idx_msg_provider_scope (group_id, provider_message_id)",
+
+            // 证据优先画像：原始消息部件和派生解析产物分开保存。
+            """
+            CREATE TABLE IF NOT EXISTS message_parts (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                message_id BIGINT NOT NULL,
+                part_index INT NOT NULL,
+                part_type VARCHAR(32) NOT NULL,
+                raw_part_json JSON NOT NULL,
+                text_value TEXT NULL,
+                source_url TEXT NULL,
+                provider_file_id VARCHAR(255) NULL,
+                target_id VARCHAR(64) NULL,
+                mime_type VARCHAR(128) NULL,
+                byte_size BIGINT NULL,
+                sha256 CHAR(64) NULL,
+                storage_key VARCHAR(512) NULL,
+                availability_status VARCHAR(32) NOT NULL DEFAULT 'AVAILABLE',
+                error_code VARCHAR(64) NULL,
+                created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+                UNIQUE KEY uq_message_part (message_id, part_index),
+                INDEX idx_part_type_status (part_type, availability_status),
+                INDEX idx_part_provider_file (provider_file_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS media_artifacts (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                part_id BIGINT NOT NULL,
+                artifact_type VARCHAR(40) NOT NULL,
+                parser_name VARCHAR(80) NOT NULL,
+                parser_version VARCHAR(40) NOT NULL,
+                input_sha256 CHAR(64) NULL,
+                status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+                content_json JSON NULL,
+                confidence DECIMAL(4,3) NULL,
+                language VARCHAR(32) NULL,
+                error_code VARCHAR(64) NULL,
+                error_detail TEXT NULL,
+                started_at DATETIME(3) NULL,
+                completed_at DATETIME(3) NULL,
+                created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                UNIQUE KEY uq_media_artifact (part_id, artifact_type, parser_version, input_sha256),
+                INDEX idx_artifact_status (status, created_at),
+                INDEX idx_artifact_part (part_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS forward_message_edges (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                parent_part_id BIGINT NOT NULL,
+                child_message_id BIGINT NULL,
+                provider_node_id VARCHAR(128) NULL,
+                depth INT NOT NULL,
+                ordinal INT NOT NULL,
+                original_sender_id VARCHAR(64) NULL,
+                original_sender_name VARCHAR(255) NULL,
+                original_sent_at DATETIME(3) NULL,
+                raw_node_json JSON NULL,
+                availability_status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+                created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                UNIQUE KEY uq_forward_node (parent_part_id, depth, ordinal),
+                INDEX idx_forward_child (child_message_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS conversation_events (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                group_id VARCHAR(64) NULL,
+                event_type VARCHAR(40) NOT NULL,
+                status VARCHAR(24) NOT NULL DEFAULT 'OPEN',
+                topic_key VARCHAR(255) NULL,
+                topic_text TEXT NULL,
+                participant_ids JSON NULL,
+                summary_text TEXT NULL,
+                started_at DATETIME(3) NOT NULL,
+                ended_at DATETIME(3) NULL,
+                builder_version VARCHAR(40) NOT NULL,
+                analysis_task_id BIGINT NULL,
+                created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                INDEX idx_event_group_time (group_id, started_at),
+                INDEX idx_event_topic (topic_key)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS conversation_event_messages (
+                event_id BIGINT NOT NULL,
+                message_id BIGINT NOT NULL,
+                ordinal INT NOT NULL,
+                relation_role VARCHAR(32) NOT NULL,
+                relevance DECIMAL(4,3) NULL,
+                created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                PRIMARY KEY (event_id, message_id),
+                INDEX idx_event_message (message_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS model_analysis_tasks (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                task_key VARCHAR(255) NOT NULL,
+                task_type VARCHAR(48) NOT NULL,
+                status VARCHAR(24) NOT NULL DEFAULT 'PENDING',
+                priority INT NOT NULL DEFAULT 0,
+                scope_group_id VARCHAR(64) NULL,
+                scope_user_id VARCHAR(64) NULL,
+                input_refs JSON NOT NULL,
+                attempt_count INT NOT NULL DEFAULT 0,
+                max_attempts INT NOT NULL DEFAULT 3,
+                not_before DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                lease_owner VARCHAR(128) NULL,
+                lease_until DATETIME(3) NULL,
+                model_name VARCHAR(128) NULL,
+                prompt_version VARCHAR(40) NULL,
+                parser_version VARCHAR(40) NULL,
+                result_json JSON NULL,
+                error_code VARCHAR(64) NULL,
+                error_detail TEXT NULL,
+                input_tokens INT NULL,
+                output_tokens INT NULL,
+                cost_microunits BIGINT NULL,
+                created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+                UNIQUE KEY uq_analysis_task_key (task_key),
+                INDEX idx_analysis_claim (status, not_before, priority),
+                INDEX idx_analysis_scope (scope_user_id, scope_group_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS profile_fact_candidates (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                subject_user_id VARCHAR(64) NOT NULL,
+                source_group_id VARCHAR(64) NULL,
+                kind VARCHAR(40) NOT NULL,
+                epistemic_type VARCHAR(40) NOT NULL,
+                claim_key VARCHAR(255) NOT NULL,
+                claim TEXT NOT NULL,
+                status VARCHAR(24) NOT NULL DEFAULT 'CANDIDATE',
+                stability VARCHAR(24) NOT NULL DEFAULT 'ONE_OFF',
+                confidence DECIMAL(4,3) NOT NULL,
+                scope VARCHAR(24) NOT NULL DEFAULT 'PERSONAL',
+                first_observed_at DATETIME(3) NOT NULL,
+                last_observed_at DATETIME(3) NOT NULL,
+                valid_from DATETIME(3) NOT NULL,
+                valid_until DATETIME(3) NULL,
+                audit_rationale TEXT NULL,
+                analysis_task_id BIGINT NULL,
+                model_version VARCHAR(128) NULL,
+                dedupe_key CHAR(64) NOT NULL,
+                created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+                UNIQUE KEY uq_profile_candidate_dedupe (dedupe_key),
+                INDEX idx_candidate_subject (subject_user_id, status, kind),
+                INDEX idx_candidate_validity (status, valid_until)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS profile_facts (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                subject_user_id VARCHAR(64) NOT NULL,
+                kind VARCHAR(40) NOT NULL,
+                epistemic_type VARCHAR(40) NOT NULL,
+                claim_key VARCHAR(255) NOT NULL,
+                claim TEXT NOT NULL,
+                status VARCHAR(24) NOT NULL DEFAULT 'ACTIVE',
+                stability VARCHAR(24) NOT NULL,
+                confidence DECIMAL(4,3) NOT NULL,
+                scope VARCHAR(24) NOT NULL DEFAULT 'PERSONAL',
+                first_observed_at DATETIME(3) NOT NULL,
+                last_observed_at DATETIME(3) NOT NULL,
+                valid_from DATETIME(3) NOT NULL,
+                valid_until DATETIME(3) NULL,
+                source_candidate_id BIGINT NOT NULL,
+                confirmed_at DATETIME(3) NULL,
+                superseded_by_fact_id BIGINT NULL,
+                review_state VARCHAR(24) NOT NULL DEFAULT 'AUTO',
+                version INT NOT NULL DEFAULT 1,
+                created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                INDEX idx_fact_subject (subject_user_id, status, kind),
+                INDEX idx_fact_claim (subject_user_id, claim_key, version),
+                INDEX idx_fact_validity (status, valid_until)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS profile_fact_evidence (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                candidate_id BIGINT NULL,
+                fact_id BIGINT NULL,
+                message_id BIGINT NOT NULL,
+                part_id BIGINT NULL,
+                artifact_id BIGINT NULL,
+                event_id BIGINT NULL,
+                evidence_role VARCHAR(24) NOT NULL DEFAULT 'SUPPORT',
+                modality VARCHAR(24) NOT NULL,
+                quote_or_span JSON NULL,
+                availability_snapshot VARCHAR(32) NOT NULL,
+                weight DECIMAL(4,3) NOT NULL DEFAULT 1.0,
+                created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                INDEX idx_evidence_candidate (candidate_id),
+                INDEX idx_evidence_fact (fact_id),
+                INDEX idx_evidence_message (message_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS group_atmosphere_events (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                group_id VARCHAR(64) NOT NULL,
+                event_id BIGINT NOT NULL,
+                kind VARCHAR(40) NOT NULL,
+                claim TEXT NOT NULL,
+                status VARCHAR(24) NOT NULL DEFAULT 'ACTIVE',
+                confidence DECIMAL(4,3) NOT NULL,
+                valid_from DATETIME(3) NOT NULL,
+                valid_until DATETIME(3) NULL,
+                analysis_task_id BIGINT NULL,
+                created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                INDEX idx_atmosphere_group (group_id, status, valid_from)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS profile_fact_conflicts (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                existing_fact_id BIGINT NOT NULL,
+                incoming_candidate_id BIGINT NOT NULL,
+                conflict_type VARCHAR(40) NOT NULL,
+                status VARCHAR(24) NOT NULL DEFAULT 'OPEN',
+                resolution VARCHAR(40) NULL,
+                resolved_by VARCHAR(64) NULL,
+                resolved_at DATETIME(3) NULL,
+                created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                INDEX idx_conflict_status (status, created_at),
+                INDEX idx_conflict_fact (existing_fact_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS profile_fact_changes (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                entity_type VARCHAR(32) NOT NULL,
+                entity_id BIGINT NOT NULL,
+                from_status VARCHAR(24) NULL,
+                to_status VARCHAR(24) NULL,
+                old_snapshot JSON NULL,
+                new_snapshot JSON NULL,
+                reason_code VARCHAR(64) NOT NULL,
+                actor_type VARCHAR(24) NOT NULL,
+                actor_id VARCHAR(64) NULL,
+                task_id BIGINT NULL,
+                created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                INDEX idx_fact_change_entity (entity_type, entity_id, created_at),
+                INDEX idx_fact_change_actor (actor_type, actor_id, created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS message_state_changes (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                message_id BIGINT NOT NULL,
+                from_status VARCHAR(32) NULL,
+                to_status VARCHAR(32) NOT NULL,
+                notice_event_hash CHAR(64) NULL,
+                reason_code VARCHAR(64) NOT NULL,
+                actor_id VARCHAR(64) NULL,
+                created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                INDEX idx_message_state (message_id, created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
 
             // 主动回复决策日志表
             "CREATE TABLE IF NOT EXISTS active_reply_logs (" +

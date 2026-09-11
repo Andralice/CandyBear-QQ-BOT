@@ -45,6 +45,12 @@ class DatabaseMigrationIdempotentIntegrationTest {
             assertTableExists(conn, "long_term_memories");
             assertTableExists(conn, "recurring_tasks");
             assertTableExists(conn, "tool_audit_logs");
+            assertTableExists(conn, "message_parts");
+            assertTableExists(conn, "media_artifacts");
+            assertTableExists(conn, "conversation_events");
+            assertTableExists(conn, "profile_fact_candidates");
+            assertTableExists(conn, "profile_facts");
+            assertTableExists(conn, "model_analysis_tasks");
         }
     }
 
@@ -55,6 +61,10 @@ class DatabaseMigrationIdempotentIntegrationTest {
             assertColumnExists(conn, "messages", "raw_content");
             assertColumnExists(conn, "messages", "source_event_key");
             assertColumnExists(conn, "messages", "topics");
+            assertColumnExists(conn, "messages", "provider_message_id");
+            assertColumnExists(conn, "messages", "raw_event_json");
+            assertColumnExists(conn, "messages", "raw_segments_json");
+            assertColumnExists(conn, "messages", "availability_status");
             assertColumnExists(conn, "long_term_memories", "trigger_claimed_at");
             assertColumnExists(conn, "recurring_tasks", "fire_claimed_at");
         }

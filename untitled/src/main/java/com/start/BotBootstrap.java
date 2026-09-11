@@ -132,7 +132,8 @@ public final class BotBootstrap {
         DailyProfessionHandler.rerollAllProfessions();
 
         startLifeEngineThread(bot, lifeEngine);
-        startPortraitService(bot);
+        // Evidence-first profiles replace the legacy free-text overwrite loop.
+        logger.info("旧用户画像自动覆盖任务已停用，等待证据画像流水线接管");
         startReminderService(bot);
         startEventChecker(bot);
         startRecurringScheduler(bot);

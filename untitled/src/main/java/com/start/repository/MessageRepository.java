@@ -2,6 +2,7 @@ package com.start.repository;
 
 import com.start.config.DatabaseConfig;
 import com.start.model.ChatMessage;
+import com.start.model.MessagePart;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.sql.*;
@@ -48,23 +49,120 @@ public class MessageRepository extends BaseRepository {
      * event must not create another row or be counted as another user message.
      */
     public DatabaseResult<Integer> insertInboundMessageIfAbsent(Map<String, Object> data) {
-        String sql = "INSERT INTO messages (session_id, user_id, content, raw_content, source_event_key, " +
-                "is_robot_reply, is_private, group_id, reply_to_id, topics, image_data) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
-                "ON DUPLICATE KEY UPDATE source_event_key = VALUES(source_event_key)";
+        return insertMessageEnvelopeIfAbsent(data, List.of());
+    }
 
-        return executeUpdate(sql,
-                getStringValue(data, "sessionId", ""),
-                getStringValue(data, "userId", ""),
-                getStringValue(data, "content", ""),
-                getStringValue(data, "rawContent", null),
-                getStringValue(data, "sourceEventKey", null),
-                false,
-                getBooleanValue(data, "isPrivate", false),
-                getStringValue(data, "groupId", null),
-                getLongValue(data, "replyToId", null),
-                getStringValue(data, "topics", null),
-                getStringValue(data, "imageData", null));
+    /** Stores the immutable OneBot envelope and all ordered parts in one transaction. */
+    public DatabaseResult<Integer> insertMessageEnvelopeIfAbsent(Map<String, Object> data,
+                                                                 List<MessagePart> parts) {
+        return safeExecute(() -> {
+            String messageSql = "INSERT INTO messages (session_id, user_id, content, raw_content, " +
+                    "source_event_key, is_robot_reply, is_private, group_id, reply_to_id, topics, image_data, " +
+                    "provider_message_id, raw_event_json, raw_segments_json, reply_provider_message_id, " +
+                    "sender_type, availability_status, received_at) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3))";
+            String partSql = "INSERT INTO message_parts (message_id, part_index, part_type, raw_part_json, " +
+                    "text_value, source_url, provider_file_id, target_id, mime_type, byte_size, availability_status) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            String taskSql = "INSERT INTO model_analysis_tasks (task_key, task_type, scope_group_id, " +
+                    "scope_user_id, input_refs, max_attempts) VALUES (?, ?, ?, ?, ?, ?)";
+
+            try (Connection conn = DatabaseConfig.getConnection()) {
+                conn.setAutoCommit(false);
+                try (PreparedStatement message = conn.prepareStatement(messageSql, Statement.RETURN_GENERATED_KEYS)) {
+                    message.setString(1, getStringValue(data, "sessionId", ""));
+                    message.setString(2, getStringValue(data, "userId", ""));
+                    message.setString(3, getStringValue(data, "content", ""));
+                    message.setString(4, getStringValue(data, "rawContent", null));
+                    message.setString(5, getStringValue(data, "sourceEventKey", null));
+                    message.setBoolean(6, getBooleanValue(data, "isRobotReply", false));
+                    message.setBoolean(7, getBooleanValue(data, "isPrivate", false));
+                    message.setString(8, getStringValue(data, "groupId", null));
+                    message.setObject(9, getLongValue(data, "replyToId", null));
+                    message.setString(10, getStringValue(data, "topics", null));
+                    message.setString(11, getStringValue(data, "imageData", null));
+                    message.setString(12, getStringValue(data, "providerMessageId", null));
+                    message.setString(13, getStringValue(data, "rawEventJson", null));
+                    message.setString(14, getStringValue(data, "rawSegmentsJson", null));
+                    message.setString(15, getStringValue(data, "replyProviderMessageId", null));
+                    message.setString(16, getStringValue(data, "senderType", "USER"));
+                    message.setString(17, getStringValue(data, "availabilityStatus", "AVAILABLE"));
+
+                    message.executeUpdate();
+
+                    long messageId;
+                    try (ResultSet keys = message.getGeneratedKeys()) {
+                        if (!keys.next()) throw new SQLException("消息已插入但未返回主键");
+                        messageId = keys.getLong(1);
+                    }
+
+                    if (parts != null && !parts.isEmpty()) {
+                        try (PreparedStatement part = conn.prepareStatement(partSql, Statement.RETURN_GENERATED_KEYS);
+                             PreparedStatement task = conn.prepareStatement(taskSql)) {
+                            for (MessagePart value : parts) {
+                                part.setLong(1, messageId);
+                                part.setInt(2, value.partIndex());
+                                part.setString(3, value.partType());
+                                part.setString(4, value.rawPartJson());
+                                part.setString(5, value.textValue());
+                                part.setString(6, value.sourceUrl());
+                                part.setString(7, value.providerFileId());
+                                part.setString(8, value.targetId());
+                                part.setString(9, value.mimeType());
+                                part.setObject(10, value.byteSize());
+                                part.setString(11, value.availabilityStatus());
+                                part.executeUpdate();
+                                long partId;
+                                try (ResultSet partKeys = part.getGeneratedKeys()) {
+                                    if (!partKeys.next()) throw new SQLException("消息部件已插入但未返回主键");
+                                    partId = partKeys.getLong(1);
+                                }
+                                String taskType = taskTypeFor(value);
+                                if (taskType != null) {
+                                    task.setString(1, "part:" + partId + ":" + taskType + ":v1");
+                                    task.setString(2, taskType);
+                                    task.setString(3, getStringValue(data, "groupId", null));
+                                    task.setString(4, getStringValue(data, "userId", null));
+                                    task.setString(5, "{\"message_id\":" + messageId + ",\"part_id\":" + partId
+                                            + ",\"part_index\":" + value.partIndex() + "}");
+                                    task.setInt(6, 3);
+                                    task.addBatch();
+                                }
+                            }
+                            task.executeBatch();
+                        }
+                    }
+                    conn.commit();
+                    return 1;
+                } catch (SQLIntegrityConstraintViolationException e) {
+                    conn.rollback();
+                    if (e.getErrorCode() == 1062 && getStringValue(data, "sourceEventKey", null) != null) {
+                        return 0;
+                    }
+                    throw e;
+                } catch (SQLException e) {
+                    conn.rollback();
+                    throw e;
+                } finally {
+                    conn.setAutoCommit(true);
+                }
+            }
+        });
+    }
+
+    private static String taskTypeFor(MessagePart part) {
+        return switch (part.partType()) {
+            case "image" -> "PARSE_IMAGE";
+            case "record" -> "TRANSCRIBE_AUDIO";
+            case "video" -> "PARSE_VIDEO";
+            case "file" -> "PARSE_FILE";
+            case "share" -> "FETCH_LINK";
+            case "forward" -> "EXPAND_FORWARD";
+            case "text" -> part.textValue() != null
+                    && (part.textValue().contains("http://") || part.textValue().contains("https://"))
+                    ? "EXTRACT_LINKS" : null;
+            default -> null;
+        };
     }
 
     /** 为已入库的 OneBot 原始消息补充异步得到的图片描述。 */
@@ -289,6 +387,21 @@ public class MessageRepository extends BaseRepository {
                 closeResources(conn, pstmt, rs);
             }
         });
+    }
+
+    public DatabaseResult<Boolean> hasUserInGroup(String userId, String groupId) {
+        if (userId == null || userId.isBlank() || groupId == null || groupId.isBlank()) {
+            return DatabaseResult.success(false);
+        }
+        return executeQuerySingle(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE user_id = ? AND group_id = ? LIMIT 1)",
+                rs -> {
+                    try {
+                        return rs.getBoolean(1);
+                    } catch (SQLException e) {
+                        throw new IllegalStateException(e);
+                    }
+                }, userId, groupId);
     }
 
     /** "2026-06-05" → "2026-06-05 00:00:00", "2026-06-05 14:30" → 原样 */

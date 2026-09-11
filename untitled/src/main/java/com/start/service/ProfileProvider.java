@@ -4,6 +4,7 @@ import com.start.config.BotConfig;
 import com.start.config.DatabaseConfig;
 import com.start.repository.UserAffinityRepository;
 import com.start.repository.UserAliasRepository;
+import com.start.repository.ProfileFactRepository;
 import com.start.repository.UserProfileRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,12 +17,14 @@ public class ProfileProvider {
     private static final Logger logger = LoggerFactory.getLogger(ProfileProvider.class);
 
     private final UserProfileRepository profileRepo;
+    private final ProfileFactRepository factRepo;
     private final UserAffinityRepository affinityRepo;
     private final UserAliasRepository aliasRepo;
 
     public ProfileProvider() {
         var ds = DatabaseConfig.getDataSource();
         this.profileRepo = new UserProfileRepository(ds);
+        this.factRepo = new ProfileFactRepository(ds);
         this.affinityRepo = new UserAffinityRepository(ds);
         this.aliasRepo = new UserAliasRepository();
     }
@@ -37,11 +40,23 @@ public class ProfileProvider {
             }
 
             StringBuilder sb = new StringBuilder();
-            var profile = profileRepo.findByUserIdAndGroupId(userId, groupId);
+            var facts = factRepo.findActiveByUserId(userId, groupId == null, 8);
             var affinity = affinityRepo.findByUserIdAndGroupId(userId, groupId);
 
-            if (profile.isPresent()) {
-                sb.append("\n【用户画像】").append(profile.get().getProfileText()).append("\n\n");
+            if (!facts.isEmpty()) {
+                sb.append("\n【个人档案事实】\n");
+                facts.forEach(fact -> sb.append("- [").append(fact.kind()).append("/")
+                        .append(fact.stability()).append(", 置信度=")
+                        .append(String.format(java.util.Locale.ROOT, "%.2f", fact.confidence()))
+                        .append("] ").append(fact.claim()).append("\n"));
+                sb.append("以上是结构化事实，不确定内容不能当作用户亲口确认。\n\n");
+            } else {
+                // Migration compatibility only; legacy text never becomes evidence.
+                var profile = profileRepo.findByUserIdAndGroupId(userId, groupId);
+                if (profile.isPresent()) {
+                    sb.append("\n【旧画像缓存（低可信，仅供过渡）】")
+                            .append(profile.get().getProfileText()).append("\n\n");
+                }
             }
             if (affinity.isPresent()) {
                 int score = affinity.get().getAffinityScore();

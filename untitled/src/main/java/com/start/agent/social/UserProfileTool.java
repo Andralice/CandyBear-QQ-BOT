@@ -1,7 +1,10 @@
 package com.start.agent.social;
 
 import com.start.agent.Tool;
+import com.start.config.BotConfig;
 import com.start.model.UserProfile;
+import com.start.repository.MessageRepository;
+import com.start.repository.ProfileFactRepository;
 import com.start.repository.UserProfileRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,9 +18,18 @@ public class UserProfileTool implements Tool {
 
     private static final Logger logger = LoggerFactory.getLogger(UserProfileTool.class);
     private final UserProfileRepository profileRepo;
+    private final ProfileFactRepository factRepo;
+    private final MessageRepository messageRepo;
+    private final String callerUserId;
+    private final String currentGroupId;
 
-    public UserProfileTool(UserProfileRepository profileRepo) {
+    public UserProfileTool(UserProfileRepository profileRepo, ProfileFactRepository factRepo,
+                           MessageRepository messageRepo, String callerUserId, String currentGroupId) {
         this.profileRepo = profileRepo;
+        this.factRepo = factRepo;
+        this.messageRepo = messageRepo;
+        this.callerUserId = callerUserId;
+        this.currentGroupId = currentGroupId;
     }
 
     @Override
@@ -47,14 +59,38 @@ public class UserProfileTool implements Tool {
     @Override
     public String execute(Map<String, Object> args) {
         String userId = value(args.get("user_id"));
-        String groupId = args.get("group_id") == null ? null : value(args.get("group_id"));
         if (userId == null || userId.isBlank()) return "缺少 user_id 参数";
-        if ("null".equalsIgnoreCase(groupId)) groupId = null;
+        String requestedGroupId = args.get("group_id") == null ? null : value(args.get("group_id"));
+        if (requestedGroupId != null && !"null".equalsIgnoreCase(requestedGroupId)
+                && !requestedGroupId.equals(currentGroupId)) {
+            return "拒绝跨群查询：画像工具绑定当前会话范围";
+        }
+        boolean isAdmin = String.valueOf(BotConfig.getAdminQq()).equals(callerUserId);
+        if (currentGroupId == null && !isAdmin && !userId.equals(callerUserId)) {
+            return "私聊中只能查询自己的个人画像";
+        }
+        if (currentGroupId != null && !isAdmin) {
+            var visible = messageRepo.hasUserInGroup(userId, currentGroupId);
+            if (!visible.isSuccess() || !Boolean.TRUE.equals(visible.getData())) {
+                return "目标用户不在当前群的可见消息范围内";
+            }
+        }
 
         try {
-            Optional<UserProfile> profileOpt = profileRepo.findByUserIdAndGroupId(userId, groupId);
+            var facts = factRepo.findActiveByUserId(userId, currentGroupId == null, 10);
+            if (!facts.isEmpty()) {
+                StringBuilder result = new StringBuilder("【目标用户个人档案事实（内部参考）】\n");
+                facts.forEach(fact -> result.append("- fact_id=").append(fact.id())
+                        .append(" [").append(fact.kind()).append('/').append(fact.stability())
+                        .append(", confidence=")
+                        .append(String.format(java.util.Locale.ROOT, "%.2f", fact.confidence()))
+                        .append("] ").append(fact.claim()).append('\n'));
+                return result.toString().trim();
+            }
+
+            Optional<UserProfile> profileOpt = profileRepo.findByUserIdAndGroupId(userId, currentGroupId);
             if (profileOpt.isEmpty()) {
-                return "暂无用户 " + userId + " 在当前" + (groupId == null ? "私聊" : "群聊") + "中的人物画像。";
+                return "暂无用户 " + userId + " 的可用个人画像事实。";
             }
 
             UserProfile profile = profileOpt.get();
@@ -62,10 +98,10 @@ public class UserProfileTool implements Tool {
             if (text == null || text.isBlank()) {
                 return "用户 " + userId + " 暂无有效人物画像。";
             }
-            return "【目标用户人物画像（内部参考）】\n" + text +
+            return "【旧画像缓存（低可信，不能作为事实）】\n" + text +
                     "\n画像更新时间：" + profile.getUpdatedAt();
         } catch (Exception e) {
-            logger.error("查询用户画像失败 userId={}, groupId={}", userId, groupId, e);
+            logger.error("查询用户画像失败 userId={}, groupId={}", userId, currentGroupId, e);
             return "查询人物画像失败，请如实说暂时查不到。";
         }
     }

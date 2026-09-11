@@ -18,10 +18,12 @@ public class SearchHistoryTool implements Tool {
     private static final Logger logger = LoggerFactory.getLogger(SearchHistoryTool.class);
     private final MessageRepository messageRepo;
     private final LongTermMemoryRepository memoryRepo;
+    private final String currentGroupId;
 
-    public SearchHistoryTool(LongTermMemoryRepository memoryRepo) {
+    public SearchHistoryTool(LongTermMemoryRepository memoryRepo, String currentGroupId) {
         this.messageRepo = new MessageRepository();
         this.memoryRepo = memoryRepo;
+        this.currentGroupId = currentGroupId;
     }
 
     @Override public String getName() { return "search_chat_history"; }
@@ -52,8 +54,13 @@ public class SearchHistoryTool implements Tool {
 
     @Override
     public String execute(Map<String, Object> args) {
-        String groupId = (String) args.get("group_id");
-        if (groupId == null || groupId.isBlank()) return "缺少 group_id 参数";
+        if (currentGroupId == null || currentGroupId.isBlank()) return "当前不是群聊会话，不能查询群聊历史";
+        String requestedGroupId = (String) args.get("group_id");
+        if (requestedGroupId != null && !requestedGroupId.isBlank()
+                && !currentGroupId.equals(requestedGroupId.trim())) {
+            return "拒绝跨群查询：只能查询当前会话所在群";
+        }
+        String groupId = currentGroupId;
 
         String keyword = (String) args.get("keyword");
         String userId = (String) args.get("user_id");
