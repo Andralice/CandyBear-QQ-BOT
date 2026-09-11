@@ -7,7 +7,9 @@ import com.start.model.MediaPartInput;
 import java.sql.*;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /** Persistence for derived media results. Raw message parts remain the source of truth. */
 public class MediaArtifactRepository extends BaseRepository {
@@ -113,6 +115,33 @@ public class MediaArtifactRepository extends BaseRepository {
                             rs.getString("content_json"), (Double) rs.getObject("confidence"),
                             rs.getString("language"), rs.getString("error_code"), rs.getString("error_detail"),
                             completed == null ? null : completed.toLocalDateTime()));
+                }
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    public List<Map<String, Object>> findForwardNodes(long partId, int limit) throws SQLException {
+        String sql = "SELECT id, provider_node_id, depth, ordinal, original_sender_id, original_sender_name, " +
+                "original_sent_at, raw_node_json, availability_status FROM forward_message_edges " +
+                "WHERE parent_part_id=? ORDER BY depth ASC, ordinal ASC LIMIT ?";
+        List<Map<String, Object>> result = new ArrayList<>();
+        try (Connection conn = DatabaseConfig.getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, partId);
+            ps.setInt(2, Math.max(1, Math.min(limit, 30)));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("id", rs.getLong("id"));
+                    row.put("provider_node_id", rs.getString("provider_node_id"));
+                    row.put("depth", rs.getInt("depth"));
+                    row.put("ordinal", rs.getInt("ordinal"));
+                    row.put("original_sender_id", rs.getString("original_sender_id"));
+                    row.put("original_sender_name", rs.getString("original_sender_name"));
+                    row.put("original_sent_at", rs.getTimestamp("original_sent_at"));
+                    row.put("raw_node_json", rs.getString("raw_node_json"));
+                    row.put("availability_status", rs.getString("availability_status"));
+                    result.add(row);
                 }
             }
         }

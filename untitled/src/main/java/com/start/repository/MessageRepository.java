@@ -64,8 +64,8 @@ public class MessageRepository extends BaseRepository {
             String partSql = "INSERT INTO message_parts (message_id, part_index, part_type, raw_part_json, " +
                     "text_value, source_url, provider_file_id, target_id, mime_type, byte_size, availability_status) " +
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-            String taskSql = "INSERT INTO model_analysis_tasks (task_key, task_type, scope_group_id, " +
-                    "scope_user_id, input_refs, max_attempts) VALUES (?, ?, ?, ?, ?, ?)";
+            String taskSql = "INSERT INTO model_analysis_tasks (task_key, task_type, priority, scope_group_id, " +
+                    "scope_user_id, input_refs, max_attempts) VALUES (?, ?, ?, ?, ?, ?, ?)";
 
             try (Connection conn = DatabaseConfig.getConnection()) {
                 conn.setAutoCommit(false);
@@ -121,11 +121,12 @@ public class MessageRepository extends BaseRepository {
                                 if (taskType != null) {
                                     task.setString(1, "part:" + partId + ":" + taskType + ":v1");
                                     task.setString(2, taskType);
-                                    task.setString(3, getStringValue(data, "groupId", null));
-                                    task.setString(4, getStringValue(data, "userId", null));
-                                    task.setString(5, "{\"message_id\":" + messageId + ",\"part_id\":" + partId
+                                    task.setInt(3, 20);
+                                    task.setString(4, getStringValue(data, "groupId", null));
+                                    task.setString(5, getStringValue(data, "userId", null));
+                                    task.setString(6, "{\"message_id\":" + messageId + ",\"part_id\":" + partId
                                             + ",\"part_index\":" + value.partIndex() + "}");
-                                    task.setInt(6, 3);
+                                    task.setInt(7, 3);
                                     task.addBatch();
                                 }
                             }
