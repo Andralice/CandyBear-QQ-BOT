@@ -37,15 +37,17 @@ public final class EvidenceRetentionService implements AutoCloseable {
     }
 
     public void runOnce() throws Exception {
-        EvidenceRetentionPolicy current = policy != null
-                ? policy : EvidenceRetentionPolicy.forPath(Path.of(System.getProperty("user.dir", ".")));
+        EvidenceRetentionPolicy current = EvidenceRetentionPolicy.forPath(
+                Path.of(System.getProperty("user.dir", ".")));
+        policy = current;
         LocalDateTime now = LocalDateTime.now();
         int redacted = messageRepository.redactRawEvidenceBefore(now.minus(current.rawEvidence()));
         int images = artifactRepository.expireArtifactsBefore("IMAGE_DESCRIPTION", now.minus(current.imageAndAudio()));
         int audio = artifactRepository.expireArtifactsBefore("AUDIO_TRANSCRIPT", now.minus(current.imageAndAudio()));
         int video = artifactRepository.expireArtifactsBefore("VIDEO_DESCRIPTION", now.minus(current.video()));
         int derived = artifactRepository.expireArtifactsBefore("LINK_PREVIEW", now.minus(current.derivedArtifacts()))
-                + artifactRepository.expireArtifactsBefore("FORWARD_CHAIN", now.minus(current.derivedArtifacts()));
+                + artifactRepository.expireArtifactsBefore("FORWARD_CHAIN", now.minus(current.derivedArtifacts()))
+                + artifactRepository.expireArtifactsBefore("FILE_TEXT", now.minus(current.derivedArtifacts()));
         if (redacted + images + audio + video + derived > 0) {
             logger.info("证据保留清理完成: rawRedacted={}, image={}, audio={}, video={}, derived={}",
                     redacted, images, audio, video, derived);
