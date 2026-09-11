@@ -243,29 +243,6 @@ public final class BotBootstrap {
         t.start();
     }
 
-    private static void startPortraitService(Main bot) {
-        bot.portraitService = new UserPortraitService(bot.baiLianService, new MessageRepository());
-        bot.portraitService.runUpdateTask();
-        logger.info("用户画像首次更新完成");
-
-        Thread t = new Thread(() -> {
-            while (!Thread.currentThread().isInterrupted()) {
-                try {
-                    Thread.sleep(10 * 60 * 1000);
-                    bot.portraitService.runUpdateTask();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                } catch (Exception e) {
-                    logger.error("用户画像更新任务异常", e);
-                }
-            }
-        }, "UserPortrait-Update-Thread");
-        t.setDaemon(true);
-        t.start();
-        logger.info("用户画像系统已启动");
-    }
-
     private static void startReminderService(Main bot) {
         ReminderService reminderService = ReminderService.getInstance();
         reminderService.setBotInstance(bot);

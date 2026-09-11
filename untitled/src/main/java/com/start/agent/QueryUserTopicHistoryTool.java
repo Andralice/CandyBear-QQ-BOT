@@ -32,7 +32,8 @@ public final class QueryUserTopicHistoryTool extends EvidenceToolSupport impleme
         String userId = value(args.get("user_id")); if (userId.isBlank()) userId = callerUserId;
         if (!canAccessUser(userId)) return error("目标用户不在当前授权范围");
         try {
-            var facts = factRepository.findActiveByUserId(userId, currentGroupId == null, limit(args.get("limit"), 10, 10));
+            boolean privateContext = currentGroupId == null || currentGroupId.isBlank();
+            var facts = factRepository.findActiveByUserId(userId, privateContext, limit(args.get("limit"), 10, 10));
             List<Map<String, Object>> rows = new ArrayList<>();
             String topic = value(args.get("topic")).toLowerCase();
             for (var fact : facts) {

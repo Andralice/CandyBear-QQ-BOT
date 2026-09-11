@@ -40,8 +40,10 @@ public class ProfileProvider {
             }
 
             StringBuilder sb = new StringBuilder();
-            var facts = factRepo.findActiveByUserId(userId, groupId == null, 8);
-            var affinity = affinityRepo.findByUserIdAndGroupId(userId, groupId);
+            boolean privateContext = groupId == null || groupId.isBlank();
+            String effectiveGroupId = privateContext ? null : groupId;
+            var facts = factRepo.findActiveByUserId(userId, privateContext, 8);
+            var affinity = affinityRepo.findByUserIdAndGroupId(userId, effectiveGroupId);
 
             if (!facts.isEmpty()) {
                 sb.append("\n【个人档案事实】\n");
@@ -52,7 +54,7 @@ public class ProfileProvider {
                 sb.append("以上是结构化事实，不确定内容不能当作用户亲口确认。\n\n");
             } else {
                 // Migration compatibility only; legacy text never becomes evidence.
-                var profile = profileRepo.findByUserIdAndGroupId(userId, groupId);
+                var profile = profileRepo.findByUserIdAndGroupId(userId, effectiveGroupId);
                 if (profile.isPresent()) {
                     sb.append("\n【旧画像缓存（低可信，仅供过渡）】")
                             .append(profile.get().getProfileText()).append("\n\n");

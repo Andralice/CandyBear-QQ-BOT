@@ -1,7 +1,6 @@
 package com.start.agent.social;
 
 import com.start.agent.Tool;
-import com.start.config.BotConfig;
 import com.start.model.UserProfile;
 import com.start.repository.MessageRepository;
 import com.start.repository.ProfileFactRepository;
@@ -61,15 +60,15 @@ public class UserProfileTool implements Tool {
         String userId = value(args.get("user_id"));
         if (userId == null || userId.isBlank()) return "缺少 user_id 参数";
         String requestedGroupId = args.get("group_id") == null ? null : value(args.get("group_id"));
-        if (requestedGroupId != null && !"null".equalsIgnoreCase(requestedGroupId)
-                && !requestedGroupId.equals(currentGroupId)) {
+        boolean privateContext = currentGroupId == null || currentGroupId.isBlank();
+        if (requestedGroupId != null && !requestedGroupId.isBlank() && !"null".equalsIgnoreCase(requestedGroupId)
+                && (!currentGroupIdIs(requestedGroupId))) {
             return "拒绝跨群查询：画像工具绑定当前会话范围";
         }
-        boolean isAdmin = String.valueOf(BotConfig.getAdminQq()).equals(callerUserId);
-        if (currentGroupId == null && !isAdmin && !userId.equals(callerUserId)) {
+        if (privateContext && !userId.equals(callerUserId)) {
             return "私聊中只能查询自己的个人画像";
         }
-        if (currentGroupId != null && !isAdmin) {
+        if (!privateContext) {
             var visible = messageRepo.hasUserInGroup(userId, currentGroupId);
             if (!visible.isSuccess() || !Boolean.TRUE.equals(visible.getData())) {
                 return "目标用户不在当前群的可见消息范围内";
@@ -77,7 +76,7 @@ public class UserProfileTool implements Tool {
         }
 
         try {
-            var facts = factRepo.findActiveByUserId(userId, currentGroupId == null, 10);
+            var facts = factRepo.findActiveByUserId(userId, privateContext, 10);
             if (!facts.isEmpty()) {
                 StringBuilder result = new StringBuilder("【目标用户个人档案事实（内部参考）】\n");
                 facts.forEach(fact -> {
@@ -117,5 +116,9 @@ public class UserProfileTool implements Tool {
 
     private String value(Object value) {
         return value == null ? null : value.toString().trim();
+    }
+
+    private boolean currentGroupIdIs(String requestedGroupId) {
+        return currentGroupId != null && !currentGroupId.isBlank() && requestedGroupId.equals(currentGroupId);
     }
 }

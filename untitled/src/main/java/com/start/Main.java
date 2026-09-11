@@ -105,9 +105,6 @@ public class Main extends WebSocketClient {
     /** 防刷检测器，防止高频消息攻击或滥用。 */
     SpamDetector spamDetector;
 
-    /** 用户画像服务，定期分析用户行为并更新画像标签。 */
-    UserPortraitService portraitService;
-
     /** 证据优先画像与媒体解析任务 worker。 */
     EvidenceAnalysisWorker evidenceAnalysisWorker;
 
