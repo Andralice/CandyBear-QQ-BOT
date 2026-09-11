@@ -5,7 +5,6 @@ import com.start.config.DatabaseConfig;
 import com.start.repository.UserAffinityRepository;
 import com.start.repository.UserAliasRepository;
 import com.start.repository.ProfileFactRepository;
-import com.start.repository.UserProfileRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -16,14 +15,12 @@ import org.slf4j.LoggerFactory;
 public class ProfileProvider {
     private static final Logger logger = LoggerFactory.getLogger(ProfileProvider.class);
 
-    private final UserProfileRepository profileRepo;
     private final ProfileFactRepository factRepo;
     private final UserAffinityRepository affinityRepo;
     private final UserAliasRepository aliasRepo;
 
     public ProfileProvider() {
         var ds = DatabaseConfig.getDataSource();
-        this.profileRepo = new UserProfileRepository(ds);
         this.factRepo = new ProfileFactRepository(ds);
         this.affinityRepo = new UserAffinityRepository(ds);
         this.aliasRepo = new UserAliasRepository();
@@ -52,13 +49,6 @@ public class ProfileProvider {
                         .append(String.format(java.util.Locale.ROOT, "%.2f", fact.confidence()))
                         .append("] ").append(fact.claim()).append("\n"));
                 sb.append("以上是结构化事实，不确定内容不能当作用户亲口确认。\n\n");
-            } else {
-                // Migration compatibility only; legacy text never becomes evidence.
-                var profile = profileRepo.findLatestByUserId(userId);
-                if (profile.isPresent()) {
-                    sb.append("\n【旧画像缓存（低可信，仅供过渡）】")
-                            .append(profile.get().getProfileText()).append("\n\n");
-                }
             }
             if (affinity.isPresent()) {
                 int score = affinity.get().getAffinityScore();
