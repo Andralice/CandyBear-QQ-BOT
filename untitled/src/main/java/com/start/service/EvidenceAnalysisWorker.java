@@ -60,6 +60,7 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
             Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
     private static final int MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024;
     private static final int MAX_LINK_BYTES = 256 * 1024;
+    private static final int MAX_FILE_BYTES = 2 * 1024 * 1024;
     private static final String PARSER_VERSION = "evidence-v1";
 
     private final AnalysisTaskRepository taskRepository;
@@ -143,7 +144,7 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
                 case "FETCH_LINK", "EXTRACT_LINKS" -> parseLink(task, result);
                 case "TRANSCRIBE_AUDIO" -> markUnavailable(task, result, "AUDIO_TRANSCRIBER_NOT_CONFIGURED");
                 case "PARSE_VIDEO" -> markUnavailable(task, result, "VIDEO_PARSER_NOT_CONFIGURED");
-                case "PARSE_FILE" -> markUnavailable(task, result, "FILE_PARSER_NOT_CONFIGURED");
+                case "PARSE_FILE" -> parseFile(task, result);
                 case "EXPAND_FORWARD" -> expandForward(task, result);
                 case "EXTRACT_PROFILE_FACTS" -> extractProfileFacts(task, result);
                 case "ANALYZE_GROUP_ATMOSPHERE" -> analyzeGroupAtmosphere(task, result);
@@ -271,6 +272,95 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
                 "SUCCEEDED", content.toString(), title.isBlank() && description.isBlank() ? 0.25 : 0.75,
                 "zh", null, null, started, LocalDateTime.now());
         result.put("status", "SUCCEEDED").put("artifact_type", "LINK_PREVIEW");
+    }
+
+    private void parseFile(AnalysisTask task, ObjectNode result) throws Exception {
+        long partId = inputRefs(task).path("part_id").asLong(0);
+        MediaPartInput part = requirePart(partId);
+        LocalDateTime started = LocalDateTime.now();
+        String hash = sha256(part.rawPartJson());
+        if (oneBotClient == null || part.providerFileId() == null || part.providerFileId().isBlank()) {
+            saveUnavailable(part, "FILE_TEXT", hash, started,
+                    oneBotClient == null ? "FILE_API_UNAVAILABLE" : "NO_FILE_REFERENCE",
+                    oneBotClient == null ? "当前分析 worker 未连接 OneBot API" : "文件部件没有 file_id");
+            result.put("status", "UNAVAILABLE").put("artifact_type", "FILE_TEXT");
+            return;
+        }
+
+        byte[] bytes = fetchOneBotFile(part.providerFileId());
+        if (bytes == null || bytes.length == 0) {
+            saveUnavailable(part, "FILE_TEXT", hash, started, "FILE_FETCH_FAILED", "get_file 未返回可读取文件");
+            result.put("status", "UNAVAILABLE").put("artifact_type", "FILE_TEXT");
+            return;
+        }
+        String text = decodeText(bytes);
+        if (text == null || text.isBlank()) {
+            saveUnavailable(part, "FILE_TEXT", hash, started, "FILE_NOT_TEXT", "文件不是可验证的纯文本内容");
+            result.put("status", "UNAVAILABLE").put("artifact_type", "FILE_TEXT");
+            return;
+        }
+        ObjectNode content = MAPPER.createObjectNode();
+        content.put("text", limit(text, 20000));
+        content.put("source", "onebot_get_file");
+        content.put("byte_size", bytes.length);
+        content.put("truncated", text.length() > 20000);
+        artifactRepository.saveArtifact(part.partId(), "FILE_TEXT", "onebot-file", PARSER_VERSION, hash,
+                "SUCCEEDED", content.toString(), 0.85, "zh", null, null, started, LocalDateTime.now());
+        result.put("status", "SUCCEEDED").put("artifact_type", "FILE_TEXT");
+    }
+
+    private byte[] fetchOneBotFile(String fileId) throws Exception {
+        if (fileId.length() > 512) return null;
+        ObjectNode params = MAPPER.createObjectNode();
+        params.put("file_id", fileId);
+        JsonNode response;
+        try {
+            CompletableFuture<JsonNode> future = oneBotClient.callOneBotApi("get_file", params);
+            response = future == null ? null : future.get(15, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            logger.warn("get_file 失败: {}", e.getMessage());
+            return null;
+        }
+        if (response == null || !"ok".equalsIgnoreCase(response.path("status").asText())) return null;
+        JsonNode data = response.path("data");
+        String base64 = data.path("base64").asText("");
+        if (!base64.isBlank()) {
+            if (base64.length() > 4_000_000) return null;
+            try {
+                byte[] bytes = Base64.getDecoder().decode(base64);
+                return bytes.length <= MAX_FILE_BYTES ? bytes : null;
+            } catch (IllegalArgumentException e) {
+                return null;
+            }
+        }
+        URI uri = safeHttpUri(data.path("url").asText(""));
+        if (uri == null) return null;
+        try {
+            return fetch(uri, MAX_FILE_BYTES);
+        } catch (Exception e) {
+            logger.warn("下载 OneBot 文件失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    static String decodeText(byte[] bytes) {
+        int offset = bytes.length >= 3 && (bytes[0] & 0xff) == 0xef
+                && (bytes[1] & 0xff) == 0xbb && (bytes[2] & 0xff) == 0xbf ? 3 : 0;
+        String utf8 = new String(bytes, offset, bytes.length - offset, StandardCharsets.UTF_8);
+        if (isReadableText(utf8)) return utf8;
+        String gbk = new String(bytes, offset, bytes.length - offset, java.nio.charset.Charset.forName("GBK"));
+        return isReadableText(gbk) ? gbk : null;
+    }
+
+    private static boolean isReadableText(String text) {
+        if (text == null || text.isBlank()) return false;
+        int length = Math.min(text.length(), 400);
+        int printable = 0;
+        for (int i = 0; i < length; i++) {
+            char c = text.charAt(i);
+            if ((c >= 0x20 && c < 0x7f) || c >= 0x4e00 || c == '\n' || c == '\r' || c == '\t') printable++;
+        }
+        return printable >= length * 0.7;
     }
 
     private void extractProfileFacts(AnalysisTask task, ObjectNode result) throws Exception {
