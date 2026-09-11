@@ -115,7 +115,7 @@ public class ProfileFactRepository implements Repository {
 
     public List<Map<String, Object>> findEvidenceForFact(long factId, int limit) throws SQLException {
         String sql = "SELECT e.message_id, m.provider_message_id, m.user_id AS sender_id, m.group_id, " +
-                "m.created_at, m.availability_status, e.modality, e.availability_snapshot FROM profile_fact_evidence e " +
+                "m.created_at, m.availability_status, e.part_id, e.artifact_id, e.modality, e.availability_snapshot FROM profile_fact_evidence e " +
                 "JOIN messages m ON m.id=e.message_id WHERE e.fact_id=? ORDER BY m.created_at DESC LIMIT ?";
         List<Map<String, Object>> result = new ArrayList<>();
         try (Connection conn = dataSource.getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -130,6 +130,8 @@ public class ProfileFactRepository implements Repository {
                     row.put("group_id", rs.getString("group_id"));
                     row.put("sent_at", rs.getTimestamp("created_at"));
                     row.put("availability_status", rs.getString("availability_status"));
+                    row.put("part_id", rs.getObject("part_id"));
+                    row.put("artifact_id", rs.getObject("artifact_id"));
                     row.put("modality", rs.getString("modality"));
                     row.put("availability_snapshot", rs.getString("availability_snapshot"));
                     result.add(row);
@@ -141,21 +143,32 @@ public class ProfileFactRepository implements Repository {
 
     public void addEvidence(long candidateId, long messageId, String modality, String quoteOrSpanJson,
                              String availabilitySnapshot, double weight) throws SQLException {
-        String sql = "INSERT INTO profile_fact_evidence (candidate_id, message_id, evidence_role, modality, " +
-                "quote_or_span, availability_snapshot, weight) " +
-                "SELECT ?, ?, 'SUPPORT', ?, ?, ?, ? FROM DUAL WHERE NOT EXISTS (" +
+        addEvidence(candidateId, messageId, null, null, modality, quoteOrSpanJson, availabilitySnapshot, weight);
+    }
+
+    public void addEvidence(long candidateId, long messageId, Long partId, Long artifactId,
+                            String modality, String quoteOrSpanJson, String availabilitySnapshot,
+                            double weight) throws SQLException {
+        String sql = "INSERT INTO profile_fact_evidence (candidate_id, message_id, part_id, artifact_id, " +
+                "evidence_role, modality, quote_or_span, availability_snapshot, weight) " +
+                "SELECT ?, ?, ?, ?, 'SUPPORT', ?, ?, ?, ? FROM DUAL WHERE NOT EXISTS (" +
                 "SELECT 1 FROM profile_fact_evidence WHERE candidate_id=? AND message_id=? " +
-                "AND evidence_role='SUPPORT' AND COALESCE(part_id,0)=0)";
+                "AND evidence_role='SUPPORT' AND COALESCE(part_id,0)=COALESCE(?,0) " +
+                "AND COALESCE(artifact_id,0)=COALESCE(?,0))";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, candidateId);
             ps.setLong(2, messageId);
-            ps.setString(3, modality == null ? "text" : modality);
-            ps.setString(4, quoteOrSpanJson);
-            ps.setString(5, availabilitySnapshot == null ? "AVAILABLE" : availabilitySnapshot);
-            ps.setDouble(6, Math.max(0.0, Math.min(1.0, weight)));
-            ps.setLong(7, candidateId);
-            ps.setLong(8, messageId);
+            ps.setObject(3, partId);
+            ps.setObject(4, artifactId);
+            ps.setString(5, modality == null ? "text" : modality);
+            ps.setString(6, quoteOrSpanJson);
+            ps.setString(7, availabilitySnapshot == null ? "AVAILABLE" : availabilitySnapshot);
+            ps.setDouble(8, Math.max(0.0, Math.min(1.0, weight)));
+            ps.setLong(9, candidateId);
+            ps.setLong(10, messageId);
+            ps.setObject(11, partId);
+            ps.setObject(12, artifactId);
             ps.executeUpdate();
         }
     }
@@ -383,7 +396,8 @@ public class ProfileFactRepository implements Repository {
         String sql = "SELECT COUNT(DISTINCT e.message_id), COUNT(DISTINCT DATE(m.created_at)), " +
                 "COUNT(DISTINCT COALESCE(e.event_id, e.message_id)) FROM profile_fact_evidence e " +
                 "JOIN messages m ON m.id=e.message_id WHERE e.candidate_id=? AND e.evidence_role='SUPPORT' " +
-                "AND m.retracted_at IS NULL AND m.availability_status <> 'RETRACTED'";
+                "AND e.availability_snapshot='AVAILABLE' AND m.retracted_at IS NULL " +
+                "AND m.availability_status <> 'RETRACTED'";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, candidateId);
             try (ResultSet rs = ps.executeQuery()) {

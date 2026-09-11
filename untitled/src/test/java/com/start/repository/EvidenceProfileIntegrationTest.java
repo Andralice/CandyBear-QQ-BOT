@@ -83,8 +83,64 @@ class EvidenceProfileIntegrationTest {
             execute(conn, "DELETE FROM profile_facts WHERE subject_user_id=?", subjectUserId);
             execute(conn, "DELETE FROM profile_fact_candidates WHERE subject_user_id=?", subjectUserId);
             execute(conn, "DELETE FROM model_analysis_tasks WHERE task_key LIKE ?", keyPrefix + "%");
+            execute(conn, "DELETE ma FROM media_artifacts ma JOIN message_parts p ON p.id=ma.part_id " +
+                    "WHERE p.message_id IN (SELECT id FROM messages WHERE source_event_key LIKE ?)", keyPrefix + "%");
+            execute(conn, "DELETE FROM message_parts WHERE message_id IN " +
+                    "(SELECT id FROM messages WHERE source_event_key LIKE ?)", keyPrefix + "%");
             execute(conn, "DELETE FROM messages WHERE source_event_key LIKE ?", keyPrefix + "%");
         }
+    }
+
+    @Test
+    void evidenceBindingPreservesPartArtifactAndIsIdempotent() throws Exception {
+        long messageId = insertMessage("media-binding", LocalDateTime.now());
+        long partId = insertMessagePart(messageId, "image", "AVAILABLE");
+        long artifactId = insertMediaArtifact(partId, "SUCCEEDED");
+        long candidate = candidate("interest", "image-topic", "关注图片话题", "OBSERVED_BEHAVIOR", "ASSERT", 0.70,
+                List.of(messageId));
+
+        factRepository.addEvidence(candidate, messageId, partId, artifactId, "image", "{\"test\":true}",
+                "AVAILABLE", 0.8);
+        factRepository.addEvidence(candidate, messageId, partId, artifactId, "image", "{\"test\":true}",
+                "AVAILABLE", 0.8);
+
+        assertEquals(1, count("SELECT COUNT(*) FROM profile_fact_evidence WHERE candidate_id=?", candidate));
+        assertEquals(partId, ((Number) scalarValue("SELECT part_id FROM profile_fact_evidence WHERE candidate_id=?", candidate)).longValue());
+        assertEquals(artifactId, ((Number) scalarValue("SELECT artifact_id FROM profile_fact_evidence WHERE candidate_id=?", candidate)).longValue());
+        assertEquals("image", scalar("SELECT modality FROM profile_fact_evidence WHERE candidate_id=?", candidate));
+    }
+
+    @Test
+    void unavailableMediaCannotPromoteCandidate() throws Exception {
+        long messageId = insertMessage("media-unavailable", LocalDateTime.now(), "");
+        long partId = insertMessagePart(messageId, "record", "UNAVAILABLE");
+        long artifactId = insertMediaArtifact(partId, "UNAVAILABLE");
+        long candidate = candidate("recent_state", "unavailable-audio", "发送了一段语音", "SELF_REPORTED", "ASSERT",
+                0.90, List.of(messageId));
+        factRepository.addEvidence(candidate, messageId, partId, artifactId, "audio", "{\"test\":true}",
+                "UNAVAILABLE", 1.0);
+
+        assertEquals(0, factRepository.promoteCandidate(candidate));
+        assertEquals("CANDIDATE", scalar("SELECT status FROM profile_fact_candidates WHERE id=?", candidate));
+        assertEquals(0, count("SELECT COUNT(*) FROM profile_facts WHERE subject_user_id=? AND claim_key=?",
+                subjectUserId, "unavailable-audio"));
+    }
+
+    @Test
+    void successfulMediaArtifactCanPromoteCandidate() throws Exception {
+        long messageId = insertMessage("media-success", LocalDateTime.now(), "");
+        long partId = insertMessagePart(messageId, "record", "AVAILABLE");
+        long artifactId = insertMediaArtifact(partId, "SUCCEEDED");
+        long candidate = candidate("recent_state", "available-audio", "发送了一段可解析语音", "SELF_REPORTED", "ASSERT",
+                0.90, List.of(messageId));
+        factRepository.addEvidence(candidate, messageId, partId, artifactId, "audio", "{\"test\":true}",
+                "AVAILABLE", 1.0);
+
+        long fact = factRepository.promoteCandidate(candidate);
+
+        assertTrue(fact > 0);
+        assertEquals("PROMOTED", scalar("SELECT status FROM profile_fact_candidates WHERE id=?", candidate));
+        assertEquals(fact, ((Number) scalarValue("SELECT fact_id FROM profile_fact_evidence WHERE candidate_id=?", candidate)).longValue());
     }
 
     @Test
@@ -230,6 +286,10 @@ class EvidenceProfileIntegrationTest {
     }
 
     private long insertMessage(String suffix, LocalDateTime createdAt) throws SQLException {
+        return insertMessage(suffix, createdAt, "integration test " + suffix);
+    }
+
+    private long insertMessage(String suffix, LocalDateTime createdAt, String content) throws SQLException {
         String sql = "INSERT INTO messages (session_id, user_id, content, raw_content, source_event_key, " +
                 "is_robot_reply, is_private, group_id, provider_message_id, sender_type, availability_status, created_at) " +
                 "VALUES (?, ?, ?, ?, ?, FALSE, FALSE, ?, ?, 'USER', 'AVAILABLE', ?)";
@@ -237,12 +297,47 @@ class EvidenceProfileIntegrationTest {
              PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             ps.setString(1, keyPrefix + "-session");
             ps.setString(2, subjectUserId);
-            ps.setString(3, "integration test " + suffix);
-            ps.setString(4, "integration test " + suffix);
+            ps.setString(3, content);
+            ps.setString(4, content);
             ps.setString(5, keyPrefix + "-message-" + suffix);
             ps.setString(6, groupId);
             ps.setString(7, keyPrefix + "-provider-" + suffix);
             ps.setTimestamp(8, Timestamp.valueOf(createdAt));
+            ps.executeUpdate();
+            try (ResultSet keys = ps.getGeneratedKeys()) {
+                assertTrue(keys.next());
+                return keys.getLong(1);
+            }
+        }
+    }
+
+    private long insertMessagePart(long messageId, String partType, String availability) throws SQLException {
+        String sql = "INSERT INTO message_parts (message_id, part_index, part_type, raw_part_json, availability_status) " +
+                "VALUES (?, 0, ?, ?, ?)";
+        try (Connection conn = DatabaseConfig.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+            ps.setLong(1, messageId);
+            ps.setString(2, partType);
+            ps.setString(3, "{\"type\":\"" + partType + "\"}");
+            ps.setString(4, availability);
+            ps.executeUpdate();
+            try (ResultSet keys = ps.getGeneratedKeys()) {
+                assertTrue(keys.next());
+                return keys.getLong(1);
+            }
+        }
+    }
+
+    private long insertMediaArtifact(long partId, String status) throws SQLException {
+        String sql = "INSERT INTO media_artifacts (part_id, artifact_type, parser_name, parser_version, input_sha256, " +
+                "status, content_json, completed_at) VALUES (?, 'TEST_ARTIFACT', 'integration-test', 'v1', ?, ?, ?, ?)";
+        try (Connection conn = DatabaseConfig.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+            ps.setLong(1, partId);
+            ps.setString(2, keyPrefix + "-artifact-" + partId);
+            ps.setString(3, status);
+            ps.setString(4, "SUCCEEDED".equals(status) ? "{\"text\":\"parsed\"}" : null);
+            ps.setTimestamp(5, Timestamp.valueOf(LocalDateTime.now()));
             ps.executeUpdate();
             try (ResultSet keys = ps.getGeneratedKeys()) {
                 assertTrue(keys.next());

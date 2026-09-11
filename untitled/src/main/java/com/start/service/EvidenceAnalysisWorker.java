@@ -33,7 +33,9 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
@@ -279,13 +281,23 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
         JsonNode facts = parsed.path("facts");
         if (!facts.isArray()) throw new IllegalStateException("FACT_JSON_INVALID");
         Set<Long> allowedSubjectMessages = new HashSet<>();
+        Set<Long> usableSubjectMessages = new HashSet<>();
+        Map<Long, String> subjectMessageText = new HashMap<>();
         for (var row : contextResult.getData()) {
             if (subjectUserId.equals(string(row.get("user_id")))) {
                 Object id = row.get("id");
-                if (id instanceof Number n) allowedSubjectMessages.add(n.longValue());
+                if (id instanceof Number n) {
+                    long value = n.longValue();
+                    allowedSubjectMessages.add(value);
+                    String text = string(row.get("content"));
+                    subjectMessageText.put(value, text);
+                    if (!text.isBlank() || hasUsableMediaPart(value)) usableSubjectMessages.add(value);
+                }
             }
         }
         allowedSubjectMessages.add(messageId);
+        if (!subjectMessageText.containsKey(messageId)) subjectMessageText.put(messageId, content);
+        if (!content.isBlank() || hasUsableMediaPart(messageId)) usableSubjectMessages.add(messageId);
         int accepted = 0;
         int rejected = 0;
         LocalDateTime observedAt = timestamp(message.get("created_at"));
@@ -308,9 +320,10 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
             JsonNode ids = fact.path("evidence_message_ids");
             if (ids.isArray()) for (JsonNode id : ids) {
                 long value = id.asLong(0);
-                if (allowedSubjectMessages.contains(value)) evidence.add(value);
+                if (allowedSubjectMessages.contains(value) && usableSubjectMessages.contains(value)) evidence.add(value);
             }
-            if (evidence.isEmpty()) evidence.add(messageId);
+            if (evidence.isEmpty() && usableSubjectMessages.contains(messageId)) evidence.add(messageId);
+            if (evidence.isEmpty()) { rejected++; continue; }
             LocalDateTime validUntil = parseTime(fact.path("valid_until").asText(null));
             ProfileFactCandidateInput input = new ProfileFactCandidateInput(subjectUserId, groupId, kind, epistemic,
                     claimKey, claim, polarity, "ONE_OFF", confidence, scope, observedAt, validUntil,
@@ -318,10 +331,12 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
                     BotConfig.getBaiLianChatModel(), evidence, "text",
                     json("message_id", messageId, "quote", claim).toString(), "AVAILABLE");
             long candidateId = factRepository.upsertCandidate(input);
+            boolean hasUsableEvidence = false;
             for (Long evidenceId : evidence) {
-                factRepository.addEvidence(candidateId, evidenceId, "text",
-                        input.quoteOrSpanJson(), "AVAILABLE", "SELF_REPORTED".equals(epistemic) ? 1.0 : 0.6);
+                hasUsableEvidence |= addUsableEvidence(candidateId, evidenceId, subjectMessageText.get(evidenceId),
+                        input.quoteOrSpanJson(), "SELF_REPORTED".equals(epistemic) ? 1.0 : 0.6);
             }
+            if (!hasUsableEvidence) { rejected++; continue; }
             factRepository.promoteCandidate(candidateId);
             accepted++;
         }
@@ -464,6 +479,7 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
                 {"facts":[{"kind":"interest|preference|habit|occupation|location|relationship|personality|recent_state|event",
                 "epistemic_type":"SELF_REPORTED|OBSERVED_BEHAVIOR|MODEL_INFERENCE","claim_key":"稳定规范键",
                 "claim":"短事实","polarity":"ASSERT|DENY","confidence":0.0,"scope":"PERSONAL|PRIVATE_ONLY",
+                "source_modalities":["text","image","audio","video","link","forward","file"],
                 "evidence_message_ids":[123],"valid_until":null,"reasoning":"证据边界说明"}]}
                 输入 JSON：
                 """ + root.toString();
@@ -524,6 +540,55 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
         var result = messageRepository.findMessageParts(messageId);
         return result.isSuccess() && result.getData() != null && result.getData().stream()
                 .anyMatch(part -> !"text".equalsIgnoreCase(string(part.get("part_type"))));
+    }
+
+    private boolean hasUsableMediaPart(long messageId) {
+        var result = messageRepository.findMessageParts(messageId);
+        if (!result.isSuccess() || result.getData() == null) return false;
+        for (var part : result.getData()) {
+            String type = string(part.get("part_type"));
+            if ("text".equalsIgnoreCase(type)) continue;
+            long partId = part.get("id") instanceof Number n ? n.longValue() : 0;
+            if (partId <= 0) continue;
+            try {
+                if (artifactRepository.findByPart(partId, 5).stream().anyMatch(a -> "SUCCEEDED".equals(a.status()))) return true;
+            } catch (SQLException ignored) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private boolean addUsableEvidence(long candidateId, long messageId, String messageText,
+                                      String quoteOrSpan, double weight) throws SQLException {
+        boolean added = false;
+        if (messageText != null && !messageText.isBlank()) {
+            factRepository.addEvidence(candidateId, messageId, "text", quoteOrSpan, "AVAILABLE", weight);
+            added = true;
+        }
+        var parts = messageRepository.findMessageParts(messageId);
+        if (!parts.isSuccess() || parts.getData() == null) return added;
+        for (var part : parts.getData()) {
+            String type = string(part.get("part_type"));
+            if ("text".equalsIgnoreCase(type)) continue;
+            long partId = part.get("id") instanceof Number n ? n.longValue() : 0;
+            if (partId <= 0) continue;
+            for (var artifact : artifactRepository.findByPart(partId, 5)) {
+                if (!"SUCCEEDED".equals(artifact.status())) continue;
+                factRepository.addEvidence(candidateId, messageId, partId, artifact.id(), modality(type),
+                        quoteOrSpan, "AVAILABLE", weight);
+                added = true;
+            }
+        }
+        return added;
+    }
+
+    private static String modality(String partType) {
+        return switch (partType == null ? "" : partType.toLowerCase(Locale.ROOT)) {
+            case "record" -> "audio";
+            case "share" -> "link";
+            default -> partType == null || partType.isBlank() ? "media" : partType.toLowerCase(Locale.ROOT);
+        };
     }
 
     private void markUnavailable(AnalysisTask task, ObjectNode result, String code) throws Exception {
