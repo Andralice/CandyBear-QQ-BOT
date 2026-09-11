@@ -25,6 +25,10 @@ public record EvidenceRetentionPolicy(
         } catch (IOException ignored) {
             // Keep the conservative normal policy when filesystem information is unavailable.
         }
+        return forUsableBytes(usable);
+    }
+
+    static EvidenceRetentionPolicy forUsableBytes(long usable) {
         boolean pressure = usable >= 0 && usable < MIN_FREE_BYTES;
         if (pressure) {
             return new EvidenceRetentionPolicy(Duration.ofDays(180), Duration.ofDays(14),

@@ -397,16 +397,16 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
         double confidence = clamp(parsed.path("confidence").asDouble(0.3));
         LocalDateTime validUntil = parseTime(parsed.path("valid_until").asText(null));
         if (validUntil == null) validUntil = LocalDateTime.now().plusHours(12);
-        long eventId = eventRepository.insertEvent(groupId, type, topicKey, claim,
-                MAPPER.writeValueAsString(participants), claim, started == null ? LocalDateTime.now() : started, ended, task.id());
+        List<ConversationEventRepository.EventMessage> eventMessages = new ArrayList<>();
         int ordinal = 0;
         for (var row : context.getData()) {
             Object id = row.get("id");
-            if (id instanceof Number n) eventRepository.addEventMessage(eventId, n.longValue(), ordinal++,
-                    n.longValue() == messageId ? "TARGET" : "CONTEXT", 0.5);
+            if (id instanceof Number n) eventMessages.add(new ConversationEventRepository.EventMessage(
+                    n.longValue(), ordinal++, n.longValue() == messageId ? "TARGET" : "CONTEXT", 0.5));
         }
-        eventRepository.insertAtmosphere(groupId, eventId, type, claim, confidence,
-                ended == null ? LocalDateTime.now() : ended, validUntil, task.id());
+        long eventId = eventRepository.insertClosedEventWithAtmosphere(groupId, type, topicKey, claim,
+                MAPPER.writeValueAsString(participants), claim, started == null ? LocalDateTime.now() : started,
+                ended, eventMessages, confidence, ended == null ? LocalDateTime.now() : ended, validUntil, task.id());
         result.put("status", "SUCCEEDED").put("event_id", eventId).put("confidence", confidence);
     }
 
