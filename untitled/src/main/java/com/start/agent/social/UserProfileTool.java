@@ -12,7 +12,7 @@ import java.util.Arrays;
 import java.util.Map;
 import java.util.Optional;
 
-/** 查询指定群友在当前群的画像，供糖果熊理解群成员关系和背景。 */
+/** 查询当前授权范围内用户的全局个人画像，群聊氛围不混入个人事实。 */
 public class UserProfileTool implements Tool {
 
     private static final Logger logger = LoggerFactory.getLogger(UserProfileTool.class);
@@ -38,7 +38,7 @@ public class UserProfileTool implements Tool {
 
     @Override
     public String getDescription() {
-        return "查询指定群友在当前群的人物画像。涉及某个群友是谁、和糖果熊什么关系、性格/兴趣/过去聊过什么时调用。" +
+        return "查询用户的全局个人画像。涉及某个群友是谁、和糖果熊什么关系、性格/兴趣/过去聊过什么时调用。" +
                 "必须先用 manage_alias 的 resolve_alias 把名字或别称解析为 QQ，再传 user_id。" +
                 "画像是内部参考，不能把整段画像原样念给用户；没有画像时如实说明。";
     }
@@ -96,7 +96,7 @@ public class UserProfileTool implements Tool {
                 return result.toString().trim();
             }
 
-            Optional<UserProfile> profileOpt = profileRepo.findByUserIdAndGroupId(userId, currentGroupId);
+            Optional<UserProfile> profileOpt = profileRepo.findLatestByUserId(userId);
             if (profileOpt.isEmpty()) {
                 return "暂无用户 " + userId + " 的可用个人画像事实。";
             }

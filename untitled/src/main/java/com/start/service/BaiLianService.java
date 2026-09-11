@@ -27,6 +27,7 @@ import com.start.agent.SendPrivateTool;
 import com.start.agent.SendStatusTool;
 import com.start.agent.social.UserAffinityTool;
 import com.start.agent.social.UserProfileTool;
+import com.start.agent.social.DeleteMyProfileTool;
 import com.start.agent.WebSearchTool;
 import com.start.agent.EggGroupSearchTool;
 import com.start.agent.EstablishFactTool;
@@ -88,6 +89,7 @@ import com.start.repository.LongTermMemoryRepository;
 import com.start.repository.UserAliasRepository;
 import com.start.repository.UserAffinityRepository;
 import com.start.repository.UserProfileRepository;
+import com.start.repository.ProfilePrivacyRepository;
 import com.start.repository.BotMemoryRepository;
 import com.start.repository.EvolutionRecordRepository;
 import com.start.repository.EventLogRepository;
@@ -163,6 +165,7 @@ public class BaiLianService {
 
 
     private final UserProfileRepository profileRepo = new UserProfileRepository(DatabaseConfig.getDataSource());
+    private final ProfilePrivacyRepository profilePrivacyRepo = new ProfilePrivacyRepository(DatabaseConfig.getDataSource());
     private final UserAliasRepository userAliasRepo = new UserAliasRepository();
     private BotMoodService moodService;
     private CandyBearLifeEngine lifeEngine;
@@ -876,6 +879,7 @@ public class BaiLianService {
                     new ProfessionPKTool(),
                     new UserProfileTool(profileRepo,
                             evidenceFactRepo, evidenceMessageRepo, userId, groupId),
+                    new DeleteMyProfileTool(profilePrivacyRepo, userId, userPrompt),
                     new MemoryTool(botMemory),
                     new KnowledgeBaseTool(knowledgeService),
                     new LearnKnowledgeTool(knowledgeService, userId),
@@ -1108,8 +1112,10 @@ public class BaiLianService {
 
                         toolCalls++;
                         WebDashboardListener.recordToolCall(toolName);
-                        logger.info("🔧 [原生工具] {} args={} → {}", toolName, args,
-                                result.length() > 120 ? result.substring(0, 120) + "..." : result);
+                        logger.info("🔧 [原生工具] {} args={} → {}", toolName,
+                                "delete_my_profile".equals(toolName) ? "[REDACTED]" : args,
+                                "delete_my_profile".equals(toolName) ? "[REDACTED]"
+                                        : (result.length() > 120 ? result.substring(0, 120) + "..." : result));
                         toolResults.add(new ToolResult(toolName, result));
 
                         if (groupId != null) {

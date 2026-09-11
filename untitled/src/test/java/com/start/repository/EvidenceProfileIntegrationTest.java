@@ -25,6 +25,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -38,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class EvidenceProfileIntegrationTest {
     private static AnalysisTaskRepository taskRepository;
     private static ProfileFactRepository factRepository;
+    private static ProfilePrivacyRepository privacyRepository;
     private static MessageRepository messageRepository;
     private static ConversationEventRepository eventRepository;
 
@@ -49,6 +51,7 @@ class EvidenceProfileIntegrationTest {
     static void setUpAll() {
         taskRepository = new AnalysisTaskRepository();
         factRepository = new ProfileFactRepository(DatabaseConfig.getDataSource());
+        privacyRepository = new ProfilePrivacyRepository(DatabaseConfig.getDataSource());
         messageRepository = new MessageRepository();
         eventRepository = new ConversationEventRepository();
     }
@@ -79,10 +82,12 @@ class EvidenceProfileIntegrationTest {
                     "(SELECT id FROM profile_fact_candidates WHERE subject_user_id=?) OR existing_fact_id IN " +
                     "(SELECT id FROM profile_facts WHERE subject_user_id=?)", subjectUserId, subjectUserId);
             execute(conn, "DELETE FROM profile_fact_changes WHERE entity_type='PROFILE_FACT' AND entity_id IN " +
-                    "(SELECT id FROM profile_facts WHERE subject_user_id=?)", subjectUserId);
+                    "(SELECT id FROM profile_facts WHERE subject_user_id=?) OR " +
+                    "(reason_code='USER_PRIVACY_ERASURE' AND actor_id=?)", subjectUserId, subjectUserId);
             execute(conn, "DELETE FROM profile_facts WHERE subject_user_id=?", subjectUserId);
             execute(conn, "DELETE FROM profile_fact_candidates WHERE subject_user_id=?", subjectUserId);
             execute(conn, "DELETE FROM model_analysis_tasks WHERE task_key LIKE ?", keyPrefix + "%");
+            execute(conn, "DELETE FROM profile_privacy_requests WHERE requester_user_id=?", subjectUserId);
             execute(conn, "DELETE ma FROM media_artifacts ma JOIN message_parts p ON p.id=ma.part_id " +
                     "WHERE p.message_id IN (SELECT id FROM messages WHERE source_event_key LIKE ?)", keyPrefix + "%");
             execute(conn, "DELETE FROM message_parts WHERE message_id IN " +
@@ -291,6 +296,40 @@ class EvidenceProfileIntegrationTest {
                 0.5, now, now.plusHours(1), taskId));
 
         assertEquals(0, count("SELECT COUNT(*) FROM conversation_events WHERE topic_key=?", keyPrefix + "-rollback-topic"));
+    }
+
+    @Test
+    void confirmedPrivacyErasureRemovesProfileDataButKeepsChatArchive() throws Exception {
+        long messageId = insertMessage("privacy", LocalDateTime.now(), "保留在聊天记录中的原文");
+        long partId = insertMessagePart(messageId, "image", "AVAILABLE");
+        insertMediaArtifact(partId, "SUCCEEDED");
+        long candidate = candidate("interest", "privacy-game", "喜欢某款游戏", "SELF_REPORTED", "ASSERT",
+                0.90, List.of(messageId));
+        addEvidence(candidate, messageId);
+        long fact = factRepository.promoteCandidate(candidate);
+        assertTrue(fact > 0);
+        insertTask(keyPrefix + "-privacy-task", "EXTRACT_PROFILE_FACTS", 1, 3,
+                "PENDING", LocalDateTime.now(), null, 0);
+
+        ProfilePrivacyRepository.ErasureRequest request = privacyRepository.createRequest(subjectUserId);
+        assertEquals(8, request.confirmationCode().length());
+        assertFalse(privacyRepository.erase(subjectUserId, "AAAAAAAA").confirmed());
+
+        ProfilePrivacyRepository.ErasureResult result = privacyRepository.erase(
+                subjectUserId, request.confirmationCode());
+
+        assertTrue(result.confirmed());
+        assertEquals(1, result.facts());
+        assertEquals(1, result.candidates());
+        assertEquals(1, result.evidence());
+        assertEquals(0, count("SELECT COUNT(*) FROM profile_facts WHERE subject_user_id=?", subjectUserId));
+        assertEquals(0, count("SELECT COUNT(*) FROM profile_fact_candidates WHERE subject_user_id=?", subjectUserId));
+        assertEquals(0, count("SELECT COUNT(*) FROM profile_fact_evidence WHERE message_id=?", messageId));
+        assertEquals("REDACTED", scalar("SELECT status FROM media_artifacts WHERE part_id=?", partId));
+        assertEquals("CANCELLED", scalar("SELECT status FROM model_analysis_tasks WHERE task_key=?", keyPrefix + "-privacy-task"));
+        assertEquals("保留在聊天记录中的原文", scalar("SELECT content FROM messages WHERE id=?", messageId));
+        assertTrue(scalar("SELECT old_snapshot FROM profile_fact_changes WHERE reason_code='USER_PRIVACY_ERASURE' " +
+                "AND actor_id=? ORDER BY id DESC LIMIT 1", subjectUserId).contains("redacted"));
     }
 
     private long candidate(String kind, String claimKey, String claim, String epistemicType, String polarity,

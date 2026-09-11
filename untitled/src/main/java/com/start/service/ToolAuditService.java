@@ -91,8 +91,8 @@ public class ToolAuditService {
         log.setCallerUserId(userId);
         log.setGroupId(groupId);
         log.setSessionId(sessionId);
-        log.setArgsSummary(truncate(argsJson, ARGS_MAX));
-        log.setResultSummary(truncate(result, RESULT_MAX));
+        log.setArgsSummary(truncate(redactPrivacyCode(toolName, argsJson), ARGS_MAX));
+        log.setResultSummary(truncate(redactPrivacyCode(toolName, result), RESULT_MAX));
         log.setRejected(rejected);
         log.setSuccess(success);
         log.setErrorMessage(truncate(errorMessage, ERROR_MAX));
@@ -124,5 +124,12 @@ public class ToolAuditService {
     static String truncate(String value, int max) {
         if (value == null) return null;
         return value.length() > max ? value.substring(0, max) : value;
+    }
+
+    static String redactPrivacyCode(String toolName, String value) {
+        if (!"delete_my_profile".equals(toolName) || value == null) return value;
+        return value.replaceAll("(\\\"confirmation_code\\\"\\s*:\\s*\\\")[^\\\"]*(\\\")", "$1[REDACTED]$2")
+                .replaceAll("(?i)(个人画像\\s+)[A-Z0-9]{8}", "$1[REDACTED]")
+                .replaceAll("(?i)(验证码\\s*)[A-Z0-9]{8}", "$1[REDACTED]");
     }
 }

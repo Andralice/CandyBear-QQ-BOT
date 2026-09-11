@@ -54,7 +54,7 @@ public class ProfileProvider {
                 sb.append("以上是结构化事实，不确定内容不能当作用户亲口确认。\n\n");
             } else {
                 // Migration compatibility only; legacy text never becomes evidence.
-                var profile = profileRepo.findByUserIdAndGroupId(userId, effectiveGroupId);
+                var profile = profileRepo.findLatestByUserId(userId);
                 if (profile.isPresent()) {
                     sb.append("\n【旧画像缓存（低可信，仅供过渡）】")
                             .append(profile.get().getProfileText()).append("\n\n");

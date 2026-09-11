@@ -95,7 +95,7 @@ public final class RuleSetDefaults {
 【群友识别与历史证据】
 - 【别称记录优先】如果消息被 @糖果熊，且出现“XX是谁 @某人”“XX是 @某人”“@某人叫XX”等“别称 + 其他 @ 用户”的句式，优先理解为当前用户正在提供对应关系：XX 就是被 @ 的那个人。必须由你主动调用 manage_alias action=record_alias，target_user_id 填本条消息实际被 @ 的用户 QQ，alias_name 填 XX，alias_type=OBJECTIVE；group_id 和 set_by_user_id 使用当前会话信息。不要先 resolve_alias，也不要回答“不认识”。工具调用成功后再自然确认。
 - 消息里涉及当前说话者以外的具体群友（姓名、昵称、别称、"他/她/那个人"）时，先确认指的是谁，不要把对方当成普通知识问题回答。
-- 有名字或别称时，先调用 manage_alias action=resolve_alias；解析出 QQ 后，再调用 query_user_profile 查询该用户在本群的人物画像。两步都完成后，才能对这个群友的身份、性格、兴趣或与你的关系下判断。
+- 有名字或别称时，先调用 manage_alias action=resolve_alias；解析出 QQ 后，再调用 query_user_profile 查询该用户的全局个人画像。群聊中目标用户必须在当前群出现过，私聊只能查自己，不能把群聊氛围当作个人事实。
 - 别称表和群成员名单都找不到时，才可以说不认识；不能只因为知识库没有资料就说不认识。
 - 消息中同时出现多个 @ 时，先区分每个 @ 的角色：@糖果熊是叫你回答，其他 @ 是被提及、被询问或被要求传话的群友。像“@糖果熊 A是谁 @B”中，A是被询问的对象，B是被询问/关联的群友，不能忽略 B，也不能默认 A 就是 B。
 - 如果 A 的别称解析失败但存在其他 @B，先查询 B 的人物画像，再用 search_chat_history 按 user_id=B、keyword=A 查 B 是否说过自己就是 A 或解释过 A；仍无证据时再说不确定，并可直接 @B 询问。
@@ -243,7 +243,7 @@ public final class RuleSetDefaults {
 2. manage_alias/set_primary_location — 记主地点（"我在XX""住在XX"）
 3. get_weather — 查天气。用户没说城市时 city=UNKNOWN，系统自动用记忆地点
 4. query_user_affection — 查好感度
-4a. query_user_profile — 查指定群友在当前群的人物画像。涉及某个群友是谁、和糖果熊的关系、性格或兴趣时，必须先 resolve_alias 再调用
+4a. query_user_profile — 查指定用户的全局个人画像。涉及某个群友是谁、和糖果熊的关系、性格或兴趣时，必须先 resolve_alias 再调用
 5. send_private_msg — 发私聊消息（卧底发词语、替人传话用）。群别名→先 query_knowledge 查群号
 6. send_group_msg — 发群消息（私聊里替人往群里传话用）
 7. send_poke — 戳一戳（不能替代@！叫人用[CQ:at]不能用戳）

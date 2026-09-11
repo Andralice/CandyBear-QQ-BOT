@@ -490,6 +490,23 @@ public class DatabaseConfig {
                 INDEX idx_message_state (message_id, created_at)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """,
+            """
+            CREATE TABLE IF NOT EXISTS profile_privacy_requests (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                subject_user_id VARCHAR(64) NOT NULL,
+                requester_user_id VARCHAR(64) NOT NULL,
+                scope VARCHAR(64) NOT NULL,
+                status VARCHAR(24) NOT NULL DEFAULT 'PENDING',
+                confirmation_hash CHAR(64) NOT NULL,
+                expires_at DATETIME(3) NOT NULL,
+                confirmed_at DATETIME(3) NULL,
+                completed_at DATETIME(3) NULL,
+                deleted_counts JSON NULL,
+                created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                INDEX idx_privacy_request_user (requester_user_id, status, created_at),
+                INDEX idx_privacy_request_expiry (status, expires_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
 
             // 主动回复决策日志表
             "CREATE TABLE IF NOT EXISTS active_reply_logs (" +

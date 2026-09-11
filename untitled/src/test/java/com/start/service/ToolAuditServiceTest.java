@@ -43,4 +43,14 @@ class ToolAuditServiceTest {
         // 验证：方法没抛异常
         assertTrue(true);
     }
+
+    @Test
+    void privacyConfirmationCodeIsRemovedFromAuditValues() {
+        assertEquals("{\"confirmation_code\":\"[REDACTED]\"}",
+                ToolAuditService.redactPrivacyCode("delete_my_profile",
+                        "{\"confirmation_code\":\"ABCDEFGH\"}"));
+        assertEquals("确认删除个人画像 [REDACTED]。",
+                ToolAuditService.redactPrivacyCode("delete_my_profile", "确认删除个人画像 ABCDEFGH。"));
+        assertEquals("ABCDEFGH", ToolAuditService.redactPrivacyCode("other_tool", "ABCDEFGH"));
+    }
 }
