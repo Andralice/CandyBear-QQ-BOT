@@ -12,6 +12,8 @@ public record EvidenceRetentionPolicy(
         Duration imageAndAudio,
         Duration video,
         Duration derivedArtifacts,
+        Duration temporaryFactValidity,
+        Duration stableFactValidity,
         long usableBytes,
         boolean pressureMode) {
 
@@ -32,9 +34,11 @@ public record EvidenceRetentionPolicy(
         boolean pressure = usable >= 0 && usable < MIN_FREE_BYTES;
         if (pressure) {
             return new EvidenceRetentionPolicy(Duration.ofDays(180), Duration.ofDays(14),
-                    Duration.ofDays(3), Duration.ofDays(2), usable, true);
+                    Duration.ofDays(3), Duration.ofDays(2), Duration.ofDays(14),
+                    Duration.ofDays(180), usable, true);
         }
         return new EvidenceRetentionPolicy(Duration.ofDays(365), Duration.ofDays(30),
-                Duration.ofDays(7), Duration.ofDays(3), usable, false);
+                Duration.ofDays(7), Duration.ofDays(3), Duration.ofDays(30),
+                Duration.ofDays(365), usable, false);
     }
 }

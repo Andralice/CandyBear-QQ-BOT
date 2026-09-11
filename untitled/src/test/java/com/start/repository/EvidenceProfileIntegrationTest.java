@@ -144,6 +144,25 @@ class EvidenceProfileIntegrationTest {
     }
 
     @Test
+    void staleFactExpiresWithAuditHistory() throws Exception {
+        LocalDateTime observedAt = LocalDateTime.now().minusDays(40);
+        long messageId = insertMessage("stale-fact", observedAt);
+        long candidate = candidate("recent_state", "stale-state", "曾经在旅行", "SELF_REPORTED", "ASSERT",
+                0.90, List.of(messageId), observedAt, null);
+        addEvidence(candidate, messageId);
+        long fact = factRepository.promoteCandidate(candidate);
+        assertTrue(fact > 0);
+
+        int expired = factRepository.expireInactiveFacts(LocalDateTime.now(),
+                LocalDateTime.now().minusDays(30), LocalDateTime.now().minusDays(365));
+
+        assertEquals(1, expired);
+        assertEquals("EXPIRED", scalar("SELECT status FROM profile_facts WHERE id=?", fact));
+        assertEquals("STALE_EVIDENCE", scalar("SELECT reason_code FROM profile_fact_changes " +
+                "WHERE entity_id=? AND to_status='EXPIRED' ORDER BY id DESC LIMIT 1", fact));
+    }
+
+    @Test
     void concurrentClaimAllowsOnlyOneLease() throws Exception {
         insertTask(keyPrefix + "-claim", "TEST_CLAIM", Integer.MAX_VALUE, 3, "PENDING", LocalDateTime.now(), null, 0);
         ExecutorService executor = Executors.newFixedThreadPool(2);
@@ -276,8 +295,15 @@ class EvidenceProfileIntegrationTest {
 
     private long candidate(String kind, String claimKey, String claim, String epistemicType, String polarity,
                            double confidence, List<Long> evidenceIds) throws Exception {
+        return candidate(kind, claimKey, claim, epistemicType, polarity, confidence, evidenceIds,
+                LocalDateTime.now(), null);
+    }
+
+    private long candidate(String kind, String claimKey, String claim, String epistemicType, String polarity,
+                           double confidence, List<Long> evidenceIds, LocalDateTime observedAt,
+                           LocalDateTime validUntil) throws Exception {
         return factRepository.upsertCandidate(new ProfileFactCandidateInput(subjectUserId, groupId, kind, epistemicType,
-                claimKey, claim, polarity, "ONE_OFF", confidence, "PERSONAL", LocalDateTime.now(), null,
+                claimKey, claim, polarity, "ONE_OFF", confidence, "PERSONAL", observedAt, validUntil,
                 "integration-test", null, "test", evidenceIds, "text", "{\"test\":true}", "AVAILABLE"));
     }
 

@@ -2,6 +2,7 @@ package com.start.service;
 
 import com.start.repository.MediaArtifactRepository;
 import com.start.repository.MessageRepository;
+import com.start.repository.ProfileFactRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -16,6 +17,8 @@ public final class EvidenceRetentionService implements AutoCloseable {
     private static final Logger logger = LoggerFactory.getLogger(EvidenceRetentionService.class);
     private final MessageRepository messageRepository = new MessageRepository();
     private final MediaArtifactRepository artifactRepository = new MediaArtifactRepository();
+    private final ProfileFactRepository factRepository =
+            new ProfileFactRepository(com.start.config.DatabaseConfig.getDataSource());
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread thread = new Thread(r, "Evidence-Retention");
         thread.setDaemon(true);
@@ -25,9 +28,10 @@ public final class EvidenceRetentionService implements AutoCloseable {
 
     public void start() {
         policy = EvidenceRetentionPolicy.forPath(Path.of(System.getProperty("user.dir", ".")));
-        logger.info("证据保留策略: raw={}d image/audio={}d video={}d derived={}d usableBytes={} pressureMode={}",
+        logger.info("证据保留策略: raw={}d image/audio={}d video={}d derived={}d factTemp={}d factStable={}d usableBytes={} pressureMode={}",
                 policy.rawEvidence().toDays(), policy.imageAndAudio().toDays(), policy.video().toDays(),
-                policy.derivedArtifacts().toDays(), policy.usableBytes(), policy.pressureMode());
+                policy.derivedArtifacts().toDays(), policy.temporaryFactValidity().toDays(),
+                policy.stableFactValidity().toDays(), policy.usableBytes(), policy.pressureMode());
         scheduler.scheduleWithFixedDelay(this::runOnceSafely, 10, 24, TimeUnit.HOURS);
     }
 
@@ -48,9 +52,11 @@ public final class EvidenceRetentionService implements AutoCloseable {
         int derived = artifactRepository.expireArtifactsBefore("LINK_PREVIEW", now.minus(current.derivedArtifacts()))
                 + artifactRepository.expireArtifactsBefore("FORWARD_CHAIN", now.minus(current.derivedArtifacts()))
                 + artifactRepository.expireArtifactsBefore("FILE_TEXT", now.minus(current.derivedArtifacts()));
-        if (redacted + images + audio + video + derived > 0) {
-            logger.info("证据保留清理完成: rawRedacted={}, image={}, audio={}, video={}, derived={}",
-                    redacted, images, audio, video, derived);
+        int facts = factRepository.expireInactiveFacts(now,
+                now.minus(current.temporaryFactValidity()), now.minus(current.stableFactValidity()));
+        if (redacted + images + audio + video + derived + facts > 0) {
+            logger.info("证据保留清理完成: rawRedacted={}, image={}, audio={}, video={}, derived={}, factsExpired={}",
+                    redacted, images, audio, video, derived, facts);
         }
     }
 

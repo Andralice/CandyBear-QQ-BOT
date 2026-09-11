@@ -17,6 +17,8 @@ class EvidenceRetentionPolicyTest {
         assertEquals(30, policy.imageAndAudio().toDays());
         assertEquals(7, policy.video().toDays());
         assertEquals(3, policy.derivedArtifacts().toDays());
+        assertEquals(30, policy.temporaryFactValidity().toDays());
+        assertEquals(365, policy.stableFactValidity().toDays());
     }
 
     @Test
@@ -28,6 +30,8 @@ class EvidenceRetentionPolicyTest {
         assertEquals(14, policy.imageAndAudio().toDays());
         assertEquals(3, policy.video().toDays());
         assertEquals(2, policy.derivedArtifacts().toDays());
+        assertEquals(14, policy.temporaryFactValidity().toDays());
+        assertEquals(180, policy.stableFactValidity().toDays());
     }
 
     @Test

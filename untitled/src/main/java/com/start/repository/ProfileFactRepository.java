@@ -63,6 +63,52 @@ public class ProfileFactRepository implements Repository {
         return List.copyOf(facts);
     }
 
+    /** Expires facts that reached an explicit validity bound or became stale without new evidence. */
+    public int expireInactiveFacts(LocalDateTime now, LocalDateTime temporaryBefore,
+                                   LocalDateTime stableBefore) throws SQLException {
+        String where = "status='ACTIVE' AND (" +
+                "(valid_until IS NOT NULL AND valid_until <= ?) OR " +
+                "(valid_until IS NULL AND stability='TEMPORARY' AND last_observed_at < ?) OR " +
+                "(valid_until IS NULL AND stability='STABLE' AND last_observed_at < ?))";
+        try (Connection conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                String audit = "INSERT INTO profile_fact_changes (entity_type, entity_id, from_status, to_status, " +
+                        "old_snapshot, new_snapshot, reason_code, actor_type, actor_id, task_id) " +
+                        "SELECT 'PROFILE_FACT', id, 'ACTIVE', 'EXPIRED', " +
+                        "JSON_OBJECT('claim', claim, 'stability', stability, 'confidence', confidence), " +
+                        "JSON_OBJECT('status', 'EXPIRED', 'expired_at', ?), " +
+                        "CASE WHEN valid_until IS NOT NULL AND valid_until <= ? " +
+                        "THEN 'VALID_UNTIL_REACHED' ELSE 'STALE_EVIDENCE' END, " +
+                        "'SYSTEM', 'retention-service', NULL FROM profile_facts WHERE " + where;
+                try (PreparedStatement ps = conn.prepareStatement(audit)) {
+                    ps.setTimestamp(1, Timestamp.valueOf(now));
+                    ps.setTimestamp(2, Timestamp.valueOf(now));
+                    ps.setTimestamp(3, Timestamp.valueOf(now));
+                    ps.setTimestamp(4, Timestamp.valueOf(temporaryBefore));
+                    ps.setTimestamp(5, Timestamp.valueOf(stableBefore));
+                    ps.executeUpdate();
+                }
+                String update = "UPDATE profile_facts SET status='EXPIRED', valid_until=COALESCE(valid_until, ?), " +
+                        "version=version+1 WHERE " + where;
+                try (PreparedStatement ps = conn.prepareStatement(update)) {
+                    ps.setTimestamp(1, Timestamp.valueOf(now));
+                    ps.setTimestamp(2, Timestamp.valueOf(now));
+                    ps.setTimestamp(3, Timestamp.valueOf(temporaryBefore));
+                    ps.setTimestamp(4, Timestamp.valueOf(stableBefore));
+                    int affected = ps.executeUpdate();
+                    conn.commit();
+                    return affected;
+                }
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(true);
+            }
+        }
+    }
+
     public long upsertCandidate(ProfileFactCandidateInput input) throws Exception {
         LocalDateTime now = input.observedAt() == null ? LocalDateTime.now() : input.observedAt();
         String dedupeKey = sha256(String.join("|", safe(input.subjectUserId()), safe(input.scope()),
