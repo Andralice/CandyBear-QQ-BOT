@@ -58,11 +58,19 @@ import com.start.agent.DigestTool;
 import com.start.agent.SearchDigestTool;
 import com.start.agent.evo.EvolutionHistoryTool;
 import com.start.agent.QueryImagesTool;
+import com.start.agent.QueryMessageContextTool;
+import com.start.agent.QueryThreadTool;
+import com.start.agent.QueryUserTopicHistoryTool;
+import com.start.agent.QueryMediaArtifactTool;
+import com.start.agent.QueryForwardChainTool;
+import com.start.agent.QueryGroupAtmosphereTool;
+import com.start.agent.QuerySimilarEventsTool;
 import com.start.agent.SetWorkingMemoryTool;
 import com.start.agent.WhitelistTool;
 import com.start.model.WorkingMemory;
 import com.start.repository.BeliefRepository;
 import com.start.repository.MessageRepository;
+import com.start.repository.EvidenceQueryRepository;
 import com.start.repository.ProfileFactRepository;
 import com.start.repository.RecurringTaskRepository;
 import com.start.repository.ThreadRepository;
@@ -847,6 +855,9 @@ public class BaiLianService {
             recallMemoryTool.setAutoKeywords(hanlpKeywords);
 
             EvolutionRecordRepository evoRepo = new EvolutionRecordRepository(DatabaseConfig.getDataSource());
+            MessageRepository evidenceMessageRepo = new MessageRepository();
+            EvidenceQueryRepository evidenceQueryRepo = new EvidenceQueryRepository();
+            ProfileFactRepository evidenceFactRepo = new ProfileFactRepository(DatabaseConfig.getDataSource());
 
             boolean isAdmin = String.valueOf(BotConfig.getAdminQq()).equals(userId);
 
@@ -864,8 +875,7 @@ public class BaiLianService {
                     new ProfessionTool(),
                     new ProfessionPKTool(),
                     new UserProfileTool(profileRepo,
-                            new ProfileFactRepository(DatabaseConfig.getDataSource()),
-                            new MessageRepository(), userId, groupId),
+                            evidenceFactRepo, evidenceMessageRepo, userId, groupId),
                     new MemoryTool(botMemory),
                     new KnowledgeBaseTool(knowledgeService),
                     new LearnKnowledgeTool(knowledgeService, userId),
@@ -893,7 +903,15 @@ public class BaiLianService {
                     new DigestTool(),
                     new SearchDigestTool(),
                     new EvolutionHistoryTool(evoRepo),
-                    new QueryImagesTool(new MessageRepository(), groupId)
+                    new QueryImagesTool(evidenceMessageRepo, groupId),
+                    new QueryMessageContextTool(evidenceQueryRepo, evidenceMessageRepo, userId, groupId, sessionId),
+                    new QueryThreadTool(evidenceQueryRepo, evidenceMessageRepo, userId, groupId, sessionId),
+                    new QueryUserTopicHistoryTool(evidenceQueryRepo, evidenceMessageRepo, evidenceFactRepo,
+                            userId, groupId, sessionId),
+                    new QueryMediaArtifactTool(evidenceQueryRepo, evidenceMessageRepo, userId, groupId, sessionId),
+                    new QueryForwardChainTool(evidenceQueryRepo, evidenceMessageRepo, userId, groupId, sessionId),
+                    new QueryGroupAtmosphereTool(evidenceQueryRepo, evidenceMessageRepo, userId, groupId, sessionId),
+                    new QuerySimilarEventsTool(evidenceQueryRepo, evidenceMessageRepo, userId, groupId, sessionId)
             ));
             // 归儿专属工具（code/audit/shell/self_evolve），非管理员不发，省 token
             if (isAdmin) {

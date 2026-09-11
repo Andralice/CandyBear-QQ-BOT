@@ -331,6 +331,7 @@ public class DatabaseConfig {
                 epistemic_type VARCHAR(40) NOT NULL,
                 claim_key VARCHAR(255) NOT NULL,
                 claim TEXT NOT NULL,
+                polarity VARCHAR(16) NOT NULL DEFAULT 'ASSERT',
                 status VARCHAR(24) NOT NULL DEFAULT 'CANDIDATE',
                 stability VARCHAR(24) NOT NULL DEFAULT 'ONE_OFF',
                 confidence DECIMAL(4,3) NOT NULL,
@@ -358,6 +359,7 @@ public class DatabaseConfig {
                 epistemic_type VARCHAR(40) NOT NULL,
                 claim_key VARCHAR(255) NOT NULL,
                 claim TEXT NOT NULL,
+                polarity VARCHAR(16) NOT NULL DEFAULT 'ASSERT',
                 status VARCHAR(24) NOT NULL DEFAULT 'ACTIVE',
                 stability VARCHAR(24) NOT NULL,
                 confidence DECIMAL(4,3) NOT NULL,
@@ -427,6 +429,35 @@ public class DatabaseConfig {
                 INDEX idx_conflict_status (status, created_at),
                 INDEX idx_conflict_fact (existing_fact_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            // Legacy free-text cache is retained for compatibility and imported only as a candidate.
+            """
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                user_id VARCHAR(64) NOT NULL,
+                group_id VARCHAR(64) NULL,
+                profile_text TEXT NULL,
+                message_count_snapshot INT DEFAULT 0,
+                last_message_id BIGINT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_legacy_profile_user_group (user_id, group_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            "ALTER TABLE profile_fact_candidates ADD COLUMN polarity VARCHAR(16) NOT NULL DEFAULT 'ASSERT' AFTER claim",
+            "ALTER TABLE profile_facts ADD COLUMN polarity VARCHAR(16) NOT NULL DEFAULT 'ASSERT' AFTER claim",
+            """
+            INSERT IGNORE INTO profile_fact_candidates
+                (subject_user_id, source_group_id, kind, epistemic_type, claim_key, claim, polarity, status,
+                 stability, confidence, scope, first_observed_at, last_observed_at, valid_from, valid_until,
+                 audit_rationale, analysis_task_id, model_version, dedupe_key)
+            SELECT user_id, group_id, 'legacy_summary', 'MODEL_INFERENCE', 'legacy_profile', profile_text, 'ASSERT',
+                   'CANDIDATE', 'ONE_OFF', 0.10, 'PERSONAL', COALESCE(updated_at, created_at, NOW()),
+                   COALESCE(updated_at, created_at, NOW()), COALESCE(updated_at, created_at, NOW()), NULL,
+                   '旧 profileText 仅作为低可信迁移候选；没有原始消息证据，不自动晋级', NULL, 'legacy-profile-v1',
+                   SHA2(CONCAT('legacy|', user_id, '|', COALESCE(group_id, ''), '|', profile_text), 256)
+            FROM user_profiles
+            WHERE profile_text IS NOT NULL AND TRIM(profile_text) <> ''
             """,
             """
             CREATE TABLE IF NOT EXISTS profile_fact_changes (

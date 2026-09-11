@@ -108,6 +108,12 @@ public class Main extends WebSocketClient {
     /** 用户画像服务，定期分析用户行为并更新画像标签。 */
     UserPortraitService portraitService;
 
+    /** 证据优先画像与媒体解析任务 worker。 */
+    EvidenceAnalysisWorker evidenceAnalysisWorker;
+
+    /** 原始证据与派生产物的容量感知保留清理。 */
+    EvidenceRetentionService evidenceRetentionService;
+
     /** 糖果熊分群情绪系统，持久化到 group_mood 表。 */
     BotMoodService moodService;
 
@@ -231,6 +237,11 @@ public class Main extends WebSocketClient {
                     future.complete(event);
                     return; // 不继续处理业务逻辑
                 }
+            }
+
+            if ("notice".equals(event.path("post_type").asText())) {
+                handleNoticeEvent(event);
+                return;
             }
 
             // 仅处理 message 类型事件
@@ -648,6 +659,18 @@ public class Main extends WebSocketClient {
         }
     }
 
+    private void handleNoticeEvent(JsonNode event) {
+        String noticeType = event.path("notice_type").asText();
+        if (!"group_recall".equals(noticeType) && !"friend_recall".equals(noticeType)) return;
+        String providerMessageId = event.path("message_id").asText("");
+        if (providerMessageId.isBlank() || messageService == null) return;
+        String groupId = event.hasNonNull("group_id") ? String.valueOf(event.path("group_id").asLong()) : null;
+        String actorId = event.path("operator_id").asText(event.path("user_id").asText(""));
+        int affected = messageService.handleRetraction(providerMessageId, groupId, actorId,
+                MessageService.eventHash(event.toString()));
+        logger.info("OneBot 撤回事件已处理: message_id={}, group_id={}, affected={}", providerMessageId, groupId, affected);
+    }
+
     private static String receiptMessageId(JsonNode receipt) {
         if (receipt == null) return null;
         String value = receipt.path("data").path("message_id").asText("").trim();
@@ -685,6 +708,9 @@ public class Main extends WebSocketClient {
         if (shuttingDown) return;
         shuttingDown = true;
         reconnectScheduler.shutdownNow();
+
+        if (evidenceAnalysisWorker != null) evidenceAnalysisWorker.close();
+        if (evidenceRetentionService != null) evidenceRetentionService.close();
         failPendingRequests(new IllegalStateException("机器人正在关闭"));
         if (conversationExecutor != null) conversationExecutor.shutdown();
         if (dashboardListener != null) dashboardListener.stop();

@@ -132,6 +132,34 @@ public class MessageRepository extends BaseRepository {
                             task.executeBatch();
                         }
                     }
+                    if (!getBooleanValue(data, "isRobotReply", false)
+                            && (!getStringValue(data, "content", "").isBlank()
+                            || (parts != null && !parts.isEmpty()))) {
+                        String profileTaskSql = "INSERT INTO model_analysis_tasks (task_key, task_type, priority, " +
+                                "scope_group_id, scope_user_id, input_refs, max_attempts) VALUES (?, ?, ?, ?, ?, ?, ?)";
+                        try (PreparedStatement profileTask = conn.prepareStatement(profileTaskSql)) {
+                            profileTask.setString(1, "message:" + messageId + ":PROFILE_FACTS:v1");
+                            profileTask.setString(2, "EXTRACT_PROFILE_FACTS");
+                            profileTask.setInt(3, 10);
+                            profileTask.setString(4, getStringValue(data, "groupId", null));
+                            profileTask.setString(5, getStringValue(data, "userId", null));
+                            profileTask.setString(6, "{\"message_id\":" + messageId + "}");
+                            profileTask.setInt(7, 3);
+                            profileTask.executeUpdate();
+                        }
+                    }
+                    String groupId = getStringValue(data, "groupId", null);
+                    if (!getBooleanValue(data, "isRobotReply", false) && groupId != null && !groupId.isBlank()) {
+                        String atmosphereTaskSql = "INSERT INTO model_analysis_tasks (task_key, task_type, priority, scope_group_id, input_refs, max_attempts) " +
+                                "VALUES (?, 'ANALYZE_GROUP_ATMOSPHERE', 1, ?, ?, 3) ON DUPLICATE KEY UPDATE input_refs=VALUES(input_refs), updated_at=CURRENT_TIMESTAMP(3)";
+                        long bucket = System.currentTimeMillis() / 300_000L;
+                        try (PreparedStatement atmosphereTask = conn.prepareStatement(atmosphereTaskSql)) {
+                            atmosphereTask.setString(1, "group:" + groupId + ":ATMOSPHERE:" + bucket);
+                            atmosphereTask.setString(2, groupId);
+                            atmosphereTask.setString(3, "{\"message_id\":" + messageId + "}");
+                            atmosphereTask.executeUpdate();
+                        }
+                    }
                     conn.commit();
                     return 1;
                 } catch (SQLIntegrityConstraintViolationException e) {
@@ -163,6 +191,132 @@ public class MessageRepository extends BaseRepository {
                     ? "EXTRACT_LINKS" : null;
             default -> null;
         };
+    }
+
+    /** Returns a bounded, chronological context window for evidence analysis. */
+    public DatabaseResult<List<Map<String, Object>>> findMessagesForAnalysis(long messageId,
+                                                                               String groupId,
+                                                                               String sessionId,
+                                                                               int limit) {
+        int bounded = Math.max(1, Math.min(limit, 24));
+        String sql;
+        Object scope;
+        if (groupId != null && !groupId.isBlank()) {
+            sql = "SELECT id, user_id, group_id, session_id, content, raw_content, sender_type, " +
+                    "is_robot_reply, is_private, provider_message_id, reply_provider_message_id, " +
+                    "reply_to_id, availability_status, created_at FROM messages WHERE group_id=? AND id<=? " +
+                    "AND retracted_at IS NULL ORDER BY id DESC LIMIT ?";
+            scope = groupId;
+        } else {
+            sql = "SELECT id, user_id, group_id, session_id, content, raw_content, sender_type, " +
+                    "is_robot_reply, is_private, provider_message_id, reply_provider_message_id, " +
+                    "reply_to_id, availability_status, created_at FROM messages WHERE session_id=? AND id<=? " +
+                    "AND retracted_at IS NULL ORDER BY id DESC LIMIT ?";
+            scope = sessionId;
+        }
+        DatabaseResult<List<Map<String, Object>>> result = executeQuery(sql, this::mapToHashMap,
+                scope, messageId, bounded);
+        if (!result.isSuccess() || result.getData() == null) return result;
+        List<Map<String, Object>> chronological = new ArrayList<>(result.getData());
+        Collections.reverse(chronological);
+        return DatabaseResult.success(chronological);
+    }
+
+    public DatabaseResult<Map<String, Object>> findMessageById(long messageId) {
+        return executeQuerySingle("SELECT * FROM messages WHERE id=?", this::mapToHashMap, messageId);
+    }
+
+    public DatabaseResult<List<Map<String, Object>>> findMessageParts(long messageId) {
+        return executeQuery("SELECT id, part_index, part_type, raw_part_json, availability_status " +
+                "FROM message_parts WHERE message_id=? ORDER BY part_index ASC", this::mapToHashMap, messageId);
+    }
+
+    public int redactRawEvidenceBefore(LocalDateTime before) throws SQLException {
+        try (Connection conn = DatabaseConfig.getConnection()) {
+            conn.setAutoCommit(false);
+            try (PreparedStatement messages = conn.prepareStatement(
+                    "UPDATE messages SET raw_content=NULL, raw_event_json=NULL, raw_segments_json=NULL, " +
+                            "redacted_at=CURRENT_TIMESTAMP(3), availability_status='REDACTED_RAW' " +
+                            "WHERE created_at < ? AND redacted_at IS NULL");
+                 PreparedStatement parts = conn.prepareStatement(
+                         "UPDATE message_parts p JOIN messages m ON m.id=p.message_id SET " +
+                                 "p.raw_part_json=JSON_OBJECT('redacted', TRUE, 'reason', 'RETENTION_EXPIRED'), " +
+                                 "p.source_url=NULL, p.provider_file_id=NULL, p.storage_key=NULL, p.availability_status='EXPIRED' " +
+                                 "WHERE m.created_at < ? AND p.availability_status <> 'EXPIRED'");
+                 PreparedStatement evidence = conn.prepareStatement(
+                         "UPDATE profile_fact_evidence e JOIN messages m ON m.id=e.message_id SET " +
+                                 "e.availability_snapshot='EXPIRED', e.quote_or_span=NULL WHERE m.created_at < ?")) {
+                Timestamp timestamp = Timestamp.valueOf(before);
+                messages.setTimestamp(1, timestamp);
+                int affected = messages.executeUpdate();
+                parts.setTimestamp(1, timestamp);
+                parts.executeUpdate();
+                evidence.setTimestamp(1, timestamp);
+                evidence.executeUpdate();
+                conn.commit();
+                return affected;
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(true);
+            }
+        }
+    }
+
+    public DatabaseResult<Integer> handleRetraction(String providerMessageId, String groupId,
+                                                     String actorId, String noticeHash) {
+        return safeExecute(() -> {
+            if (providerMessageId == null || providerMessageId.isBlank()) return 0;
+            try (Connection conn = DatabaseConfig.getConnection()) {
+                conn.setAutoCommit(false);
+                String find = "SELECT id, availability_status FROM messages WHERE provider_message_id=? " +
+                        "AND (? IS NULL OR group_id=?) FOR UPDATE";
+                int affected = 0;
+                try (PreparedStatement ps = conn.prepareStatement(find)) {
+                    ps.setString(1, providerMessageId);
+                    ps.setString(2, groupId);
+                    ps.setString(3, groupId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            long messageId = rs.getLong("id");
+                            String previous = rs.getString("availability_status");
+                            try (PreparedStatement update = conn.prepareStatement(
+                                    "UPDATE messages SET retracted_at=CURRENT_TIMESTAMP(3), availability_status='RETRACTED' WHERE id=?")) {
+                                update.setLong(1, messageId);
+                                update.executeUpdate();
+                            }
+                            try (PreparedStatement state = conn.prepareStatement(
+                                    "INSERT INTO message_state_changes (message_id, from_status, to_status, notice_event_hash, reason_code, actor_id) VALUES (?, ?, 'RETRACTED', ?, 'ONEBOT_RECALL', ?)")) {
+                                state.setLong(1, messageId); state.setString(2, previous); state.setString(3, noticeHash); state.setString(4, actorId);
+                                state.executeUpdate();
+                            }
+                            affected++;
+                        }
+                    }
+                }
+                if (affected > 0) {
+                    try (PreparedStatement evidence = conn.prepareStatement(
+                            "UPDATE profile_fact_evidence e JOIN messages m ON m.id=e.message_id SET e.evidence_role='RETRACTED', e.availability_snapshot='RETRACTED' WHERE m.provider_message_id=? AND (? IS NULL OR m.group_id=?)")) {
+                        evidence.setString(1, providerMessageId); evidence.setString(2, groupId); evidence.setString(3, groupId); evidence.executeUpdate();
+                    }
+                    try (PreparedStatement candidates = conn.prepareStatement(
+                            "UPDATE profile_fact_candidates c SET status='REJECTED', audit_rationale=CONCAT(COALESCE(c.audit_rationale,''), '；原始消息已撤回') " +
+                                    "WHERE EXISTS (SELECT 1 FROM profile_fact_evidence e WHERE e.candidate_id=c.id AND e.evidence_role='RETRACTED') " +
+                                    "AND NOT EXISTS (SELECT 1 FROM profile_fact_evidence active WHERE active.candidate_id=c.id AND active.evidence_role='SUPPORT')")) {
+                        candidates.executeUpdate();
+                    }
+                    try (PreparedStatement facts = conn.prepareStatement(
+                            "UPDATE profile_facts f SET status='EXPIRED', valid_until=CURRENT_TIMESTAMP(3) " +
+                                    "WHERE EXISTS (SELECT 1 FROM profile_fact_evidence e WHERE e.fact_id=f.id AND e.evidence_role='RETRACTED') " +
+                                    "AND NOT EXISTS (SELECT 1 FROM profile_fact_evidence active WHERE active.fact_id=f.id AND active.evidence_role='SUPPORT')")) {
+                        facts.executeUpdate();
+                    }
+                }
+                conn.commit();
+                return affected;
+            }
+        });
     }
 
     /** 为已入库的 OneBot 原始消息补充异步得到的图片描述。 */

@@ -14,6 +14,8 @@ import org.slf4j.LoggerFactory;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 
 /**
  * 消息服务类
@@ -73,6 +75,8 @@ public class MessageService {
         }
         if (replyProviderMessageId != null && !replyProviderMessageId.isBlank()) {
             data.put("replyProviderMessageId", replyProviderMessageId);
+            Long replyToId = parseLongOrNull(replyProviderMessageId);
+            if (replyToId != null) data.put("replyToId", replyToId);
         }
         data.put("senderType", "USER");
         data.put("availabilityStatus", "AVAILABLE");
@@ -144,6 +148,23 @@ public class MessageService {
 
     public void attachImageData(String sourceEventKey, String imageData) {
         messageRepo.updateImageDataBySourceEventKey(sourceEventKey, imageData);
+    }
+
+    public int handleRetraction(String providerMessageId, String groupId, String actorId, String noticeHash) {
+        var result = messageRepo.handleRetraction(providerMessageId, groupId, actorId, noticeHash);
+        return result.isSuccess() && result.getData() != null ? result.getData() : 0;
+    }
+
+    public static String eventHash(String rawEvent) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(
+                    (rawEvent == null ? "" : rawEvent).getBytes(StandardCharsets.UTF_8));
+            StringBuilder result = new StringBuilder(64);
+            for (byte b : digest) result.append(String.format("%02x", b));
+            return result.toString();
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     /** Returns null for events without a stable OneBot message id, preserving legacy compatibility. */

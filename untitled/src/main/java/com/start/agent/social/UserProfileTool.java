@@ -80,11 +80,20 @@ public class UserProfileTool implements Tool {
             var facts = factRepo.findActiveByUserId(userId, currentGroupId == null, 10);
             if (!facts.isEmpty()) {
                 StringBuilder result = new StringBuilder("【目标用户个人档案事实（内部参考）】\n");
-                facts.forEach(fact -> result.append("- fact_id=").append(fact.id())
+                facts.forEach(fact -> {
+                    result.append("- fact_id=").append(fact.id())
                         .append(" [").append(fact.kind()).append('/').append(fact.stability())
                         .append(", confidence=")
                         .append(String.format(java.util.Locale.ROOT, "%.2f", fact.confidence()))
-                        .append("] ").append(fact.claim()).append('\n'));
+                        .append("] ").append(fact.claim());
+                    try {
+                        var evidence = factRepo.findEvidenceForFact(fact.id(), 3);
+                        result.append(" evidence=").append(evidence);
+                    } catch (Exception ignored) {
+                        result.append(" evidence=[]");
+                    }
+                    result.append('\n');
+                });
                 return result.toString().trim();
             }
 

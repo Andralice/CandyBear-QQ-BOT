@@ -67,6 +67,8 @@ public final class BotBootstrap {
         bot.baiLianService = new BaiLianService(bot.keywordKnowledgeService, bot.userAffinityRepo, bot.ttsService);
         bot.baiLianService.setMoodService(bot.moodService);
         bot.baiLianService.setBotInstance(bot);
+        bot.evidenceAnalysisWorker = new EvidenceAnalysisWorker(bot.baiLianService);
+        bot.evidenceRetentionService = new EvidenceRetentionService();
 
         // 异常监控
         bot.errorMonitorService = new ErrorMonitorService(bot.baiLianService);
@@ -134,6 +136,8 @@ public final class BotBootstrap {
         startLifeEngineThread(bot, lifeEngine);
         // Evidence-first profiles replace the legacy free-text overwrite loop.
         logger.info("旧用户画像自动覆盖任务已停用，等待证据画像流水线接管");
+        bot.evidenceAnalysisWorker.start();
+        bot.evidenceRetentionService.start();
         startReminderService(bot);
         startEventChecker(bot);
         startRecurringScheduler(bot);
