@@ -23,6 +23,7 @@ public class PromptContext {
     String userLocation;
     boolean isAtBot;
     List<Long> otherAts;
+    String atMentionContext;
     String spyGameDesc;
     String numberGameDesc;
     String publicGroupContext;
@@ -33,6 +34,7 @@ public class PromptContext {
     List<BeliefRecall> beliefRecalls;
     SceneState sceneState;
     WorkingMemory workingMemory;
+    GroupDialoguePlan dialoguePlan;
     String promptPatch;
     List<Long> atUserIds;
     long botQq;
@@ -55,6 +57,7 @@ public class PromptContext {
     public PromptContext userLocation(String v) { this.userLocation = v; return this; }
     public PromptContext isAtBot(boolean v) { this.isAtBot = v; return this; }
     public PromptContext otherAts(List<Long> v) { this.otherAts = v; return this; }
+    public PromptContext atMentionContext(String v) { this.atMentionContext = v; return this; }
     public PromptContext spyGameDesc(String v) { this.spyGameDesc = v; return this; }
     public PromptContext numberGameDesc(String v) { this.numberGameDesc = v; return this; }
     public PromptContext publicGroupContext(String v) { this.publicGroupContext = v; return this; }
@@ -65,6 +68,7 @@ public class PromptContext {
     public PromptContext beliefRecalls(List<BeliefRecall> v) { this.beliefRecalls = v; return this; }
     public PromptContext sceneState(SceneState v) { this.sceneState = v; return this; }
     public PromptContext workingMemory(WorkingMemory v) { this.workingMemory = v; return this; }
+    public PromptContext dialoguePlan(GroupDialoguePlan v) { this.dialoguePlan = v; return this; }
     public PromptContext promptPatch(String v) { this.promptPatch = v; return this; }
     public PromptContext atUserIds(List<Long> v) { this.atUserIds = v; return this; }
     public PromptContext botQq(long v) { this.botQq = v; return this; }

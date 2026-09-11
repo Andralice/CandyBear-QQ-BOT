@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayDeque;
 import java.util.Set;
+import java.util.List;
 
 class ConversationContextPolicyTest {
 
@@ -23,6 +24,8 @@ class ConversationContextPolicyTest {
         assertEquals(6, BaiLianService.publicContextLimit(ConversationEvent.MENTION));
         assertEquals(6, BaiLianService.publicContextLimit(ConversationEvent.PASSIVE_TRIGGER));
         assertEquals(8, BaiLianService.publicContextLimit(ConversationEvent.PROBABILISTIC));
+        assertEquals(8, BaiLianService.publicContextLimit(ConversationEvent.COGNITIVE_CONTINUE));
+        assertEquals(8, BaiLianService.publicContextLimit(ConversationEvent.COGNITIVE_INTERJECTION));
     }
 
     @Test
@@ -71,5 +74,14 @@ class ConversationContextPolicyTest {
         assertTrue(context.contains("这是最新消息"));
         assertFalse(context.contains("旧消息"));
         assertTrue(context.length() <= 60);
+    }
+
+    @Test
+    void publicMessageKeepsProtocolAddressingMetadata() {
+        var message = new BaiLianService.PublicMessage(
+                "m3", "u1", "甲", "回复内容", List.of(123L, 456L), 99L);
+
+        assertEquals(List.of(123L, 456L), message.atUserIds);
+        assertEquals(99L, message.replyToMessageId);
     }
 }

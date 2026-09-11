@@ -18,10 +18,28 @@ public class UserAliasTool implements Tool {
     private static final String SUPERUSER_QQ = "0"; // 请在 application.properties 中设置 admin.qq
     private final UserAliasRepository aliasRepo;
     private final String botQq;
+    private final String currentUserId;
+    private final String currentGroupId;
+    private final Set<String> mentionedUserIds;
 
     public UserAliasTool(UserAliasRepository aliasRepo, String botQq) {
+        this(aliasRepo, botQq, null, null, List.of());
+    }
+
+    public UserAliasTool(UserAliasRepository aliasRepo, String botQq,
+                         String currentUserId, String currentGroupId, List<Long> mentionedUserIds) {
         this.aliasRepo = aliasRepo;
         this.botQq = botQq;
+        this.currentUserId = currentUserId;
+        this.currentGroupId = currentGroupId;
+        this.mentionedUserIds = new HashSet<>();
+        if (mentionedUserIds != null) {
+            for (Long id : mentionedUserIds) {
+                if (id != null && !String.valueOf(id).equals(botQq)) {
+                    this.mentionedUserIds.add(String.valueOf(id));
+                }
+            }
+        }
     }
 
     @Override public String getName() { return "manage_alias"; }
@@ -32,6 +50,8 @@ public class UserAliasTool implements Tool {
                "set_secondary_location(设次地点), resolve_alias(查别称对应谁), get_bot_aliases(查糖果熊的别称)。" +
                "当有人说'以后叫我XX'时用 record_alias SUBJECTIVE，" +
                "有人说'他叫XX'时用 record_alias OBJECTIVE，" +
+               "有人说'XX是谁 @某人'、'XX是 @某人'或'@某人叫XX'时，表示用户正在提供别称对应关系，" +
+               "用 record_alias OBJECTIVE，把 alias_name=XX、target_user_id=被@用户QQ记下来；" +
                "有人说'我叫你XX吧'（给糖果熊起别称）时用 record_alias BOT_ALIAS，" +
                "有人说'我在北京'时用 set_primary_location，" +
                "查询某地天气后自动用 set_secondary_location 记录。";
@@ -80,6 +100,16 @@ public class UserAliasTool implements Tool {
         if ("null".equals(groupId)) groupId = null;
         if (!Set.of("SUBJECTIVE", "OBJECTIVE", "BOT_ALIAS").contains(type))
             return "alias_type 须为 SUBJECTIVE/OBJECTIVE/BOT_ALIAS";
+
+        // 模型负责决定调用 record_alias，但当前消息中的真实 @ 目标不能被模型改写。
+        if ("OBJECTIVE".equals(type) && !mentionedUserIds.isEmpty()) {
+            if (mentionedUserIds.size() != 1)
+                return "本条消息 @ 了多个其他用户，无法确定别称对应对象";
+            if (!mentionedUserIds.contains(targetId))
+                return "target_user_id 必须是本条消息实际被 @ 的用户QQ";
+            groupId = currentGroupId;
+            setBy = currentUserId;
+        }
 
         // 如果给糖果熊起别称，target 设为 bot QQ
         if ("BOT_ALIAS".equals(type) && (targetId == null || targetId.equals(botQq))) {

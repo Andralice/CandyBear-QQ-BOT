@@ -31,14 +31,27 @@ public class BotConfig {
     private static String baiLianApiKey;
     private static String baiLianBaseUrl;
     private static String baiLianChatModel;
+    private static boolean baiLianMultimodalEnabled;
     private static int baiLianTimeoutMs;
     private static int baiLianMaxRetries;
+    private static String baiLianReasoningEffort;
 
     private static String agentApiKey;
     private static String agentBaseUrl;
     private static String agentModel;
     private static int agentTimeoutMs;
     private static int agentMaxRetries;
+    private static String agentReasoningEffort;
+
+    private static String groupCognitionMode;
+    private static Set<Long> groupCognitionGroups = Collections.emptySet();
+    private static String groupCognitionApiKey;
+    private static String groupCognitionBaseUrl;
+    private static String groupCognitionModel;
+    private static int groupCognitionTimeoutMs;
+    private static String groupCognitionReasoningEffort;
+    private static String groupCognitionProtocol;
+    private static String groupCognitionThinkingType;
 
     private static String visionApiKey;
     private static String visionBaseUrl;
@@ -113,14 +126,36 @@ public class BotConfig {
             baiLianApiKey = resolveOrEmpty(props.getProperty("bailian.api-key", props.getProperty("dashscope.api-key", "")));
             baiLianBaseUrl = resolveOrEmpty(props.getProperty("bailian.base-url", "https://api.deepseek.com/v1/chat/completions"));
             baiLianChatModel = resolveOrEmpty(props.getProperty("bailian.chat-model", "deepseek-v4-pro"));
+            baiLianMultimodalEnabled = Boolean.parseBoolean(
+                    resolveOrEmpty(props.getProperty("bailian.multimodal.enabled",
+                            "${BAILIAN_MULTIMODAL_ENABLED:false}")));
             baiLianTimeoutMs = parseInt(resolveOrEmpty(props.getProperty("bailian.timeout-ms", "90000")), 90000);
             baiLianMaxRetries = parseInt(resolveOrEmpty(props.getProperty("bailian.max-retries", "2")), 2);
+            baiLianReasoningEffort = resolveOrEmpty(props.getProperty("bailian.reasoning-effort", ""));
 
             agentApiKey = resolveOrEmpty(props.getProperty("agent.api-key", ""));
             agentBaseUrl = resolveOrEmpty(props.getProperty("agent.base-url", "https://api.deepseek.com/v1/chat/completions"));
             agentModel = resolveOrEmpty(props.getProperty("agent.model", "deepseek-v4-pro"));
             agentTimeoutMs = parseInt(resolveOrEmpty(props.getProperty("agent.timeout-ms", "90000")), 90000);
             agentMaxRetries = parseInt(resolveOrEmpty(props.getProperty("agent.max-retries", "2")), 2);
+            agentReasoningEffort = resolveOrEmpty(props.getProperty("agent.reasoning-effort", ""));
+
+            groupCognitionMode = resolveOrEmpty(props.getProperty("group-cognition.mode", "off"));
+            groupCognitionGroups = parseLongSet(resolveOrEmpty(props.getProperty("group-cognition.groups", "")));
+            groupCognitionApiKey = resolveOrEmpty(props.getProperty("group-cognition.api-key", ""));
+            if (groupCognitionApiKey.isBlank()) groupCognitionApiKey = baiLianApiKey;
+            groupCognitionBaseUrl = resolveOrEmpty(props.getProperty("group-cognition.base-url", ""));
+            if (groupCognitionBaseUrl.isBlank()) groupCognitionBaseUrl = baiLianBaseUrl;
+            groupCognitionModel = resolveOrEmpty(props.getProperty("group-cognition.model", ""));
+            if (groupCognitionModel.isBlank()) groupCognitionModel = baiLianChatModel;
+            groupCognitionTimeoutMs = parseInt(
+                    resolveOrEmpty(props.getProperty("group-cognition.timeout-ms", "20000")), 20000);
+            groupCognitionReasoningEffort = resolveOrEmpty(
+                    props.getProperty("group-cognition.reasoning-effort", ""));
+            groupCognitionProtocol = resolveOrEmpty(
+                    props.getProperty("group-cognition.protocol", "response_format"));
+            groupCognitionThinkingType = resolveOrEmpty(
+                    props.getProperty("group-cognition.thinking-type", ""));
 
             visionEnabled = Boolean.parseBoolean(resolveOrEmpty(props.getProperty("vision.enabled", "true")));
             visionApiKey = resolveOrEmpty(props.getProperty("vision.api-key", baiLianApiKey));
@@ -174,6 +209,9 @@ public class BotConfig {
             } else {
                 logger.info("✅ 所有私聊消息将被允许");
             }
+            logger.info("🧭 群聊并行认知: mode={}, groups={}, model={}",
+                    groupCognitionMode, groupCognitionGroups, groupCognitionModel);
+            logger.info("🖼️ 聊天图片模式: 独立 Vision 描述（主聊天不发送原图）");
             logger.info("🔊 TTS 服务: {} (voice={}, format={})", ttsBaseUrl, ttsDefaultVoice, ttsAudioFormat);
             if (volcTtsEnabled) {
                 logger.info("🔥 豆包语音合成 2.0 TTS: enabled, voiceType={}, resourceId={}, timeout={}ms",
@@ -336,12 +374,20 @@ public class BotConfig {
         return baiLianChatModel;
     }
 
+    public static boolean isBaiLianMultimodalEnabled() {
+        return baiLianMultimodalEnabled;
+    }
+
     public static int getBaiLianTimeoutMs() {
         return baiLianTimeoutMs;
     }
 
     public static int getBaiLianMaxRetries() {
         return baiLianMaxRetries;
+    }
+
+    public static String getBaiLianReasoningEffort() {
+        return baiLianReasoningEffort;
     }
 
     public static String getAgentApiKey() {
@@ -363,6 +409,20 @@ public class BotConfig {
     public static int getAgentMaxRetries() {
         return agentMaxRetries;
     }
+
+    public static String getAgentReasoningEffort() {
+        return agentReasoningEffort;
+    }
+
+    public static String getGroupCognitionMode() { return groupCognitionMode; }
+    public static Set<Long> getGroupCognitionGroups() { return groupCognitionGroups; }
+    public static String getGroupCognitionApiKey() { return groupCognitionApiKey; }
+    public static String getGroupCognitionBaseUrl() { return groupCognitionBaseUrl; }
+    public static String getGroupCognitionModel() { return groupCognitionModel; }
+    public static int getGroupCognitionTimeoutMs() { return groupCognitionTimeoutMs; }
+    public static String getGroupCognitionReasoningEffort() { return groupCognitionReasoningEffort; }
+    public static String getGroupCognitionProtocol() { return groupCognitionProtocol; }
+    public static String getGroupCognitionThinkingType() { return groupCognitionThinkingType; }
 
     public static int getWorkingMemoryDefaultExpireHours() {
         return workingMemoryDefaultExpireHours;

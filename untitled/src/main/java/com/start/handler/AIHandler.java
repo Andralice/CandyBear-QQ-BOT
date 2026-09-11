@@ -17,6 +17,9 @@ import com.start.service.ConversationMetrics;
 import com.start.service.ConversationState;
 import com.start.service.GenerationResult;
 import com.start.service.GroupSerialExecutor;
+import com.start.service.GroupCognitionMode;
+import com.start.service.GroupDialogueAnalyzer;
+import com.start.service.GroupDialoguePlan;
 import com.start.service.LinkPreviewService;
 import com.start.service.ProactiveFeedbackDetector;
 import com.start.service.ProactiveInterjectionPolicy;
@@ -76,6 +79,7 @@ public class AIHandler implements MessageHandler {
     private final ConversationInterpreter interpreter;
     private final ConversationRuntime runtime;
     private final ConversationRuntimeConfig config;
+    private final GroupDialogueAnalyzer dialogueAnalyzer;
     /** 长期记忆仓库：rate_limited 时的快速记忆查询用（不调 LLM） */
     private final LongTermMemoryRepository memoryRepo = new LongTermMemoryRepository(DatabaseConfig.getDataSource());
     private final MemoryInterpreter memoryInterpreter = new MemoryInterpreter();
@@ -89,7 +93,10 @@ public class AIHandler implements MessageHandler {
     private final ProactiveInterjectionPolicy proactivePolicy = new ProactiveInterjectionPolicy();
     private final ConcurrentHashMap<String, Long> pendingProactiveIds = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ScheduledFuture<?>> pendingProactiveTasks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> pendingCognitionIds = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ScheduledFuture<?>> pendingCognitionTasks = new ConcurrentHashMap<>();
     private final AtomicLong proactiveSequence = new AtomicLong();
+    private final AtomicLong cognitionSequence = new AtomicLong();
     private final AtomicBoolean coldGroupMonitorStarted = new AtomicBoolean();
     private final ScheduledExecutorService proactiveScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "CandyBear-Proactive-Scheduler");
@@ -97,6 +104,7 @@ public class AIHandler implements MessageHandler {
         return t;
     });
     private static final Logger DECISION_LOGGER = LoggerFactory.getLogger("com.start.decision");
+    private static final Logger COGNITION_LOGGER = LoggerFactory.getLogger("com.start.cognition");
     /** 连续普通消息可与后续触发合并的最大窗口；群环境另由 publicGroupHistory 维护。 */
     private static final long UNTRIGGERED_BUFFER_TTL_MS = 120_000L;
 
@@ -109,6 +117,13 @@ public class AIHandler implements MessageHandler {
 
     public AIHandler(BaiLianService aiService, GroupSerialExecutor groupExecutor, ConversationManager conversationManager,
                      ConversationInterpreter interpreter, ConversationRuntime runtime, ConversationRuntimeConfig config) {
+        this(aiService, groupExecutor, conversationManager, interpreter, runtime, config,
+                GroupDialogueAnalyzer.fromConfig());
+    }
+
+    public AIHandler(BaiLianService aiService, GroupSerialExecutor groupExecutor, ConversationManager conversationManager,
+                     ConversationInterpreter interpreter, ConversationRuntime runtime, ConversationRuntimeConfig config,
+                     GroupDialogueAnalyzer dialogueAnalyzer) {
         this.aiService = aiService;
         this.moodService = aiService.getMoodService();
         this.groupExecutor = groupExecutor;
@@ -116,6 +131,7 @@ public class AIHandler implements MessageHandler {
         this.interpreter = interpreter;
         this.runtime = runtime;
         this.config = config;
+        this.dialogueAnalyzer = dialogueAnalyzer;
     }
 
     @Override
@@ -201,20 +217,40 @@ public class AIHandler implements MessageHandler {
             return;
         }
 
-        // 群聊：先记录原始消息到上下文（WebSocket 线程，无竞争）
+        Long replyId = MessageUtil.extractReplyId(msg.path("message"));
+
+        // 群聊：先记录原始消息及协议层指向信息到上下文（WebSocket 线程，无竞争）
         aiService.recordPublicGroupMessage(
                 String.valueOf(groupId),
                 String.valueOf(userId),
                 senderNick,
                 plainText,
-                messageId
+                messageId,
+                ats,
+                replyId
         );
 
         String gid = String.valueOf(groupId);
         String uid = String.valueOf(userId);
+        GroupCognitionMode cognitionMode = dialogueAnalyzer.modeFor(gid);
 
         // A new group message means an earlier interjection candidate is no longer timely.
         cancelPendingProactive(gid);
+        cancelPendingCognition(gid);
+
+        if (cognitionMode == GroupCognitionMode.SHADOW && !plainText.isBlank()) {
+            List<BaiLianService.PublicMessage> snapshot = aiService.getPublicGroupHistorySnapshot(gid, 12);
+            dialogueAnalyzer.analyzeAsync(snapshot).whenComplete((plan, error) -> {
+                recordShadowCognition(gid, uid, messageId, plainText, plan, error);
+                if (error != null) {
+                    COGNITION_LOGGER.warn("shadow gid={} uid={} msg={} failed={}",
+                            gid, uid, messageId, error.getClass().getSimpleName());
+                } else {
+                    COGNITION_LOGGER.info("shadow gid={} uid={} msg={} {}",
+                            gid, uid, messageId, plan.compactSummary());
+                }
+            });
+        }
 
         if (isNegativeFeedbackForRecentProactive(gid, plainText, ats)) {
             interpreter.setNegativeCooldown(gid, NEGATIVE_FEEDBACK_COOLDOWN_MS);
@@ -230,8 +266,6 @@ public class AIHandler implements MessageHandler {
                 moodService.onMentioned(gid);
             }
         }
-
-        Long replyId = MessageUtil.extractReplyId(msg.path("message"));
 
         // 用户短期连续消息保留在临时缓冲中；超过 120 秒、且从未提交给 AI 的缓冲
         // 会在这里自动替换。群内环境仍由独立的 publicGroupHistory/SceneState 记录。
@@ -287,6 +321,27 @@ public class AIHandler implements MessageHandler {
         boolean imageFollowUp = !imageInfos.isEmpty() && result.isNothing()
                 && aiService.isWithinFollowUpWindow(gid, uid);
 
+        // Keep protocol/direct and explicit await behavior intact. ENFORCE only replaces
+        // the heuristic path for ordinary text continuations and proactive candidates.
+        if (cognitionMode.controlsOrdinaryTriggers()
+                && !plainText.isBlank()
+                && !imageFollowUp
+                && !result.isDirect()
+                && result.event() != ConversationEvent.AWAIT_REPLY) {
+            scheduleCognitionDecision(bot, groupId, gid, uid, nickname, ats, plainText,
+                    conv, result);
+            return;
+        }
+
+        handleLegacyDecision(bot, groupId, gid, uid, nickname, ats, plainText,
+                conv, result, imageFollowUp, null);
+    }
+
+    /** Existing trigger/rate-limit/generation path, also used as cognition failure fallback. */
+    private void handleLegacyDecision(Main bot, long groupId, String gid, String uid, String nickname,
+                                      List<Long> ats, String plainText, ConversationState conv,
+                                      ConversationInterpreter.InterpretResult result, boolean imageFollowUp,
+                                      GroupDialoguePlan dialoguePlan) {
         if (result.isNothing() && !imageFollowUp) {
             logDecision(gid, uid, "NOTHING", "SILENT", "no_trigger", 0, 0, 0);
             return;
@@ -308,26 +363,29 @@ public class AIHandler implements MessageHandler {
         }
 
         long now = System.currentTimeMillis();
+        boolean bypassReplyCooldown = bypassesReplyCooldown(result.event());
 
-        // 速率限制（PASSIVE_TRIGGER 可以绕过）
+        // 明确的认知续聊与显式 @ 语义相同：已有话权时不能被主动插话冷却误杀。
         boolean rateLimited = false;
-        if (result.event() != ConversationEvent.PASSIVE_TRIGGER && !imageFollowUp) {
+        if (!bypassReplyCooldown && result.event() != ConversationEvent.PASSIVE_TRIGGER && !imageFollowUp) {
             rateLimited = !aiService.canReact(gid);
         }
 
         // 群级冷却
-        long groupCooldown = config.groupReplyCooldown().toMillis();
-        Long lastGroupReply = lastGroupReplyTime.get(gid);
-        if (lastGroupReply != null && now - lastGroupReply < groupCooldown) {
-            rateLimited = true;
-        }
+        if (!bypassReplyCooldown) {
+            long groupCooldown = config.groupReplyCooldown().toMillis();
+            Long lastGroupReply = lastGroupReplyTime.get(gid);
+            if (lastGroupReply != null && now - lastGroupReply < groupCooldown) {
+                rateLimited = true;
+            }
 
-        // 用户冷却
-        long userCooldown = config.userReplyCooldown().toMillis();
-        String userKey = gid + "_" + userId;
-        Long last = lastReactionTime.get(userKey);
-        if (last != null && now - last < userCooldown) {
-            rateLimited = true;
+            // 用户冷却
+            long userCooldown = config.userReplyCooldown().toMillis();
+            String userKey = gid + "_" + uid;
+            Long last = lastReactionTime.get(userKey);
+            if (last != null && now - last < userCooldown) {
+                rateLimited = true;
+            }
         }
 
         if (rateLimited) {
@@ -369,7 +427,8 @@ public class AIHandler implements MessageHandler {
         conv.markSubmitted();
         boolean allowSilence = result.event().allowsSilence();
         long startMs = System.currentTimeMillis();
-        runGroupConversation(bot, groupId, gid, uid, nickname, ats, allowSilence, startMs, result.event());
+        runGroupConversation(bot, groupId, gid, uid, nickname, ats, allowSilence, startMs,
+                result.event(), dialoguePlan);
     }
 
     private void logDecision(String gid, String uid, String eventType, String decision,
@@ -379,6 +438,10 @@ public class AIHandler implements MessageHandler {
         DECISION_LOGGER.info(trace.toLogLine());
         WebDashboardListener.recordDecision(gid, uid, eventType, decision, reason,
                 toolCalls, tokensUsed, latencyMs);
+    }
+
+    static boolean bypassesReplyCooldown(ConversationEvent event) {
+        return event == ConversationEvent.COGNITIVE_CONTINUE;
     }
 
     private void scheduleProactiveReply(Main bot, long groupId, String gid, String uid, String nickname,
@@ -417,6 +480,132 @@ public class AIHandler implements MessageHandler {
         pendingProactiveIds.remove(gid);
         ScheduledFuture<?> task = pendingProactiveTasks.remove(gid);
         if (task != null) task.cancel(false);
+    }
+
+    private void cancelPendingCognition(String gid) {
+        pendingCognitionIds.remove(gid);
+        ScheduledFuture<?> task = pendingCognitionTasks.remove(gid);
+        if (task != null) task.cancel(false);
+    }
+
+    /** Debounces ordinary group traffic, then lets the two cognition tasks run in parallel. */
+    private void scheduleCognitionDecision(Main bot, long groupId, String gid, String uid, String nickname,
+                                           List<Long> ats, String plainText, ConversationState conv,
+                                           ConversationInterpreter.InterpretResult legacyResult) {
+        long candidateId = cognitionSequence.incrementAndGet();
+        long expectedRevision = conv.getMessageRevision();
+        pendingCognitionIds.put(gid, candidateId);
+
+        ScheduledFuture<?> task = proactiveScheduler.schedule(() -> {
+            if (pendingCognitionIds.getOrDefault(gid, -1L) != candidateId) return;
+            List<BaiLianService.PublicMessage> snapshot = aiService.getPublicGroupHistorySnapshot(gid, 12);
+            if (snapshot.isEmpty()) return;
+            String expectedLatestMessageId = latestHumanMessageId(snapshot);
+            long started = System.currentTimeMillis();
+            try {
+                dialogueAnalyzer.analyzeAsync(snapshot).whenComplete((plan, error) ->
+                        groupExecutor.execute(gid, () -> completeCognitionDecision(
+                                bot, groupId, gid, uid, nickname, ats, plainText, conv, legacyResult,
+                                candidateId, expectedRevision, expectedLatestMessageId, started, plan, error)));
+            } catch (Throwable error) {
+                groupExecutor.execute(gid, () -> completeCognitionDecision(
+                        bot, groupId, gid, uid, nickname, ats, plainText, conv, legacyResult,
+                        candidateId, expectedRevision, expectedLatestMessageId, started, null, error));
+            }
+        }, PROACTIVE_SETTLE_MS, TimeUnit.MILLISECONDS);
+        pendingCognitionTasks.put(gid, task);
+    }
+
+    private void completeCognitionDecision(Main bot, long groupId, String gid, String uid, String nickname,
+                                           List<Long> ats, String plainText, ConversationState conv,
+                                           ConversationInterpreter.InterpretResult legacyResult,
+                                           long candidateId, long expectedRevision, String expectedLatestMessageId,
+                                           long started, GroupDialoguePlan plan, Throwable error) {
+        if (!pendingCognitionIds.remove(gid, candidateId)) return;
+        pendingCognitionTasks.remove(gid);
+
+        ConversationState current = conversationManager.get(gid, uid);
+        List<BaiLianService.PublicMessage> latestSnapshot = aiService.getPublicGroupHistorySnapshot(gid, 12);
+        boolean sameLatestMessage = expectedLatestMessageId.equals(latestHumanMessageId(latestSnapshot));
+        if (current == null || current != conv || current.getMessageRevision() != expectedRevision
+                || !sameLatestMessage) {
+            logDecision(gid, uid, "COGNITION", "SILENT", "stale_candidate", 0, 0,
+                    System.currentTimeMillis() - started);
+            return;
+        }
+
+        if (error != null || plan == null) {
+                COGNITION_LOGGER.warn("enforce fallback gid={} uid={} reason=analysis_failed", gid, uid);
+                handleLegacyDecision(bot, groupId, gid, uid, nickname, ats, plainText,
+                        conv, legacyResult, false, null);
+                return;
+        }
+
+        COGNITION_LOGGER.info("enforce gid={} uid={} {}", gid, uid, plan.compactSummary());
+        if (!plan.shouldReply()) {
+            logDecision(gid, uid, "COGNITION", "SILENT", "parallel_observer",
+                    0, plan.tokensUsed(), System.currentTimeMillis() - started);
+            return;
+        }
+
+        ConversationEvent event = plan.entryRole() == GroupDialoguePlan.EntryRole.SECOND_PERSON
+                ? ConversationEvent.COGNITIVE_CONTINUE
+                : ConversationEvent.COGNITIVE_INTERJECTION;
+        if (event == ConversationEvent.COGNITIVE_INTERJECTION) {
+            ConversationMetrics.Snapshot metrics = aiService.getConversationMetrics() != null
+                    ? aiService.getConversationMetrics().getSnapshot(gid)
+                    : ConversationMetrics.Snapshot.EMPTY;
+            if (!proactivePolicy.remainsAppropriate(metrics, interpreter.isNegativeCooldown(gid))) {
+                logDecision(gid, uid, event.name(), "SILENT", "interjection_guard",
+                        0, plan.tokensUsed(), System.currentTimeMillis() - started);
+                return;
+            }
+        }
+
+        ConversationInterpreter.InterpretResult cognitiveResult =
+                ConversationInterpreter.InterpretResult.of(event, plainText);
+        handleLegacyDecision(bot, groupId, gid, uid, nickname, ats, plainText,
+                conv, cognitiveResult, false, plan);
+    }
+
+    /** Persist shadow outcomes for sampling and aggregate reports; this never changes routing or replies. */
+    private void recordShadowCognition(String gid, String uid, String messageId, String plainText,
+                                       GroupDialoguePlan plan, Throwable error) {
+        try {
+            if (aiService.getAiDatabaseService() == null) return;
+            String decision;
+            String reason;
+            if (error != null || plan == null) {
+                decision = "SHADOW_ERROR";
+                reason = "message_id=" + messageId + ";error=" + errorSummary(error);
+            } else {
+                decision = plan.shouldReply() ? "SHADOW_REPLY" : "SHADOW_SILENT";
+                reason = "message_id=" + messageId + ";" + plan.compactSummary();
+            }
+            aiService.getAiDatabaseService().logActiveReplyDecision(
+                    gid, uid, plainText, decision, reason, "");
+        } catch (Exception e) {
+            COGNITION_LOGGER.debug("shadow audit persistence skipped gid={} msg={}: {}",
+                    gid, messageId, e.getMessage());
+        }
+    }
+
+    private static String errorSummary(Throwable error) {
+        if (error == null) return "unknown";
+        Throwable current = error;
+        while (current.getCause() != null) current = current.getCause();
+        String message = current.getMessage();
+        return current.getClass().getSimpleName() + (message == null ? "" : ":" + message);
+    }
+
+    private static String latestHumanMessageId(List<BaiLianService.PublicMessage> messages) {
+        if (messages == null) return "";
+        String botId = String.valueOf(BotConfig.getBotQq());
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            BaiLianService.PublicMessage message = messages.get(i);
+            if (!botId.equals(message.userId)) return message.messageId;
+        }
+        return "";
     }
 
     private boolean canStartReaction(String gid, String uid) {
@@ -490,9 +679,25 @@ public class AIHandler implements MessageHandler {
     /** 从 ConversationState 读取累积消息，生成回复并发送。在 executor 线程中执行。 */
     private void runGroupConversation(Main bot, long groupId, String gid, String userId, String nickname,
                                        List<Long> ats, boolean allowSilence, long startMs, ConversationEvent event) {
+        runGroupConversation(bot, groupId, gid, userId, nickname, ats, allowSilence, startMs, event, null);
+    }
+
+    private void runGroupConversation(Main bot, long groupId, String gid, String userId, String nickname,
+                                      List<Long> ats, boolean allowSilence, long startMs, ConversationEvent event,
+                                      GroupDialoguePlan precomputedPlan) {
         groupExecutor.execute(gid, () -> {
             ConversationState state = conversationManager.get(gid, userId);
             if (state == null || !state.hasContent()) return;
+
+            GroupDialoguePlan dialoguePlan = precomputedPlan;
+            GroupCognitionMode cognitionMode = dialogueAnalyzer.modeFor(gid);
+            if (dialoguePlan == null && cognitionMode.injectsPerspective()) {
+                dialoguePlan = dialogueAnalyzer.analyze(aiService.getPublicGroupHistorySnapshot(gid, 12));
+                if (dialoguePlan != null) {
+                    COGNITION_LOGGER.info("assist gid={} uid={} event={} {}",
+                            gid, userId, event, dialoguePlan.compactSummary());
+                }
+            }
 
             long startRevision = state.getMessageRevision();
             int startMsgCount = state.getPendingMessages().size();
@@ -568,6 +773,8 @@ public class AIHandler implements MessageHandler {
                         .excludedPublicMessageIds(state.getPendingMessageIds().stream()
                                 .filter(id -> id != null && !id.isBlank())
                                 .collect(java.util.stream.Collectors.toSet()))
+                        .dialoguePlan(dialoguePlan)
+                        .imageDataUris(Collections.emptyList())
                         .startMs(startMs)
                         .build();
 
@@ -617,7 +824,10 @@ public class AIHandler implements MessageHandler {
                 boolean delivered = sendSplitGroupReplies(bot, groupId, reply, groupSessionId);
                 if (delivered) {
                     recordDeliveredReaction(gid, userId);
-                    if (event == ConversationEvent.PROBABILISTIC) recordProactiveDelivery(gid);
+                    if (event == ConversationEvent.PROBABILISTIC
+                            || event == ConversationEvent.COGNITIVE_INTERJECTION) {
+                        recordProactiveDelivery(gid);
+                    }
                     aiService.commitGeneration(groupSessionId, String.valueOf(userId),
                             state.getMergedText(), reply, gid);
                     if (moodService != null) moodService.onBotSpeak(gid);
@@ -630,7 +840,10 @@ public class AIHandler implements MessageHandler {
                 boolean delivered = bot.sendGroupReply(groupId, "刚刚走神了，再说一遍？", groupSessionId);
                 if (delivered) {
                     recordDeliveredReaction(gid, userId);
-                    if (event == ConversationEvent.PROBABILISTIC) recordProactiveDelivery(gid);
+                    if (event == ConversationEvent.PROBABILISTIC
+                            || event == ConversationEvent.COGNITIVE_INTERJECTION) {
+                        recordProactiveDelivery(gid);
+                    }
                 }
                 logDecision(gid, userId, allowSilence ? "PROBABILISTIC" : "OTHER",
                         delivered ? "REPLY" : "SILENT", delivered ? "fallback" : "send_failed",
@@ -794,7 +1007,8 @@ public class AIHandler implements MessageHandler {
                 bot.attachInboundImageData("private", null, userId,
                         originalMsg.path("message_id").asText(), buildImageDataJson(imageInfos, imageDesc));
             }
-            String reply = aiService.generate(sessionId, userId, fullPrompt, groupId, nickname, atUserIds);
+            String reply = aiService.generate(sessionId, userId, fullPrompt, groupId, nickname, atUserIds,
+                    Collections.emptyList());
 
             if (reply == null || reply.trim().isEmpty()) {
                 bot.sendReply(originalMsg, "稍等一下，我在走神...", sessionId);

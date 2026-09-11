@@ -44,7 +44,7 @@ import java.util.regex.Pattern;
  *     <li>支持管理员通过 {@link com.start.agent.StickerAdminTool} 覆盖关键词</li>
  * </ul>
  *
- * <p>关键词来源：先由 LLM 基于 Vision 描述转译（auto_keywords），管理员可覆盖（keywords 字段）。
+ * <p>关键词来源：由视觉模型直接提取发送场景情绪词（auto_keywords），管理员可覆盖（keywords 字段）。
  * StickerTool 检索时优先用 keywords，回退到 auto_keywords，最后回退到 face 表情。
  *
  * <p>存储位置（相对运行目录）：
@@ -56,6 +56,12 @@ import java.util.regex.Pattern;
 public final class StickerIngestService {
 
     private static final Logger logger = LoggerFactory.getLogger(StickerIngestService.class);
+
+    private static final Set<String> EMOTION_KEYWORDS = Set.of(
+            "开心", "笑", "哈哈", "无语", "哭", "难过", "生气", "怒", "安慰", "加油", "得意", "嘲讽",
+            "震惊", "惊讶", "吃瓜", "嫌弃", "尴尬", "害羞", "滑稽", "崩溃", "委屈", "比心", "笑哭", "裂开",
+            "可爱", "萌", "高冷", "治愈", "调皮", "害怕", "困", "累", "饿", "懵", "问号", "再见", "OK",
+            "谢谢", "偷笑", "白眼", "打死你", "赞", "厉害", "牛", "爱", "喜欢");
 
     private static volatile StickerIngestService instance;
 
@@ -239,7 +245,7 @@ public final class StickerIngestService {
      * @param groupId 群号（私聊时为 null）
      * @param userId 发送者
      * @param imageUrl OneBot 给的图片 URL
-     * @param description Vision 模型的描述文本
+     * @param description 视觉模型返回的分类 JSON
      */
     public void ingestAsync(String groupId, String userId, String imageUrl, String description) {
         if (imageUrl == null || imageUrl.isBlank()) return;
@@ -259,7 +265,8 @@ public final class StickerIngestService {
                     return;
                 }
                 boolean isGif = isGifMagic(bytes, imageUrl);
-                processSticker(bytes, imageUrl, descFinal, isGif, groupId);
+                ClassificationResult cls = parseClassification(descFinal);
+                processSticker(bytes, imageUrl, cls == null ? "" : cls.description, cls, isGif, groupId);
             } catch (Exception e) {
                 logger.warn("表情包入库失败: url={}, err={}", imageUrl, e.getMessage());
             }
@@ -269,8 +276,7 @@ public final class StickerIngestService {
     /**
      * 独立 harvest 路径：消息接收阶段就触发，自己做下载 + vision + 入库。
      * 不依赖 conversation 是否被唤醒，速率限制/无关键 prompt 也能入库。
-     * 入库决策由 LLM 决定（classifyWithLLM 判 isSticker + 抽关键词），
-     * vision 看到的：静图=原图；GIF=多帧采样（让 vision 看到动图过程）。
+     * 视觉模型一次完成判定、情绪关键词和审计描述；静图传原图，GIF 传多帧采样。
      */
     public void harvestFromUrl(String groupId, String userId, String imageUrl) {
         if (imageUrl == null || imageUrl.isBlank()) return;
@@ -286,42 +292,25 @@ public final class StickerIngestService {
                     return;
                 }
                 boolean isGif = isGifMagic(bytes, imageUrl);
-                String desc;
+                List<String> imageDataUris = new ArrayList<>();
                 if (baiLianService == null) {
-                    desc = "[vision 未配置]";
+                    logger.debug("[harvest] vision 未配置，跳过表情包分类");
                 } else if (isGif) {
-                    // GIF: 抽 3 帧（开始/中/末），给 vision 看动图过程
                     try {
-                        List<String> frameUris = extractGifFrameDataUris(bytes, 3);
-                        if (frameUris.isEmpty()) {
-                            desc = "GIF 帧抽取失败（Java ImageIO 不支持）";
-                        } else {
-                            desc = baiLianService.describeImages(frameUris);
-                            logger.debug("[harvest] GIF 抽 {} 帧调 vision", frameUris.size());
-                        }
+                        imageDataUris = extractGifFrameDataUris(bytes, 3);
+                        logger.debug("[harvest] GIF 抽 {} 帧，单次请求完成分类", imageDataUris.size());
                     } catch (Exception e) {
-                        logger.debug("[harvest] GIF 帧抽取/vision 失败: {}", e.getMessage());
-                        desc = "[GIF 视觉识别失败]";
+                        logger.debug("[harvest] GIF 帧抽取失败: {}", e.getMessage());
                     }
                 } else {
-                    // 静图：先查 vision 缓存
-                    String cached = visionCacheGet(imageUrl);
-                    if (cached != null) {
-                        desc = cached;
-                    } else {
-                        try {
-                            String mime = guessMime(bytes);
-                            String base64 = "data:" + mime + ";base64," + Base64.getEncoder().encodeToString(bytes);
-                            desc = baiLianService.describeImages(List.of(base64));
-                            if (desc != null && !desc.isBlank()) visionCachePut(imageUrl, desc);
-                        } catch (Exception e) {
-                            logger.debug("[harvest] vision 描述失败: {}", e.getMessage());
-                            desc = "[视觉识别失败]";
-                        }
-                    }
+                    String mime = guessMime(bytes);
+                    imageDataUris = List.of("data:" + mime + ";base64," + Base64.getEncoder().encodeToString(bytes));
                 }
-                // 入库决策由 processSticker 内部 LLM 决定
-                processSticker(bytes, imageUrl, desc, isGif, groupId);
+                String json = baiLianService == null ? "" : baiLianService.classifyStickerImages(imageDataUris);
+                ClassificationResult cls = parseClassification(json);
+                String desc = cls == null ? "" : cls.description;
+                if (desc != null && !desc.isBlank()) visionCachePut(imageUrl, desc);
+                processSticker(bytes, imageUrl, desc, cls, isGif, groupId);
             } catch (Exception e) {
                 logger.warn("[harvest] 表情包入库失败: url={}, err={}", imageUrl, e.getMessage());
             }
@@ -363,25 +352,13 @@ public final class StickerIngestService {
 
     // ===== 内部实现 =====
 
-    /**
-     * 入库核心：拿到已下载 bytes + desc + isGif 后做判断、抽词、dedup、落盘。
-     * ingestAsync（已带 desc）和 harvestFromUrl（自己做 vision）共用。
-     */
-    private void processSticker(byte[] bytes, String imageUrl, String description, boolean isGif, String groupId) {
-        // LLM 综合判断：isSticker + 关键词（一次调用搞定）
-        // 不再用 magic byte 兜底——入库决策完全交给 LLM。
-        // vision 已对 GIF 抽多帧（首/中/末），LLM 看到的描述含动图过程，能正确判别。
-        ClassificationResult cls = classifyWithLLM(description);
-        if (cls == null || !cls.isSticker) {
+    /** 入库核心：分类结果已由同一次视觉请求生成，这里只做白名单过滤、去重和落盘。 */
+    private void processSticker(byte[] bytes, String imageUrl, String description, ClassificationResult cls,
+                                boolean isGif, String groupId) {
+        List<String> autoKeywords = cls == null ? List.of() : normalizeStickerKeywords(cls.keywords);
+        if (cls == null || !cls.isSticker || autoKeywords.isEmpty()) {
             logger.debug("LLM 判断非表情包: desc={} → 跳过", abbreviate(description, 60));
             return;
-        }
-        List<String> autoKeywords = cls.keywords;
-        if (autoKeywords == null || autoKeywords.isEmpty()) {
-            autoKeywords = new ArrayList<>(Arrays.asList("表情包"));
-        }
-        if (isGif && !autoKeywords.contains("动图")) {
-            autoKeywords.add("动图");
         }
 
         // 算 MD5 做 dedup
@@ -439,106 +416,6 @@ public final class StickerIngestService {
         return false;
     }
 
-    /**
-     * 从 vision 描述里抽 2-6 字的中文词作为关键词（GIF 强制入库时用）。
-     * 不调用 LLM——GIF 已经过 magic byte 兜底，关键词从 desc 简单切片即可。
-     * 过滤掉反义前缀（无/没/不/别/不要/不是）和数字主导的 token。
-     */
-    private static List<String> extractKeywordsFromDescription(String desc) {
-        List<String> out = new ArrayList<>();
-        if (desc == null || desc.isBlank()) return out;
-        String[] tokens = desc.split("[，。、\\s,.;；:：]+");
-        for (String t : tokens) {
-            t = t.trim();
-            if (t.length() < 2 || t.length() > 6) continue;
-            // 跳过反义前缀
-            if (t.startsWith("无") || t.startsWith("没") || t.startsWith("不")
-                    || t.startsWith("别") || t.startsWith("不要") || t.startsWith("不是")
-                    || t.startsWith("非") || t.startsWith("未")) {
-                continue;
-            }
-            // 跳过明显不是关键词的前缀
-            if (t.startsWith("图片") || t.startsWith("用户") || t.startsWith("内容")) {
-                continue;
-            }
-            // 必须含至少一个中文字
-            boolean hasChinese = false;
-            for (int i = 0; i < t.length(); i++) {
-                char c = t.charAt(i);
-                if (c >= 0x4E00 && c <= 0x9FA5) { hasChinese = true; break; }
-            }
-            if (!hasChinese) continue;
-            out.add(t);
-            if (out.size() >= 4) break;
-        }
-        return out;
-    }
-
-    /**
-     * LLM 综合判断：是不是表情包 + 提取情绪关键词。一次调用搞定。
-     * 返回 null 表示调用/解析失败（保守：不入库）。
-     */
-    private ClassificationResult classifyWithLLM(String description) {
-        if (baiLianService == null || description == null || description.isBlank()) {
-            return null;
-        }
-        try {
-            String prompt = "你看到一张图片的描述（来自 Vision 模型）。这张图可能含 1-3 张帧（GIF 动图被拆成多帧）：\n「"
-                    + description + "」\n\n"
-                    + "请判断用户会不会愿意把这张图存下来、转发给朋友（true/false），并给 3-5 个中文关键词。\n\n"
-                    + "【判断标准：用户想转发吗？】\n"
-                    + "✓ 表情包/梗图/可二次使用：\n"
-                    + "  - 可爱动物（萌宠日常、可爱情态、有趣表情）—— 猫狗兔鼠鸟都算\n"
-                    + "  - 搞笑动作、夸张情绪、反差萌、蠢萌\n"
-                    + "  - 图上有文字 + 可爱/有趣/反差（meme 图、表情包制作、流行梗图）\n"
-                    + "  - 二次元、卡通表情、cosplay、拟人化\n"
-                    + "  - 任何让人'看到就想存下来'的图\n\n"
-                    + "✗ 不是表情包（用户不会想转发）：\n"
-                    + "  - 风景照、证件照、产品照、新闻图\n"
-                    + "  - 监控录像、纯文字截图、表格数据\n"
-                    + "  - 严肃/负面场景（车祸、灾难、手术现场）\n\n"
-                    + "⚠ 边界：可爱动物照 = 默认是表情包（用户会存）；普通动物照（无情绪/不可爱） = 看是否有'传播性'\n\n"
-                    + "【多帧 GIF 特别说明】\n"
-                    + "如果是 GIF（看到'图片1/2/3内容'），把帧序列当作'动图'整体评估——看动图在表达什么，不是单帧。\n"
-                    + "例：白猫背对→转头→面对镜头  → 拟人化'高冷转身' = 表情包\n"
-                    + "   狗在跑→跑→跑             → 单一动作 = 看是否'可爱/有趣'\n\n"
-                    + "【关键词】只输出情绪/场景词 3-5 个（不写'内容词'）：开心、无语、哭、安慰、加油、得意、嘲讽、震惊、吃瓜、嫌弃、尴尬、害羞、滑稽、崩溃、委屈、比心、笑哭、裂开、可爱、萌、高冷、治愈、调皮、害怕、困、累、饿、困、生气、懵、问号、再见、OK、谢谢、偷笑、白眼、打死你。\n"
-                    + "⚠ 不要写'白猫/戴眼镜/熊猫头/二次元'这种纯描述图片内容本身的词——别人不会用内容词搜表情包，只会用情绪词搜。\n"
-                    + "调用方用情绪词（如'开心'、'懵'、'生气'、'打死你'）搜表情包入库的关键词，匹配不到情绪词的表情包就永远发不出去。\n\n"
-                    + "只输出一个 JSON 对象，格式：{\"isSticker\": true, \"keywords\": [\"开心\",\"懵\"]}\n"
-                    + "不要输出其他内容、不要解释、不要带 Markdown 代码块。";
-            String response = baiLianService.generateRaw(prompt);
-            return parseClassification(response);
-        } catch (Exception e) {
-            logger.debug("LLM 分类失败: {}", e.getMessage());
-            return null;
-        }
-    }
-
-    /**
-     * GIF 专用：只让 LLM 抽关键词，不问 isSticker（GIF 已经过 magic byte 强制入库）。
-     * 返回空列表表示调用/解析失败。
-     */
-    private List<String> extractKeywordsByLlm(String description) {
-        if (baiLianService == null || description == null || description.isBlank()) {
-            return List.of();
-        }
-        try {
-            String prompt = "你看到一张图片的描述（来自 Vision 模型）。这张图已经被认为是 GIF 动图表情包：\n「"
-                    + description + "」\n\n"
-                    + "请基于描述内容，给 3-5 个中文使用情绪/场景关键词（如：开心/无语/哭/安慰/加油/得意/嘲讽/震惊/吃瓜/嫌弃/尴尬/害羞/滑稽/崩溃/委屈/比心/笑哭/裂开/可爱/萌/高冷/治愈）。\n"
-                    + "关键词要适合在群里搜到这张图时使用——别人会搜什么词。\n\n"
-                    + "只输出一个 JSON 对象，格式：{\"keywords\": [\"开心\",\"无语\"]}\n"
-                    + "不要输出其他内容、不要解释、不要带 Markdown 代码块。";
-            String response = baiLianService.generateRaw(prompt);
-            ClassificationResult r = parseClassification(response);
-            return r == null ? List.of() : r.keywords;
-        } catch (Exception e) {
-            logger.debug("LLM 抽关键词失败: {}", e.getMessage());
-            return List.of();
-        }
-    }
-
     private ClassificationResult parseClassification(String text) {
         if (text == null || text.isBlank()) return null;
         try {
@@ -558,6 +435,20 @@ public final class StickerIngestService {
             logger.debug("LLM 分类 JSON 解析失败: {} | text={}", e.getMessage(), abbreviate(text, 100));
             return null;
         }
+    }
+
+    static List<String> normalizeStickerKeywords(List<String> rawKeywords) {
+        List<String> normalized = new ArrayList<>();
+        if (rawKeywords == null) return normalized;
+        for (String raw : rawKeywords) {
+            if (raw == null) continue;
+            String keyword = raw.trim();
+            if (EMOTION_KEYWORDS.contains(keyword) && !normalized.contains(keyword)) {
+                normalized.add(keyword);
+            }
+            if (normalized.size() >= 5) break;
+        }
+        return normalized;
     }
 
     private String guessExtension(String url, byte[] bytes) {
@@ -771,9 +662,10 @@ public final class StickerIngestService {
         public List<String> keywords;
     }
 
-    /** LLM 综合判断结果：isSticker + 关键词。 */
+    /** 视觉模型综合判断结果：入库标记、情绪关键词和审计描述。 */
     public static class ClassificationResult {
         public boolean isSticker;
         public List<String> keywords = new ArrayList<>();
+        public String description;
     }
 }

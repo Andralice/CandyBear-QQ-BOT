@@ -199,6 +199,9 @@ public class DatabaseConfig {
                 "INDEX idx_arl_group (group_id)," +
                 "INDEX idx_arl_decision (decision)" +
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+            // Existing installations may have created this column as VARCHAR(100);
+            // shadow cognition summaries are intentionally longer and must be retained.
+            "ALTER TABLE active_reply_logs MODIFY COLUMN decision_reason TEXT",
 
             // 核心表
             "CREATE TABLE IF NOT EXISTS long_term_memories (" +

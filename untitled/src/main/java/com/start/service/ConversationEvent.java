@@ -17,6 +17,10 @@ public enum ConversationEvent {
     AWAIT_REPLY,
     /** 概率性主动插话（唯一允许 NO_REPLY 的事件） */
     PROBABILISTIC,
+    /** 并行认知确认糖果熊拥有下一轮话权 */
+    COGNITIVE_CONTINUE,
+    /** 并行认知确认可作为第三人提供高价值帮助 */
+    COGNITIVE_INTERJECTION,
     /** 无需处理 */
     NOTHING;
 

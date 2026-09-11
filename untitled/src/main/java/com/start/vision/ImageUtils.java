@@ -6,12 +6,14 @@ import org.slf4j.LoggerFactory;
 import javax.imageio.ImageIO;
 import java.awt.*;
 import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
+import java.net.URLConnection;
 import java.util.Base64;
 
 public class ImageUtils {
@@ -88,12 +90,47 @@ public class ImageUtils {
     public static String downloadImageAsBase64DataUri(String imageUrl) {
         byte[] bytes = downloadImageBytes(imageUrl);
         if (bytes == null || bytes.length == 0) return null;
-        String mime = detectMimeType(imageUrl);
+        String mime = detectMimeType(bytes, imageUrl);
         String b64 = Base64.getEncoder().encodeToString(bytes);
         return "data:" + mime + ";base64," + b64;
     }
 
-    private static String detectMimeType(String url) {
+    static String detectMimeType(byte[] bytes, String url) {
+        if (bytes != null) {
+            if (bytes.length >= 3 && bytes[0] == 'G' && bytes[1] == 'I' && bytes[2] == 'F') {
+                return "image/gif";
+            }
+            if (bytes.length >= 8
+                    && (bytes[0] & 0xFF) == 0x89 && bytes[1] == 'P' && bytes[2] == 'N'
+                    && bytes[3] == 'G' && (bytes[4] & 0xFF) == 0x0D && (bytes[5] & 0xFF) == 0x0A
+                    && (bytes[6] & 0xFF) == 0x1A && (bytes[7] & 0xFF) == 0x0A) {
+                return "image/png";
+            }
+            if (bytes.length >= 3
+                    && (bytes[0] & 0xFF) == 0xFF && (bytes[1] & 0xFF) == 0xD8
+                    && (bytes[2] & 0xFF) == 0xFF) {
+                return "image/jpeg";
+            }
+            if (bytes.length >= 12
+                    && bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F'
+                    && bytes[8] == 'W' && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P') {
+                return "image/webp";
+            }
+            if (bytes.length >= 2 && bytes[0] == 'B' && bytes[1] == 'M') {
+                return "image/bmp";
+            }
+            try (InputStream input = new ByteArrayInputStream(bytes)) {
+                String detected = URLConnection.guessContentTypeFromStream(input);
+                if (detected != null && detected.startsWith("image/")) return detected;
+            } catch (IOException ignored) {
+                // fall back to URL suffix below
+            }
+        }
+        return detectMimeTypeFromUrl(url);
+    }
+
+    private static String detectMimeTypeFromUrl(String url) {
+        if (url == null) return "image/jpeg";
         String lower = url.toLowerCase();
         if (lower.contains(".png")) return "image/png";
         if (lower.contains(".gif")) return "image/gif";

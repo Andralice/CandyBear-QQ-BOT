@@ -29,6 +29,7 @@ public class SearchHistoryTool implements Tool {
     @Override public String getDescription() {
         return "搜索群聊历史记录（包括AI提炼的记忆和原始消息）。支持任意时间范围。" +
                "当用户问'刚才谁说了XXX''今天大家聊了什么''昨天XX说过什么''上周有没有人提过XXX'时调用。" +
+               "当用户追问'你之前/刚才为什么这么做''之前和某人说话为什么没有查某表'时也必须调用，先还原原始对话和糖果熊当时的回复；此类问题不能用 query_memory（它只记录糖果熊自己的操作）代替。" +
                "也用于你不知道对方在说什么、不确定上下文、刚重启需要回顾最近消息时——不填 keyword 即可获取最近聊天记录。" +
                "参数：keyword(搜索关键词), user_id(指定某人QQ), count(返回条数，默认10), " +
                "date_from(起始日期，格式yyyy-MM-dd，如2026-06-05。查今天/昨天/某天时必填，否则只能扫到全表最近N条，无法区分日期), " +

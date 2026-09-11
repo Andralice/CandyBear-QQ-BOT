@@ -26,6 +26,7 @@ import com.start.agent.SendGroupTool;
 import com.start.agent.SendPrivateTool;
 import com.start.agent.SendStatusTool;
 import com.start.agent.social.UserAffinityTool;
+import com.start.agent.social.UserProfileTool;
 import com.start.agent.WebSearchTool;
 import com.start.agent.EggGroupSearchTool;
 import com.start.agent.EstablishFactTool;
@@ -210,10 +211,12 @@ public class BaiLianService {
     private final String bailianChatModel = BotConfig.getBaiLianChatModel();
     private final int bailianTimeoutMs = BotConfig.getBaiLianTimeoutMs();
     private final int bailianMaxRetries = BotConfig.getBaiLianMaxRetries();
+    private final String baiLianReasoningEffort = BotConfig.getBaiLianReasoningEffort();
 
     private final String agentApiKey = BotConfig.getAgentApiKey();
     private final String agentBaseUrl = BotConfig.getAgentBaseUrl();
     private final String agentModel = BotConfig.getAgentModel();
+    private final String agentReasoningEffort = BotConfig.getAgentReasoningEffort();
 
     private final int agentTimeoutMs = BotConfig.getAgentTimeoutMs();
     private final int agentMaxRetries = BotConfig.getAgentMaxRetries();
@@ -458,6 +461,30 @@ public class BaiLianService {
         }
     }
 
+    /** 将 OneBot 已解析出的 @ 用户与正文重新拼成模型可读的上下文。 */
+    private String buildAtMentionContext(String prompt, List<Long> atUserIds,
+                                         Map<String, String> groupMembers) {
+        if (atUserIds == null || atUserIds.isEmpty()) return "";
+
+        StringBuilder sb = new StringBuilder("【本条消息的 @ 信息】");
+        sb.append("\n正文（@ 用户段已从正文中分离）：").append(prompt == null ? "" : prompt);
+        sb.append("\n本条消息实际 @ 的用户：");
+        Set<Long> unique = new LinkedHashSet<>(atUserIds);
+        boolean first = true;
+        for (Long qq : unique) {
+            if (qq == null) continue;
+            if (!first) sb.append("、");
+            first = false;
+            String displayName = qq == BOT_QQ ? "糖果熊"
+                    : groupMembers != null ? groupMembers.get(String.valueOf(qq)) : null;
+            sb.append("@").append(displayName == null || displayName.isBlank() ? "用户" : displayName)
+                    .append("(QQ=").append(qq).append(")");
+        }
+        sb.append("\n这是协议层真实 @ 数据，QQ 号是唯一身份，昵称只用于理解和展示。")
+                .append("需要记录别称时，target_user_id 必须使用被 @ 用户的 QQ 号。");
+        return sb.toString();
+    }
+
     public static String getBeijingTimeString() {
         // 1. 定义北京时区 (Asia/Shanghai 等同于北京时间)
         ZoneId beijingZone = ZoneId.of("Asia/Shanghai");
@@ -522,23 +549,31 @@ public class BaiLianService {
         return generate(sessionId, userId, userPrompt, groupId, nickname, atUserIds, false).reply();
     }
 
+    /** 兼容旧调用方，同时允许聊天主模型直接接收本轮图片。 */
+    public String generate(String sessionId, String userId, String userPrompt, String groupId, String nickname,
+                           List<Long> atUserIds, List<String> imageDataUris) {
+        return generate(sessionId, userId, userPrompt, groupId, nickname, atUserIds, false,
+                Collections.emptySet(), ConversationEvent.NOTHING, null, imageDataUris).reply();
+    }
+
     /** 基于 ConversationSession 的生成入口。 */
     public GenerationResult generate(com.start.runtime.conversation.ConversationSession session) {
         return generate(session.sessionId(), session.userId(), session.userPrompt(),
                 session.groupId(), session.nickname(), session.atUserIds(), session.allowSilence(),
-                session.excludedPublicMessageIds(), session.event());
+                session.excludedPublicMessageIds(), session.event(), session.dialoguePlan(), session.imageDataUris());
     }
 
     /** 带沉默权的生成方法。allowSilence=true 时模型可以输出 <NO_REPLY> 选择沉默。 */
     public GenerationResult generate(String sessionId, String userId, String userPrompt, String groupId, String nickname, List<Long> atUserIds, boolean allowSilence) {
         return generate(sessionId, userId, userPrompt, groupId, nickname, atUserIds, allowSilence,
-                Collections.emptySet(), ConversationEvent.NOTHING);
+                Collections.emptySet(), ConversationEvent.NOTHING, null, Collections.emptyList());
     }
 
     private GenerationResult generate(String sessionId, String userId, String userPrompt, String groupId,
                                       String nickname, List<Long> atUserIds, boolean allowSilence,
                                       java.util.Set<String> excludedPublicMessageIds,
-                                      ConversationEvent event) {
+                                      ConversationEvent event, GroupDialoguePlan dialoguePlan,
+                                      List<String> imageDataUris) {
         logger.info("🧠 AI 调用: sessionId={}, prompt=[{}], ats={}, allowSilence={}", sessionId, userPrompt, atUserIds, allowSilence);
 
         String context = "";
@@ -610,7 +645,8 @@ public class BaiLianService {
                     .isGuier(String.valueOf(BotConfig.getAdminQq()).equals(userId))
                     .userProfileText(context)
                     .knowledgeContext(knowledgeContext)
-                    .atUserIds(atUserIds).botQq(BOT_QQ);
+                    .atUserIds(atUserIds).botQq(BOT_QQ)
+                    .dialoguePlan(dialoguePlan);
 
             if (moodService != null) {
                 String gk = groupId != null ? groupId : "private_" + userId;
@@ -679,18 +715,7 @@ public class BaiLianService {
                 }
             }
 
-            String overridePrompt = runtimeConfig.get("system_prompt_override");
-            String promptPatch = runtimeConfig.get("system_prompt_patch");
-            ctx.promptPatch(promptPatch);
-
-            String systemPrompt;
-            if (overridePrompt != null && !overridePrompt.isBlank()) {
-                systemPrompt = promptBuilder.build(overridePrompt, ctx);
-            } else {
-                systemPrompt = promptBuilder.buildRuleBook(getRuleSet(), ctx);
-            }
-
-            // 别称
+            // 别称只由模型主动调用 manage_alias 写入；这里仅准备完整的 @ 上下文。
             Map<String, UserAliasRepository.AliasInfo> aliasInfoMap;
             if (groupId != null) {
                 aliasInfoMap = userAliasRepo.getGroupAliasInfoMap(groupId);
@@ -738,6 +763,8 @@ public class BaiLianService {
                 }
             }
 
+            ctx.atMentionContext(buildAtMentionContext(userPrompt, atUserIds, ctx.groupMembers));
+
             // 群聊节奏
             if (metrics != null && groupId != null) {
                 ctx.metricsHint(metrics.getSnapshot(groupId).toPromptHint());
@@ -763,11 +790,23 @@ public class BaiLianService {
             // 不再自动注入记忆到 prompt —— 关键词匹配 ≠ 语义相关，LLM 自己判断什么时候该查
             List<String> hanlpKeywords = extractKeywords(userPrompt);
 
+            // 所有动态上下文（别称、@ 用户、群成员、文件、节奏等）准备完后再构建 prompt，
+            // 否则这些信息只写进 ctx，却不会真正进入发给模型的 system prompt。
+            String overridePrompt = runtimeConfig.get("system_prompt_override");
+            String promptPatch = runtimeConfig.get("system_prompt_patch");
+            ctx.promptPatch(promptPatch);
+
+            String systemPrompt;
+            if (overridePrompt != null && !overridePrompt.isBlank()) {
+                systemPrompt = promptBuilder.build(overridePrompt, ctx);
+            } else {
+                systemPrompt = promptBuilder.buildRuleBook(getRuleSet(), ctx);
+            }
+
             logger.debug("已构建 AI system prompt，sessionId={}, chars={}", sessionId, systemPrompt.length());
 
             List<Map<String, Object>> messages = new ArrayList<>();
             messages.add(Map.of("role", "system", "content", systemPrompt));
-
             java.time.format.DateTimeFormatter shortTs = java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm");
             List<Message> historySnapshot;
             synchronized (history) {
@@ -788,12 +827,13 @@ public class BaiLianService {
                         java.time.Instant.ofEpochMilli(msg.timestamp),
                         java.time.ZoneId.of("Asia/Shanghai")
                 ).format(shortTs);
-                messages.add(Map.of("role", role, "content", "[" + timePrefix + "] " + content));
+                String messageContent = "[" + timePrefix + "] " + content;
+                messages.add(buildUserMessage(messageContent, imageDataUris));
             }
 
             // PR4: suppress 模式下 user message 不在 history 中，手动追加到 messages 数组
             if (suppress) {
-                messages.add(Map.of("role", "user", "content", userPrompt));
+                messages.add(buildUserMessage(userPrompt, imageDataUris));
             }
 
             String url = this.baiLianBaseUrl;
@@ -812,7 +852,8 @@ public class BaiLianService {
             final List<Tool> availableTools = new ArrayList<>(Arrays.asList(
                     new WeatherTool(userAliasRepo),
                     new UserAffinityTool(userAffinityRepo),
-                    new UserAliasTool(userAliasRepo, String.valueOf(BotConfig.getBotQq())),
+                    new UserAliasTool(userAliasRepo, String.valueOf(BotConfig.getBotQq()),
+                            userId, groupId, atUserIds),
                     new SendPrivateTool(botInstance, userId),
                     new PokeTool(botInstance),
                     new VoiceTool(botInstance, ttsService),
@@ -821,6 +862,7 @@ public class BaiLianService {
                     new LuckTool(),
                     new ProfessionTool(),
                     new ProfessionPKTool(),
+                    new UserProfileTool(profileRepo),
                     new MemoryTool(botMemory),
                     new KnowledgeBaseTool(knowledgeService),
                     new LearnKnowledgeTool(knowledgeService, userId),
@@ -898,6 +940,7 @@ public class BaiLianService {
             requestBodyObj.put("model", modelName);
             requestBodyObj.put("messages", messages);
             requestBodyObj.put("max_tokens", 1024);
+            addReasoningEffort(requestBodyObj, baiLianReasoningEffort);
             requestBodyObj.put("tools", toolSpecs);
             requestBodyObj.put("tool_choice", "auto");
 
@@ -1088,6 +1131,7 @@ public class BaiLianService {
                 nextBody.put("model", modelName);
                 nextBody.put("messages", messages);
                 nextBody.put("max_tokens", 1024);
+                addReasoningEffort(nextBody, baiLianReasoningEffort);
                 nextBody.put("tools", toolSpecs);
                 nextBody.put("tool_choice", "auto");
 
@@ -1199,6 +1243,7 @@ public class BaiLianService {
                     retryBody.put("model", modelName);
                     retryBody.put("messages", messages);
                     retryBody.put("max_tokens", 1024);
+                    addReasoningEffort(retryBody, baiLianReasoningEffort);
                     HttpRequest retryReq = HttpRequest.newBuilder()
                             .uri(URI.create(url))
                             .header("Authorization", "Bearer " + apiKey)
@@ -1276,6 +1321,11 @@ public class BaiLianService {
         }
     }
 
+    static Map<String, Object> buildUserMessage(String text, List<String> imageDataUris) {
+        // imageDataUris 保留参数兼容旧调用方，但主聊天永远不发送原始图片。
+        return Map.of("role", "user", "content", text);
+    }
+
 
     /**
      * 用视觉模型描述图片内容，返回文本描述注入到对话上下文
@@ -1347,6 +1397,73 @@ public class BaiLianService {
         return result.toString();
     }
 
+    /** 一次视觉请求完成表情包判定、情绪关键词提取和审计描述。 */
+    public String classifyStickerImages(List<String> imageDataUris) {
+        if (imageDataUris == null || imageDataUris.isEmpty() || !BotConfig.isVisionEnabled()) return "";
+
+        String visionUrl = BotConfig.getVisionBaseUrl();
+        String visionKey = BotConfig.getVisionApiKey();
+        String visionModel = BotConfig.getVisionModel();
+        if (visionKey == null || visionKey.isBlank()) return "";
+
+        String prompt = "请直接判断这张图片（多帧按一个整体）是否应该作为聊天表情包入库，"
+                + "并提取将来模型调用 send_sticker 时会输入的中文情绪/场景关键词。\n"
+                + "应用/网页/小说详情页/作品介绍/商品页/聊天记录/社交平台页面截图，默认不是表情包；"
+                + "纯文字截图、表格、新闻图、普通插画、作品宣传页也不是。\n"
+                + "不要因为有二次元人物、文字、R-18 标签或暧昧内容就判定为表情包。\n"
+                + "只有表达情绪、反应、玩梗、搞笑转发或明显适合聊天复用才是表情包。\n"
+                + "keywords 只能表达适合回应的情绪或场景，不能写人物、动物、颜色、作品、类型、标签、文字内容或画面元素。\n"
+                + "keywords 只能从以下词选择：开心、笑、哈哈、无语、哭、难过、生气、怒、安慰、加油、得意、嘲讽、"
+                + "震惊、惊讶、吃瓜、嫌弃、尴尬、害羞、滑稽、崩溃、委屈、比心、笑哭、裂开、可爱、萌、高冷、治愈、"
+                + "调皮、害怕、困、累、饿、懵、问号、再见、OK、谢谢、偷笑、白眼、打死你、赞、厉害、牛、爱、喜欢。\n"
+                + "不是表情包时 keywords 必须为空数组。只输出严格 JSON，不要 Markdown："
+                + "{\"isSticker\":false,\"keywords\":[],\"description\":\"一句话说明图片用途，供审计，不作为检索关键词\"}";
+
+        try {
+            List<Map<String, Object>> content = new ArrayList<>();
+            content.add(Map.of("type", "text", "text", prompt));
+            int limit = Math.min(imageDataUris.size(), 3);
+            for (int i = 0; i < limit; i++) {
+                String uri = imageDataUris.get(i);
+                if (uri != null && !uri.isBlank()) {
+                    content.add(Map.of("type", "image_url", "image_url", Map.of("url", uri)));
+                }
+            }
+            if (content.size() == 1) return "";
+
+            Map<String, Object> body = new HashMap<>();
+            body.put("model", visionModel);
+            body.put("messages", List.of(Map.of("role", "user", "content", content)));
+            body.put("max_tokens", 800);
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(visionUrl))
+                    .header("Authorization", "Bearer " + visionKey)
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))
+                    .timeout(Duration.ofMillis(BotConfig.getVisionTimeoutMs()))
+                    .build();
+            HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) {
+                logger.warn("表情包视觉分类 HTTP {}: {}", resp.statusCode(), resp.body());
+                return "";
+            }
+            JsonNode root = objectMapper.readTree(resp.body());
+            String result = root.path("choices").path(0).path("message").path("content").asText("");
+            if (!result.isBlank()) logger.debug("表情包视觉分类结果 [{}]: {}", visionModel, result.trim());
+            return result.trim();
+        } catch (Exception e) {
+            logger.warn("表情包视觉分类失败: {}", e.getMessage());
+            return "";
+        }
+    }
+
+    /** 仅在配置非空时注入，保持未配置时与旧请求完全兼容。 */
+    private static void addReasoningEffort(Map<String, Object> body, String effort) {
+        if (effort != null && !effort.isBlank()) {
+            body.put("reasoning_effort", effort.trim());
+        }
+    }
+
     /** 简单调用聊天模型，返回纯文本响应（无工具、无会话、无状态注入） */
     public String generateRaw(String prompt) {
         try {
@@ -1406,6 +1523,7 @@ public class BaiLianService {
             Map<String, Object> requestBodyObj = new HashMap<>();
             requestBodyObj.put("model", modelName);
             requestBodyObj.put("messages", messages);
+            addReasoningEffort(requestBodyObj, agentReasoningEffort);
 
             String requestBody = objectMapper.writeValueAsString(requestBodyObj);
             logger.info("➡️ 向 Agent API 发送请求 (Model: {})", modelName);
@@ -1716,13 +1834,22 @@ public class BaiLianService {
         public final String userId;
         public final String nickname;
         public final String content;
+        public final List<Long> atUserIds;
+        public final Long replyToMessageId;
         public final long timestamp;
 
         public PublicMessage(String messageId, String userId, String nickname, String content) {
+            this(messageId, userId, nickname, content, Collections.emptyList(), null);
+        }
+
+        public PublicMessage(String messageId, String userId, String nickname, String content,
+                             List<Long> atUserIds, Long replyToMessageId) {
             this.messageId = messageId == null ? "" : messageId;
             this.userId = userId;
             this.nickname = nickname;
             this.content = content;
+            this.atUserIds = atUserIds == null ? List.of() : List.copyOf(atUserIds);
+            this.replyToMessageId = replyToMessageId;
             this.timestamp = System.currentTimeMillis();
         }
     }
@@ -1739,7 +1866,7 @@ public class BaiLianService {
     static int publicContextLimit(ConversationEvent event) {
         if (event == null) return 0;
         return switch (event) {
-            case PROBABILISTIC -> 8;
+            case PROBABILISTIC, COGNITIVE_CONTINUE, COGNITIVE_INTERJECTION -> 8;
             case MENTION, PASSIVE_TRIGGER -> 6;
             case FOLLOW_UP, AI_COMMENTED, AWAIT_REPLY, NOTHING -> 0;
         };
@@ -1793,6 +1920,12 @@ public class BaiLianService {
     }
 
     public void recordPublicGroupMessage(String groupId, String userId, String nickname, String message, String messageId) {
+        recordPublicGroupMessage(groupId, userId, nickname, message, messageId, Collections.emptyList(), null);
+    }
+
+    /** Metadata-aware overload used by the group cognition pipeline; legacy overloads remain intact. */
+    public void recordPublicGroupMessage(String groupId, String userId, String nickname, String message,
+                                         String messageId, List<Long> atUserIds, Long replyToMessageId) {
         if (groupId == null || message.trim().isEmpty()) return;
 
         // 过滤机器人自己的消息（避免重复）
@@ -1808,7 +1941,7 @@ public class BaiLianService {
             history.pollFirst();
         }
 
-        history.offerLast(new PublicMessage(messageId, userId, nickname, message));
+        history.offerLast(new PublicMessage(messageId, userId, nickname, message, atUserIds, replyToMessageId));
     }
     /** 记录糖果熊自己的群发言到公开历史，使 LLM 能看到自己上一轮说了什么 */
     public void recordBotOwnGroupMessage(String groupId, String message) {
@@ -1825,5 +1958,14 @@ public class BaiLianService {
 
     public Deque<PublicMessage> getPublicGroupHistory(String groupId) {
         return publicGroupHistory.get(groupId);
+    }
+
+    /** Stable bounded snapshot for concurrent cognition calls. */
+    public List<PublicMessage> getPublicGroupHistorySnapshot(String groupId, int limit) {
+        Deque<PublicMessage> history = publicGroupHistory.get(groupId);
+        if (history == null || history.isEmpty() || limit <= 0) return List.of();
+        List<PublicMessage> copy = new ArrayList<>(history);
+        int start = Math.max(0, copy.size() - limit);
+        return List.copyOf(copy.subList(start, copy.size()));
     }
 }

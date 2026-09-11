@@ -14,6 +14,8 @@ ONEBOT_ACCESS_TOKEN=your_access_token
 BAILIAN_API_KEY=sk-your-key
 BAILIAN_BASE_URL=https://api.deepseek.com/v1/chat/completions
 BAILIAN_CHAT_MODEL=deepseek-v4-pro
+# 保留兼容；聊天图片始终由独立 Vision 描述，主聊天不接收原图
+BAILIAN_MULTIMODAL_ENABLED=false
 BAILIAN_TIMEOUT_MS=90000
 BAILIAN_MAX_RETRIES=2
 

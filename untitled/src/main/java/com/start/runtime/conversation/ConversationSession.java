@@ -6,6 +6,7 @@ import com.start.service.ConversationEvent;
 import com.start.service.ConversationInterpreter;
 import com.start.service.ConversationMetrics;
 import com.start.service.GenerationResult;
+import com.start.service.GroupDialoguePlan;
 
 import java.util.List;
 import java.util.Set;
@@ -27,6 +28,8 @@ public class ConversationSession {
     private final ConversationMetrics.Snapshot metricsSnapshot;
     private final long startMs;
     private final Set<String> excludedPublicMessageIds;
+    private final GroupDialoguePlan dialoguePlan;
+    private final List<String> imageDataUris;
 
     private GenerationResult result;
     private long latencyMs;
@@ -44,6 +47,8 @@ public class ConversationSession {
         this.metricsSnapshot = b.metricsSnapshot;
         this.startMs = b.startMs;
         this.excludedPublicMessageIds = b.excludedPublicMessageIds;
+        this.dialoguePlan = b.dialoguePlan;
+        this.imageDataUris = b.imageDataUris;
     }
 
     // ---- getters ----
@@ -60,6 +65,8 @@ public class ConversationSession {
     public ConversationMetrics.Snapshot metricsSnapshot() { return metricsSnapshot; }
     public long startMs() { return startMs; }
     public Set<String> excludedPublicMessageIds() { return excludedPublicMessageIds; }
+    public GroupDialoguePlan dialoguePlan() { return dialoguePlan; }
+    public List<String> imageDataUris() { return imageDataUris; }
     public GenerationResult result() { return result; }
     public long latencyMs() { return latencyMs; }
 
@@ -93,6 +100,8 @@ public class ConversationSession {
         private ConversationMetrics.Snapshot metricsSnapshot = ConversationMetrics.Snapshot.EMPTY;
         private long startMs = System.currentTimeMillis();
         private Set<String> excludedPublicMessageIds = Set.of();
+        private GroupDialoguePlan dialoguePlan;
+        private List<String> imageDataUris = List.of();
 
         Builder(String groupId, String userId, String nickname) {
             this.groupId = groupId;
@@ -110,6 +119,11 @@ public class ConversationSession {
         public Builder startMs(long v) { startMs = v; return this; }
         public Builder excludedPublicMessageIds(Set<String> v) {
             excludedPublicMessageIds = v == null ? Set.of() : Set.copyOf(v);
+            return this;
+        }
+        public Builder dialoguePlan(GroupDialoguePlan v) { dialoguePlan = v; return this; }
+        public Builder imageDataUris(List<String> v) {
+            imageDataUris = v == null ? List.of() : List.copyOf(v);
             return this;
         }
 

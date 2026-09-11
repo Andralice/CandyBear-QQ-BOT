@@ -134,6 +134,10 @@ public class PromptBuilder {
             sb.append("\n如果消息里有\"他\"\"她\"\"这个人\"\"这位\"等代词，指的就是上面被 @ 的用户。记别称时 target_user_id 填这个QQ。");
         }
 
+        if (ctx.atMentionContext != null && !ctx.atMentionContext.isBlank()) {
+            sb.append("\n\n").append(ctx.atMentionContext);
+        }
+
         // 游戏状态
         if (ctx.spyGameDesc != null && !ctx.spyGameDesc.isEmpty()) sb.append(ctx.spyGameDesc);
         if (ctx.numberGameDesc != null && !ctx.numberGameDesc.isEmpty()) sb.append(ctx.numberGameDesc);
@@ -202,6 +206,11 @@ public class PromptBuilder {
         // 会话认知（BeliefRecall 列表 → 叙事语言）— 最内层，个人级
         if (ctx.beliefRecalls != null && !ctx.beliefRecalls.isEmpty()) {
             sb.append(buildBeliefNarrative(ctx.beliefRecalls));
+        }
+
+        // Keep per-turn perspective last so older scene/memory cannot override who is speaking to whom.
+        if (ctx.dialoguePlan != null) {
+            sb.append(ctx.dialoguePlan.toPromptNarrative());
         }
 
         return sb.toString();
