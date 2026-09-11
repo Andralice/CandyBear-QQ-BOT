@@ -444,8 +444,10 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
             String claimKey = normalizeClaimKey(fact.path("claim_key").asText(kind));
             if (claim.isBlank() || claimKey.isBlank()) { rejected++; continue; }
             String polarity = enumOr(fact.path("polarity").asText("ASSERT"), Set.of("ASSERT", "DENY"), "ASSERT");
-            String scope = groupId.isBlank() ? "PRIVATE_ONLY"
-                    : enumOr(fact.path("scope").asText("PERSONAL"), Set.of("PERSONAL", "PRIVATE_ONLY"), "PERSONAL");
+            // Group observations belong to the person's reusable profile; private observations
+            // remain private-only so a private conversation cannot leak into a group prompt.
+            // The model cannot choose or widen this visibility boundary.
+            String scope = groupId.isBlank() ? "PRIVATE_ONLY" : "PERSONAL";
             double confidence = clamp(fact.path("confidence").asDouble(0.25));
             if ("MODEL_INFERENCE".equals(epistemic)) confidence = Math.min(confidence, 0.55);
             if ("personality".equals(kind)) confidence = Math.min(confidence, 0.40);

@@ -1,7 +1,6 @@
 package com.start.agent.social;
 
 import com.start.agent.Tool;
-import com.start.model.UserProfile;
 import com.start.repository.MessageRepository;
 import com.start.repository.ProfileFactRepository;
 import com.start.repository.UserProfileRepository;
@@ -10,13 +9,11 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Arrays;
 import java.util.Map;
-import java.util.Optional;
 
 /** 查询当前授权范围内用户的全局个人画像，群聊氛围不混入个人事实。 */
 public class UserProfileTool implements Tool {
 
     private static final Logger logger = LoggerFactory.getLogger(UserProfileTool.class);
-    private final UserProfileRepository profileRepo;
     private final ProfileFactRepository factRepo;
     private final MessageRepository messageRepo;
     private final String callerUserId;
@@ -24,7 +21,6 @@ public class UserProfileTool implements Tool {
 
     public UserProfileTool(UserProfileRepository profileRepo, ProfileFactRepository factRepo,
                            MessageRepository messageRepo, String callerUserId, String currentGroupId) {
-        this.profileRepo = profileRepo;
         this.factRepo = factRepo;
         this.messageRepo = messageRepo;
         this.callerUserId = callerUserId;
@@ -96,18 +92,9 @@ public class UserProfileTool implements Tool {
                 return result.toString().trim();
             }
 
-            Optional<UserProfile> profileOpt = profileRepo.findLatestByUserId(userId);
-            if (profileOpt.isEmpty()) {
-                return "暂无用户 " + userId + " 的可用个人画像事实。";
-            }
-
-            UserProfile profile = profileOpt.get();
-            String text = profile.getProfileText();
-            if (text == null || text.isBlank()) {
-                return "用户 " + userId + " 暂无有效人物画像。";
-            }
-            return "【旧画像缓存（低可信，不能作为事实）】\n" + text +
-                    "\n画像更新时间：" + profile.getUpdatedAt();
+            // Legacy profile_text remains for migration and compatibility only. It has no
+            // message-level evidence, so it must never re-enter model context as a fallback.
+            return "暂无用户 " + userId + " 的可用结构化个人画像事实。";
         } catch (Exception e) {
             logger.error("查询用户画像失败 userId={}, groupId={}", userId, currentGroupId, e);
             return "查询人物画像失败，请如实说暂时查不到。";

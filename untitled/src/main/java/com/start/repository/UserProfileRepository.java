@@ -68,36 +68,12 @@ public class UserProfileRepository implements Repository {
         }
     }
 
+    /**
+     * @deprecated Legacy free-text overwrite is intentionally disabled. Use the
+     * evidence candidate/fact pipeline instead.
+     */
+    @Deprecated
     public void saveOrUpdate(UserProfile profile) throws SQLException {
-        try (Connection conn = dataSource.getConnection()) {
-            conn.setAutoCommit(false);
-            String updateSql = "UPDATE user_profiles SET profile_text = ?, message_count_snapshot = ?, last_message_id = ?, updated_at = NOW() " +
-                    "WHERE user_id = ? AND group_id " + (profile.getGroupId() == null ? "IS NULL" : "= ?");
-            try (PreparedStatement ps = conn.prepareStatement(updateSql)) {
-                ps.setString(1, profile.getProfileText());
-                ps.setInt(2, profile.getMessageCountSnapshot());
-                ps.setLong(3, profile.getLastMessageId());
-                ps.setString(4, profile.getUserId());
-                if (profile.getGroupId() != null) {
-                    ps.setString(5, profile.getGroupId());
-                }
-                if (ps.executeUpdate() == 0) {
-                    String insertSql = "INSERT INTO user_profiles (user_id, group_id, profile_text, message_count_snapshot, last_message_id) VALUES (?, ?, ?, ?, ?)";
-                    try (PreparedStatement ins = conn.prepareStatement(insertSql, Statement.RETURN_GENERATED_KEYS)) {
-                        ins.setString(1, profile.getUserId());
-                        ins.setString(2, profile.getGroupId());
-                        ins.setString(3, profile.getProfileText());
-                        ins.setInt(4, profile.getMessageCountSnapshot());
-                        ins.setLong(5, profile.getLastMessageId());
-                        ins.executeUpdate();
-                        ResultSet keys = ins.getGeneratedKeys();
-                        if (keys.next()) {
-                            profile.setId(keys.getLong(1));
-                        }
-                    }
-                }
-            }
-            conn.commit();
-        }
+        throw new UnsupportedOperationException("旧 profile_text 覆盖逻辑已停用；请写入证据候选事实");
     }
 }

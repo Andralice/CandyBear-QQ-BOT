@@ -225,6 +225,38 @@ class EvidenceProfileIntegrationTest {
     }
 
     @Test
+    void personalFactIsVisibleAcrossGroupAndPrivateContexts() throws Exception {
+        long messageId = insertMessage("cross-context", LocalDateTime.now(), "明确自述的个人事实");
+        long candidate = candidate("preference", "cross-context-preference", "喜欢安静的聊天", "SELF_REPORTED",
+                "ASSERT", 0.90, List.of(messageId));
+        addEvidence(candidate, messageId);
+
+        long fact = factRepository.promoteCandidate(candidate);
+
+        assertTrue(fact > 0);
+        assertEquals(1, factRepository.findActiveByUserId(subjectUserId, false, 10).size());
+        assertEquals(1, factRepository.findActiveByUserId(subjectUserId, true, 10).size());
+        assertEquals("PERSONAL", scalar("SELECT scope FROM profile_facts WHERE id=?", fact));
+    }
+
+    @Test
+    void privateFactDoesNotBecomeGroupVisible() throws Exception {
+        long messageId = insertPrivateMessage("private-only", LocalDateTime.now(), "私聊中的个人事实");
+        long candidate = factRepository.upsertCandidate(new ProfileFactCandidateInput(subjectUserId, null,
+                "preference", "SELF_REPORTED", "private-preference", "只在私聊提过的偏好", "ASSERT",
+                "ONE_OFF", 0.90, "PRIVATE_ONLY", LocalDateTime.now(), null, "integration-test", null,
+                "test", List.of(messageId), "text", "{\"test\":true}", "AVAILABLE"));
+        addEvidence(candidate, messageId);
+
+        long fact = factRepository.promoteCandidate(candidate);
+
+        assertTrue(fact > 0);
+        assertEquals(0, factRepository.findActiveByUserId(subjectUserId, false, 10).size());
+        assertEquals(1, factRepository.findActiveByUserId(subjectUserId, true, 10).size());
+        assertEquals("PRIVATE_ONLY", scalar("SELECT scope FROM profile_facts WHERE id=?", fact));
+    }
+
+    @Test
     void explicitDenialSupersedesOldFactAndLeavesConflictHistory() throws Exception {
         long oldMessage = insertMessage("old", LocalDateTime.now().minusDays(2));
         long oldCandidate = candidate("preference", "coffee", "喜欢咖啡", "SELF_REPORTED", "ASSERT", 0.90, List.of(oldMessage));
@@ -368,6 +400,27 @@ class EvidenceProfileIntegrationTest {
             ps.setString(6, groupId);
             ps.setString(7, keyPrefix + "-provider-" + suffix);
             ps.setTimestamp(8, Timestamp.valueOf(createdAt));
+            ps.executeUpdate();
+            try (ResultSet keys = ps.getGeneratedKeys()) {
+                assertTrue(keys.next());
+                return keys.getLong(1);
+            }
+        }
+    }
+
+    private long insertPrivateMessage(String suffix, LocalDateTime createdAt, String content) throws SQLException {
+        String sql = "INSERT INTO messages (session_id, user_id, content, raw_content, source_event_key, " +
+                "is_robot_reply, is_private, group_id, provider_message_id, sender_type, availability_status, created_at) " +
+                "VALUES (?, ?, ?, ?, ?, FALSE, TRUE, NULL, ?, 'USER', 'AVAILABLE', ?)";
+        try (Connection conn = DatabaseConfig.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+            ps.setString(1, keyPrefix + "-private-session");
+            ps.setString(2, subjectUserId);
+            ps.setString(3, content);
+            ps.setString(4, content);
+            ps.setString(5, keyPrefix + "-private-message-" + suffix);
+            ps.setString(6, keyPrefix + "-private-provider-" + suffix);
+            ps.setTimestamp(7, Timestamp.valueOf(createdAt));
             ps.executeUpdate();
             try (ResultSet keys = ps.getGeneratedKeys()) {
                 assertTrue(keys.next());
