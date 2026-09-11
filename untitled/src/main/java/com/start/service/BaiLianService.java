@@ -606,7 +606,7 @@ public class BaiLianService {
             publicGroupContext = buildPublicGroupContext(recent, publicContextLimit, excludedPublicMessageIds);
         }
 
-        context = profileProvider.getProfileContext(userId, groupId);
+        context = profileProvider.getProfileContext(userId, groupId, userPrompt);
 
         KeywordKnowledgeService.KnowledgeResult knowledgeResult =
                 knowledgeService.query(userPrompt, userId, groupId);
