@@ -44,6 +44,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiFunction;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -69,7 +70,7 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
     private final ProfileFactRepository factRepository;
     private final ConversationEventRepository eventRepository;
     private final BaiLianService aiService;
-    private final Main oneBotClient;
+    private final BiFunction<String, JsonNode, CompletableFuture<JsonNode>> oneBotApi;
     private final String owner;
     private final HttpClient httpClient;
     private ScheduledExecutorService scheduler;
@@ -83,7 +84,8 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
     public EvidenceAnalysisWorker(BaiLianService aiService, Main oneBotClient) {
         this(new AnalysisTaskRepository(), new MediaArtifactRepository(), new MessageRepository(),
                 new ProfileFactRepository(com.start.config.DatabaseConfig.getDataSource()), aiService,
-                "analysis-" + ProcessHandle.current().pid(), oneBotClient, null);
+                "analysis-" + ProcessHandle.current().pid(),
+                oneBotClient == null ? null : oneBotClient::callOneBotApi, null);
     }
 
     EvidenceAnalysisWorker(AnalysisTaskRepository taskRepository, MediaArtifactRepository artifactRepository,
@@ -92,16 +94,27 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
         this(taskRepository, artifactRepository, messageRepository, factRepository, aiService, owner, null, httpClient);
     }
 
+    EvidenceAnalysisWorker(AnalysisTaskRepository taskRepository, MediaArtifactRepository artifactRepository,
+                           MessageRepository messageRepository, ProfileFactRepository factRepository,
+                           BaiLianService aiService, String owner,
+                           BiFunction<String, JsonNode, CompletableFuture<JsonNode>> oneBotApi) {
+        this(taskRepository, artifactRepository, messageRepository, factRepository, aiService, owner,
+                oneBotApi, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(8))
+                        .followRedirects(HttpClient.Redirect.NEVER).build());
+    }
+
     private EvidenceAnalysisWorker(AnalysisTaskRepository taskRepository, MediaArtifactRepository artifactRepository,
                            MessageRepository messageRepository, ProfileFactRepository factRepository,
-                           BaiLianService aiService, String owner, Main oneBotClient, HttpClient httpClient) {
+                           BaiLianService aiService, String owner,
+                           BiFunction<String, JsonNode, CompletableFuture<JsonNode>> oneBotApi,
+                           HttpClient httpClient) {
         this.taskRepository = taskRepository;
         this.artifactRepository = artifactRepository;
         this.messageRepository = messageRepository;
         this.factRepository = factRepository;
         this.eventRepository = new ConversationEventRepository();
         this.aiService = aiService;
-        this.oneBotClient = oneBotClient;
+        this.oneBotApi = oneBotApi;
         this.owner = owner;
         this.httpClient = httpClient;
     }
@@ -279,24 +292,33 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
         MediaPartInput part = requirePart(partId);
         LocalDateTime started = LocalDateTime.now();
         String hash = sha256(part.rawPartJson());
-        if (oneBotClient == null || part.providerFileId() == null || part.providerFileId().isBlank()) {
+        if (oneBotApi == null || part.providerFileId() == null || part.providerFileId().isBlank()) {
             saveUnavailable(part, "FILE_TEXT", hash, started,
-                    oneBotClient == null ? "FILE_API_UNAVAILABLE" : "NO_FILE_REFERENCE",
-                    oneBotClient == null ? "当前分析 worker 未连接 OneBot API" : "文件部件没有 file_id");
+                    oneBotApi == null ? "FILE_API_UNAVAILABLE" : "NO_FILE_REFERENCE",
+                    oneBotApi == null ? "当前分析 worker 未连接 OneBot API" : "文件部件没有 file_id");
             result.put("status", "UNAVAILABLE").put("artifact_type", "FILE_TEXT");
             return;
         }
 
-        byte[] bytes = fetchOneBotFile(part.providerFileId());
+        byte[] bytes;
+        try {
+            bytes = fetchOneBotFile(part.providerFileId());
+        } catch (PermanentAnalysisException e) {
+            saveUnavailable(part, "FILE_TEXT", hash, started, e.code, e.getMessage());
+            result.put("status", "UNAVAILABLE").put("artifact_type", "FILE_TEXT").put("error_code", e.code);
+            return;
+        }
         if (bytes == null || bytes.length == 0) {
             saveUnavailable(part, "FILE_TEXT", hash, started, "FILE_FETCH_FAILED", "get_file 未返回可读取文件");
-            result.put("status", "UNAVAILABLE").put("artifact_type", "FILE_TEXT");
+            result.put("status", "UNAVAILABLE").put("artifact_type", "FILE_TEXT")
+                    .put("error_code", "FILE_FETCH_FAILED");
             return;
         }
         String text = decodeText(bytes);
         if (text == null || text.isBlank()) {
             saveUnavailable(part, "FILE_TEXT", hash, started, "FILE_NOT_TEXT", "文件不是可验证的纯文本内容");
-            result.put("status", "UNAVAILABLE").put("artifact_type", "FILE_TEXT");
+            result.put("status", "UNAVAILABLE").put("artifact_type", "FILE_TEXT")
+                    .put("error_code", "FILE_NOT_TEXT");
             return;
         }
         ObjectNode content = MAPPER.createObjectNode();
@@ -310,12 +332,12 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
     }
 
     private byte[] fetchOneBotFile(String fileId) throws Exception {
-        if (fileId.length() > 512) return null;
+        if (fileId.length() > 512) throw new PermanentAnalysisException("FILE_REFERENCE_TOO_LONG", "文件引用超过长度上限");
         ObjectNode params = MAPPER.createObjectNode();
         params.put("file_id", fileId);
         JsonNode response;
         try {
-            CompletableFuture<JsonNode> future = oneBotClient.callOneBotApi("get_file", params);
+            CompletableFuture<JsonNode> future = oneBotApi.apply("get_file", params);
             response = future == null ? null : future.get(15, TimeUnit.SECONDS);
         } catch (Exception e) {
             logger.warn("get_file 失败: {}", e.getMessage());
@@ -325,10 +347,15 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
         JsonNode data = response.path("data");
         String base64 = data.path("base64").asText("");
         if (!base64.isBlank()) {
-            if (base64.length() > 4_000_000) return null;
+            if (base64.length() > 4_000_000) {
+                throw new PermanentAnalysisException("FILE_TOO_LARGE", "文件 base64 响应超过大小上限");
+            }
             try {
                 byte[] bytes = Base64.getDecoder().decode(base64);
-                return bytes.length <= MAX_FILE_BYTES ? bytes : null;
+                if (bytes.length > MAX_FILE_BYTES) {
+                    throw new PermanentAnalysisException("FILE_TOO_LARGE", "文件超过大小上限");
+                }
+                return bytes;
             } catch (IllegalArgumentException e) {
                 return null;
             }
@@ -458,12 +485,12 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
             String forwardId = raw.path("data").path("id").asText(
                     raw.path("data").path("forward_id").asText(""));
             content = fetchForwardContent(forwardId);
-            if (!content.isArray() || content.isEmpty()) {
+            if (content == null || !content.isArray() || content.isEmpty()) {
                 String code = forwardId.isBlank() ? "FORWARD_REFERENCE_ONLY"
-                        : oneBotClient == null ? "FORWARD_API_UNAVAILABLE" : "FORWARD_FETCH_FAILED";
+                        : oneBotApi == null ? "FORWARD_API_UNAVAILABLE" : "FORWARD_FETCH_FAILED";
                 saveUnavailable(part, "FORWARD_CHAIN", sha256(part.rawPartJson()), LocalDateTime.now(), code,
                         forwardId.isBlank() ? "OneBot 只提供转发引用，缺少可展开的转发 ID"
-                                : oneBotClient == null ? "当前分析 worker 未连接 OneBot API"
+                                : oneBotApi == null ? "当前分析 worker 未连接 OneBot API"
                                 : "get_forward_msg 未返回可用节点");
                 result.put("status", "UNAVAILABLE").put("error_code", code);
                 return;
@@ -490,11 +517,11 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
     }
 
     private JsonNode fetchForwardContent(String forwardId) throws Exception {
-        if (forwardId == null || forwardId.isBlank() || forwardId.length() > 128 || oneBotClient == null) return null;
+        if (forwardId == null || forwardId.isBlank() || forwardId.length() > 128 || oneBotApi == null) return null;
         ObjectNode params = MAPPER.createObjectNode();
         params.put("message_id", forwardId);
         try {
-            CompletableFuture<JsonNode> future = oneBotClient.callOneBotApi("get_forward_msg", params);
+            CompletableFuture<JsonNode> future = oneBotApi.apply("get_forward_msg", params);
             JsonNode response = future == null ? null : future.get(10, TimeUnit.SECONDS);
             if (response == null || !"ok".equalsIgnoreCase(response.path("status").asText())) return null;
             JsonNode data = response.path("data");
