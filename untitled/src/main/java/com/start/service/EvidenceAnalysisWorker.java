@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.start.Main;
 import com.start.config.BotConfig;
 import com.start.model.AnalysisTask;
 import com.start.model.MediaPartInput;
@@ -40,6 +41,7 @@ import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Executors;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
@@ -66,6 +68,7 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
     private final ProfileFactRepository factRepository;
     private final ConversationEventRepository eventRepository;
     private final BaiLianService aiService;
+    private final Main oneBotClient;
     private final String owner;
     private final HttpClient httpClient;
     private ScheduledExecutorService scheduler;
@@ -73,18 +76,31 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
     public EvidenceAnalysisWorker(BaiLianService aiService) {
         this(new AnalysisTaskRepository(), new MediaArtifactRepository(), new MessageRepository(),
                 new ProfileFactRepository(com.start.config.DatabaseConfig.getDataSource()), aiService,
-                "analysis-" + ProcessHandle.current().pid());
+                "analysis-" + ProcessHandle.current().pid(), null, null);
+    }
+
+    public EvidenceAnalysisWorker(BaiLianService aiService, Main oneBotClient) {
+        this(new AnalysisTaskRepository(), new MediaArtifactRepository(), new MessageRepository(),
+                new ProfileFactRepository(com.start.config.DatabaseConfig.getDataSource()), aiService,
+                "analysis-" + ProcessHandle.current().pid(), oneBotClient, null);
     }
 
     EvidenceAnalysisWorker(AnalysisTaskRepository taskRepository, MediaArtifactRepository artifactRepository,
                            MessageRepository messageRepository, ProfileFactRepository factRepository,
                            BaiLianService aiService, String owner, HttpClient httpClient) {
+        this(taskRepository, artifactRepository, messageRepository, factRepository, aiService, owner, null, httpClient);
+    }
+
+    private EvidenceAnalysisWorker(AnalysisTaskRepository taskRepository, MediaArtifactRepository artifactRepository,
+                           MessageRepository messageRepository, ProfileFactRepository factRepository,
+                           BaiLianService aiService, String owner, Main oneBotClient, HttpClient httpClient) {
         this.taskRepository = taskRepository;
         this.artifactRepository = artifactRepository;
         this.messageRepository = messageRepository;
         this.factRepository = factRepository;
         this.eventRepository = new ConversationEventRepository();
         this.aiService = aiService;
+        this.oneBotClient = oneBotClient;
         this.owner = owner;
         this.httpClient = httpClient;
     }
@@ -93,7 +109,7 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
                                   MessageRepository messageRepository, ProfileFactRepository factRepository,
                                   BaiLianService aiService, String owner) {
         this(taskRepository, artifactRepository, messageRepository, factRepository, aiService, owner,
-                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(8)).followRedirects(HttpClient.Redirect.NEVER).build());
+                null, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(8)).followRedirects(HttpClient.Redirect.NEVER).build());
     }
 
     public synchronized void start() {
@@ -349,10 +365,19 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
         JsonNode raw = MAPPER.readTree(part.rawPartJson());
         JsonNode content = raw.path("data").path("content");
         if (!content.isArray() || content.isEmpty()) {
-            saveUnavailable(part, "FORWARD_CHAIN", sha256(part.rawPartJson()), LocalDateTime.now(),
-                    "FORWARD_REFERENCE_ONLY", "OneBot 只提供转发 ID，当前版本无法调用 get_forward_msg 展开");
-            result.put("status", "UNAVAILABLE").put("error_code", "FORWARD_REFERENCE_ONLY");
-            return;
+            String forwardId = raw.path("data").path("id").asText(
+                    raw.path("data").path("forward_id").asText(""));
+            content = fetchForwardContent(forwardId);
+            if (!content.isArray() || content.isEmpty()) {
+                String code = forwardId.isBlank() ? "FORWARD_REFERENCE_ONLY"
+                        : oneBotClient == null ? "FORWARD_API_UNAVAILABLE" : "FORWARD_FETCH_FAILED";
+                saveUnavailable(part, "FORWARD_CHAIN", sha256(part.rawPartJson()), LocalDateTime.now(), code,
+                        forwardId.isBlank() ? "OneBot 只提供转发引用，缺少可展开的转发 ID"
+                                : oneBotClient == null ? "当前分析 worker 未连接 OneBot API"
+                                : "get_forward_msg 未返回可用节点");
+                result.put("status", "UNAVAILABLE").put("error_code", code);
+                return;
+            }
         }
         int count = 0;
         for (int i = 0; i < content.size() && count < 100; i++) {
@@ -372,6 +397,25 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
                 sha256(part.rawPartJson()), "SUCCEEDED", artifact.toString(), 1.0, null, null, null,
                 LocalDateTime.now(), LocalDateTime.now());
         result.put("status", "SUCCEEDED").put("node_count", count);
+    }
+
+    private JsonNode fetchForwardContent(String forwardId) throws Exception {
+        if (forwardId == null || forwardId.isBlank() || forwardId.length() > 128 || oneBotClient == null) return null;
+        ObjectNode params = MAPPER.createObjectNode();
+        params.put("message_id", forwardId);
+        try {
+            CompletableFuture<JsonNode> future = oneBotClient.callOneBotApi("get_forward_msg", params);
+            JsonNode response = future == null ? null : future.get(10, TimeUnit.SECONDS);
+            if (response == null || !"ok".equalsIgnoreCase(response.path("status").asText())) return null;
+            JsonNode data = response.path("data");
+            JsonNode messages = data.path("messages");
+            if (messages.isArray() && !messages.isEmpty()) return messages;
+            JsonNode content = data.path("content");
+            return content.isArray() ? content : null;
+        } catch (Exception e) {
+            logger.warn("get_forward_msg 失败: {}", e.getMessage());
+            return null;
+        }
     }
 
     private void analyzeGroupAtmosphere(AnalysisTask task, ObjectNode result) throws Exception {

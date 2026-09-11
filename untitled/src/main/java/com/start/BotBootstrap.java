@@ -67,7 +67,7 @@ public final class BotBootstrap {
         bot.baiLianService = new BaiLianService(bot.keywordKnowledgeService, bot.userAffinityRepo, bot.ttsService);
         bot.baiLianService.setMoodService(bot.moodService);
         bot.baiLianService.setBotInstance(bot);
-        bot.evidenceAnalysisWorker = new EvidenceAnalysisWorker(bot.baiLianService);
+        bot.evidenceAnalysisWorker = new EvidenceAnalysisWorker(bot.baiLianService, bot);
         bot.evidenceRetentionService = new EvidenceRetentionService();
 
         // 异常监控
