@@ -423,6 +423,10 @@ public class Main extends WebSocketClient {
      * @return 返回一个 CompletableFuture，可在后续处理响应
      */
     public CompletableFuture<JsonNode> callOneBotApi(String action, JsonNode params) {
+        return callOneBotApi(action, params, 10);
+    }
+
+    private CompletableFuture<JsonNode> callOneBotApi(String action, JsonNode params, long timeoutSeconds) {
         if (!isOpen()) {
             return CompletableFuture.failedFuture(
                     new IllegalStateException("OneBot WebSocket 未连接，无法调用: " + action));
@@ -446,7 +450,7 @@ public class Main extends WebSocketClient {
         }
         logger.debug("📤 发送 OneBot API 请求: action={}, echo={}", action, echo);
 
-        return future.orTimeout(10, TimeUnit.SECONDS)
+        return future.orTimeout(timeoutSeconds, TimeUnit.SECONDS)
                 .whenComplete((response, error) -> pendingRequests.remove(echo, future))
                 .exceptionally(t -> {
                     logger.warn("⏰ OneBot API 调用失败或超时: action={}, echo={}, reason={}",
@@ -472,9 +476,13 @@ public class Main extends WebSocketClient {
      * 5s 是兜底而非预期值。调用方应在 GroupSerialExecutor worker 中按群级串行执行。
      */
     private JsonNode sendWithReceipt(String action, ObjectNode params) {
+        return sendWithReceipt(action, params, 5);
+    }
+
+    private JsonNode sendWithReceipt(String action, ObjectNode params, int timeoutSeconds) {
         try {
-            CompletableFuture<JsonNode> future = callOneBotApi(action, params);
-            JsonNode response = future.get(5, TimeUnit.SECONDS);
+            CompletableFuture<JsonNode> future = callOneBotApi(action, params, Math.max(10, timeoutSeconds * 2L));
+            JsonNode response = future.get(timeoutSeconds, TimeUnit.SECONDS);
             if (response == null) {
                 logger.warn("⚠️ OneBot API {} 回执为空（超时或连接异常）", action);
                 return null;
@@ -490,7 +498,7 @@ public class Main extends WebSocketClient {
             }
             return response;
         } catch (java.util.concurrent.TimeoutException e) {
-            logger.warn("⏰ OneBot API {} 回执超时（5s）", action);
+            logger.warn("⏰ OneBot API {} 回执超时（{}s）", action, timeoutSeconds);
             return null;
         } catch (Exception e) {
             logger.error("❌ OneBot API {} 发送异常: {}", action, e.toString());
@@ -587,7 +595,8 @@ public class Main extends WebSocketClient {
             params.put("user_id", userId);
             if (groupId > 0) params.put("group_id", groupId);
             params.put("message", reply);
-            JsonNode receipt = sendWithReceipt("send_private_msg", params);
+            JsonNode receipt = sendWithReceipt("send_private_msg", params,
+                    isMediaPayload(reply) ? 30 : 5);
             if (receipt == null) {
                 return false;
             }
@@ -621,7 +630,8 @@ public class Main extends WebSocketClient {
             ObjectNode params = MAPPER.createObjectNode();
             params.put("group_id", groupId);
             params.put("message", reply);
-            JsonNode receipt = sendWithReceipt("send_group_msg", params);
+            JsonNode receipt = sendWithReceipt("send_group_msg", params,
+                    isMediaPayload(reply) ? 30 : 5);
             if (receipt == null) {
                 return false;
             }
@@ -654,6 +664,10 @@ public class Main extends WebSocketClient {
             logger.error("❌ 发送群聊回复失败", e);
             return false;
         }
+    }
+
+    private static boolean isMediaPayload(String reply) {
+        return reply != null && (reply.contains("[CQ:image") || reply.contains("[CQ:video"));
     }
 
     private void handleNoticeEvent(JsonNode event) {

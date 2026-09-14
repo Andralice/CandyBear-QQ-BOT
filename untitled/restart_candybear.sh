@@ -24,7 +24,7 @@ if ((${#JAVA_PIDS[@]} > 0)); then
 fi
 
 echo "=== start new process ==="
-screen -dmS "$SCREEN_NAME" bash -c "source ${APP_DIR}/.env 2>/dev/null || true; exec java -Xms256m -Xmx768m -jar ${JAR} >> ${APP_DIR}/qq-bot.log 2>&1"
+screen -dmS "$SCREEN_NAME" bash -c "if [[ -f ${APP_DIR}/.env ]]; then set -a; source ${APP_DIR}/.env; set +a; fi; exec java -Xms256m -Xmx768m -jar ${JAR} >> ${APP_DIR}/qq-bot.log 2>&1"
 
 for i in 1 2 3 4 5; do
     sleep 5

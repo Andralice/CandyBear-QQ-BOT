@@ -70,6 +70,16 @@ class ToolAuthorizationServiceTest {
     }
 
     @Test
+    void releaseReturnsUnacceptedReservation() {
+        ToolAuthorizationService svc = ToolAuthorizationService.getInstance();
+        String user = "rate-release-user";
+        String tool = "rate-release-tool";
+        assertTrue(svc.tryAcquire(user, tool, 1, 60_000));
+        svc.release(user, tool);
+        assertTrue(svc.tryAcquire(user, tool, 1, 60_000), "未被下游接受的请求应归还额度");
+    }
+
+    @Test
     void authorizationResultAllowAndDeny() {
         ToolAuthorizationService.AuthorizationResult allow = ToolAuthorizationService.AuthorizationResult.allow();
         assertTrue(allow.allowed);

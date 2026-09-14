@@ -60,6 +60,17 @@ public class BotConfig {
     private static int visionTimeoutMs;
     private static boolean visionEnabled;
 
+    private static boolean agnesEnabled;
+    private static String agnesApiKey;
+    private static String agnesBaseUrl;
+    private static String agnesVideoRetrieveUrl;
+    private static String agnesPricingUrl;
+    private static String agnesOutputDir;
+    private static int agnesRequestTimeoutMs;
+    private static int agnesVideoTimeoutMs;
+    private static int agnesPollIntervalMs;
+    private static boolean agnesVerifyFreePricing;
+
     private static String ttsBaseUrl;
     private static String ttsDefaultVoice;
     private static String ttsAudioFormat;
@@ -169,6 +180,23 @@ public class BotConfig {
             visionBaseUrl = resolveOrEmpty(props.getProperty("vision.base-url", baiLianBaseUrl));
             visionModel = resolveOrEmpty(props.getProperty("vision.model", "qwen-vl-max"));
             visionTimeoutMs = parseInt(resolveOrEmpty(props.getProperty("vision.timeout-ms", "60000")), 60000);
+
+            agnesEnabled = Boolean.parseBoolean(resolveOrEmpty(props.getProperty("agnes.enabled", "false")));
+            agnesApiKey = resolveOrEmpty(props.getProperty("agnes.api-key", ""));
+            agnesBaseUrl = resolveOrEmpty(props.getProperty("agnes.base-url", "https://api.agnes-ai.cn/v1"));
+            agnesVideoRetrieveUrl = resolveOrEmpty(props.getProperty(
+                    "agnes.video-retrieve-url", "https://api.agnes-ai.cn/agnesapi"));
+            agnesPricingUrl = resolveOrEmpty(props.getProperty(
+                    "agnes.pricing-url", "https://wiki.agnes-ai.com/en/docs/pricing.md"));
+            agnesOutputDir = resolveOrEmpty(props.getProperty("agnes.output-dir", "/opt/qq-bot/generated-media"));
+            agnesRequestTimeoutMs = parseInt(
+                    resolveOrEmpty(props.getProperty("agnes.request-timeout-ms", "120000")), 120000);
+            agnesVideoTimeoutMs = parseInt(
+                    resolveOrEmpty(props.getProperty("agnes.video-timeout-ms", "1800000")), 1800000);
+            agnesPollIntervalMs = parseInt(
+                    resolveOrEmpty(props.getProperty("agnes.poll-interval-ms", "60000")), 60000);
+            agnesVerifyFreePricing = Boolean.parseBoolean(
+                    resolveOrEmpty(props.getProperty("agnes.verify-free-pricing", "true")));
 
             ttsBaseUrl = resolveOrEmpty(props.getProperty("tts.base-url", "http://127.0.0.1:8765"));
             ttsDefaultVoice = resolveOrEmpty(props.getProperty("tts.default-voice", "tangguoxiong"));
@@ -440,6 +468,17 @@ public class BotConfig {
     public static String getVisionBaseUrl() { return visionBaseUrl; }
     public static String getVisionModel() { return visionModel; }
     public static int getVisionTimeoutMs() { return visionTimeoutMs; }
+
+    public static boolean isAgnesEnabled() { return agnesEnabled; }
+    public static String getAgnesApiKey() { return agnesApiKey; }
+    public static String getAgnesBaseUrl() { return agnesBaseUrl; }
+    public static String getAgnesVideoRetrieveUrl() { return agnesVideoRetrieveUrl; }
+    public static String getAgnesPricingUrl() { return agnesPricingUrl; }
+    public static String getAgnesOutputDir() { return agnesOutputDir; }
+    public static int getAgnesRequestTimeoutMs() { return agnesRequestTimeoutMs; }
+    public static int getAgnesVideoTimeoutMs() { return agnesVideoTimeoutMs; }
+    public static int getAgnesPollIntervalMs() { return agnesPollIntervalMs; }
+    public static boolean isAgnesVerifyFreePricing() { return agnesVerifyFreePricing; }
 
     public static String getTtsBaseUrl() {
         return ttsBaseUrl;

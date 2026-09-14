@@ -164,7 +164,7 @@ public class DatabaseConfig {
                 "id BIGINT AUTO_INCREMENT PRIMARY KEY," +
                 "session_id VARCHAR(100) NOT NULL," +
                 "user_id VARCHAR(50) NOT NULL," +
-                "content TEXT NOT NULL," +
+                "content MEDIUMTEXT NOT NULL," +
                 "raw_content TEXT," +
                 "source_event_key VARCHAR(180)," +
                 "is_robot_reply BOOLEAN DEFAULT FALSE," +
@@ -828,6 +828,12 @@ public class DatabaseConfig {
                 }
             }
         }
+        try {
+            ensureMessagesContentCapacity(conn);
+        } catch (SQLException e) {
+            logger.error("messages.content 容量迁移失败: {}", e.getMessage());
+            failures.add(e.getMessage() != null ? e.getMessage() : "messages.content migration error");
+        }
         if (!failures.isEmpty()) {
             lastMigrationAt = System.currentTimeMillis();
             lastMigrationSuccess = false;
@@ -836,6 +842,40 @@ public class DatabaseConfig {
         lastMigrationAt = System.currentTimeMillis();
         lastMigrationSuccess = true;
         logger.info("数据库表结构迁移完成");
+    }
+
+    private static void ensureMessagesContentCapacity(Connection conn) throws SQLException {
+        String typeName;
+        String nullable;
+        try (java.sql.ResultSet columns = conn.getMetaData().getColumns(
+                conn.getCatalog(), null, "messages", "content")) {
+            if (!columns.next()) {
+                throw new SQLException("messages.content 列不存在");
+            }
+            typeName = columns.getString("TYPE_NAME");
+            nullable = "YES".equalsIgnoreCase(columns.getString("IS_NULLABLE"))
+                    ? " NULL" : " NOT NULL";
+        }
+
+        String normalizedType = typeName == null ? "" : typeName.toLowerCase(java.util.Locale.ROOT);
+        if ("mediumtext".equals(normalizedType) || "longtext".equals(normalizedType)) {
+            return;
+        }
+        if (!isTextColumnType(normalizedType)) {
+            throw new SQLException("messages.content 类型不支持自动升级: " + typeName);
+        }
+
+        try (java.sql.Statement stmt = conn.createStatement()) {
+            stmt.execute("ALTER TABLE messages MODIFY COLUMN content MEDIUMTEXT" + nullable);
+        }
+        logger.info("已将 messages.content 从 {} 升级为 MEDIUMTEXT", typeName);
+    }
+
+    private static boolean isTextColumnType(String typeName) {
+        return switch (typeName) {
+            case "char", "varchar", "tinytext", "text", "nchar", "nvarchar" -> true;
+            default -> false;
+        };
     }
 
     /**

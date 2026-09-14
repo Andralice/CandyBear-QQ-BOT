@@ -19,6 +19,19 @@ BAILIAN_MULTIMODAL_ENABLED=false
 BAILIAN_TIMEOUT_MS=90000
 BAILIAN_MAX_RETRIES=2
 
+# Agnes 免费 Flash 生图/生视频（需要明确设置 AGNES_ENABLED=true）
+# 密钥只通过 AGNES_API_KEY 注入；默认 API 地址与 agnes-free-media skill 一致
+AGNES_ENABLED=false
+AGNES_API_KEY=your-agnes-key
+AGNES_BASE_URL=https://api.agnes-ai.cn/v1
+AGNES_VIDEO_RETRIEVE_URL=https://api.agnes-ai.cn/agnesapi
+AGNES_PRICING_URL=https://wiki.agnes-ai.com/en/docs/pricing.md
+AGNES_OUTPUT_DIR=/opt/qq-bot/generated-media
+AGNES_REQUEST_TIMEOUT_MS=120000
+AGNES_VIDEO_TIMEOUT_MS=1800000
+AGNES_POLL_INTERVAL_MS=60000
+AGNES_VERIFY_FREE_PRICING=true
+
 # Agent 服务配置
 AGENT_API_KEY=sk-your-key
 AGENT_BASE_URL=https://api.deepseek.com/v1/chat/completions

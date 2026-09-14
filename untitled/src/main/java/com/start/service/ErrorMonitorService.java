@@ -32,7 +32,7 @@ import java.util.regex.Pattern;
  *
  * 流程：
  *   扫日志 → 发现 ERROR → 调审计 API（便宜模型）总结归类
- *   → 确认需要修 → 调主 AI（audit_logs → read_code → self_evolve）
+ *   → 确认需要修 → 调主 AI 汇总（不注入工具）
  *   → 任何 API 返回余额/配额耗尽 → 发 QQ 告警归儿
  */
 public class ErrorMonitorService {
@@ -318,8 +318,8 @@ public class ErrorMonitorService {
                 }
 
                 if (needsRepair(content)) {
-                    logger.warn("🔧 审计 API 判定需要修复，触发主 AI");
-                    triggerMainAiFix(auditErrors, content);
+                    logger.warn("🔧 审计 API 判定需要修复，触发主 AI 总结");
+                    triggerMainAiSummary(auditErrors, content);
                 } else {
                     logger.info("✅ 审计 API 判定无需修复，跳过");
                 }
@@ -393,7 +393,7 @@ public class ErrorMonitorService {
     }
 
     /**
-     * 判定审计结论是否需要触发主 AI 修复。
+     * 判定审计结论是否需要触发主 AI 汇总。
      *
      * 修复前 bug：把"严重程度"标签当成"是否需要修"的开关，导致
      * [一般] + 需要修复：是 永远被忽略——审计说"要修"被代码判"无需修"。
@@ -424,16 +424,15 @@ public class ErrorMonitorService {
         return false;
     }
 
-    // ==================== 主 AI 修复（贵模型） ====================
+    // ==================== 主 AI 总结（贵模型） ====================
 
-    private void triggerMainAiFix(List<String> errors, String auditSummary) {
+    private void triggerMainAiSummary(List<String> errors, String auditSummary) {
         try {
             String time = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"));
             long adminQQ = BotConfig.getAdminQq();
-            String sessionId = "auto_fix_" + System.currentTimeMillis();
+            String sessionId = "auto_summary_" + System.currentTimeMillis();
 
-            // prompt 关键改动：旧版依赖 LLM 调 send_private_msg 自报，经常发空话
-            // 新版：主 AI 只输出结构化 JSON 报告到 reply 字段，Java 用 AuditReportBuilder 翻译后转发
+            // 主 AI 只总结审计结论和原始错误；这次使用无工具的纯文本入口，避免再次深入排查。
             StringBuilder prompt = new StringBuilder();
             prompt.append("【自动巡检 - ").append(time).append("】\n\n");
             prompt.append("审计 API 初步判定：").append(auditSummary).append("\n\n");
@@ -443,10 +442,8 @@ public class ErrorMonitorService {
                 prompt.append(e.length() > 300 ? e.substring(0, 300) + "..." : e).append("\n");
             }
             prompt.append("```\n\n");
-            prompt.append("请按以下步骤输出排查报告：\n");
-            prompt.append("1. 调 investigate 工具传入 query 让子模型深入排查（例: '查最近20条ERROR日志并分析根因'）\n");
-            prompt.append("2. 如 investigate 返回 '未产出结论'，自己从上面原始错误分析\n");
-            prompt.append("3. 最后只输出**一个 JSON 对象**到 reply（用 ```json 包裹），不要任何其他文字：\n");
+            prompt.append("请只根据上面的审计结论和原始错误做总结，不要继续排查，不要调用任何工具。\n");
+            prompt.append("最后只输出**一个 JSON 对象**（用 ```json 包裹），不要任何其他文字：\n");
             prompt.append("```json\n");
             prompt.append("{\n");
             prompt.append("  \"severity\": \"严重/一般/可忽略\",\n");
@@ -459,12 +456,10 @@ public class ErrorMonitorService {
             prompt.append("```\n");
             prompt.append("⚠️ 行为约束：\n");
             prompt.append("- 只输出 JSON 对象，不要解释/寒暄/分析过程\n");
-            prompt.append("- 不要调 send_private_msg（系统会自己转发给归儿）\n");
-            prompt.append("- 不要调 self_evolve（归儿会自己决定要不要修）\n");
-            prompt.append("- 如果排查不出明确问题，severity=可忽略，summary=无法定位根因，请人工查看");
+            prompt.append("- 如果仅凭现有材料无法定位明确问题，severity=可忽略，summary=无法定位根因，请人工查看");
 
-            logger.info("🤖 触发主 AI 排查: sessionId={}", sessionId);
-            String result = aiService.generate(sessionId, String.valueOf(adminQQ), prompt.toString(), null, "系统巡检");
+            logger.info("🤖 触发主 AI 总结: sessionId={}", sessionId);
+            String result = aiService.generateRaw(prompt.toString());
 
             if (botInstance == null) {
                 logger.warn("botInstance 未设置，无法转发报告");
@@ -501,7 +496,7 @@ public class ErrorMonitorService {
             }
             botInstance.sendPrivateReply(adminQQ, message);
         } catch (Exception e) {
-            logger.error("主 AI 排查触发失败", e);
+            logger.error("主 AI 总结触发失败", e);
         }
     }
 

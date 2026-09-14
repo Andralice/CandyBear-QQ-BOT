@@ -48,6 +48,7 @@ import com.start.agent.LinkPreviewTool;
 import com.start.agent.WebFetchTool;
 import com.start.agent.QueryFileTool;
 import com.start.agent.SendFileTool;
+import com.start.agent.GenerateMediaTool;
 import com.start.agent.evo.SelfEvolveTool;
 import com.start.agent.evo.RestartBotTool;
 import com.start.agent.evo.UpdateConfigTool;
@@ -240,6 +241,7 @@ public class BaiLianService {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private final TtsService ttsService;
+    private final AgnesMediaService agnesMediaService = new AgnesMediaService();
     private final EggGroupDataCenter eggGroupDataCenter = new EggGroupDataCenter();
     private MerchantApiService merchantApiService;
     private MerchantRepository merchantRepo;
@@ -818,7 +820,6 @@ public class BaiLianService {
             logger.debug("已构建 AI system prompt，sessionId={}, chars={}", sessionId, systemPrompt.length());
 
             List<Map<String, Object>> messages = new ArrayList<>();
-            messages.add(Map.of("role", "system", "content", systemPrompt));
             java.time.format.DateTimeFormatter shortTs = java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm");
             List<Message> historySnapshot;
             synchronized (history) {
@@ -863,6 +864,9 @@ public class BaiLianService {
             ProfileFactRepository evidenceFactRepo = new ProfileFactRepository(DatabaseConfig.getDataSource());
 
             boolean isAdmin = String.valueOf(BotConfig.getAdminQq()).equals(userId);
+            QueryImagesTool imageQueryTool = new QueryImagesTool(evidenceMessageRepo, groupId, sessionId, userId);
+            GenerateMediaTool imageGenerationTool = new GenerateMediaTool(botInstance, agnesMediaService,
+                    groupId, userId, sessionId, GenerateMediaTool.Kind.IMAGE, imageQueryTool);
 
             final List<Tool> availableTools = new ArrayList<>(Arrays.asList(
                     new WeatherTool(userAliasRepo),
@@ -907,7 +911,7 @@ public class BaiLianService {
                     new DigestTool(),
                     new SearchDigestTool(),
                     new EvolutionHistoryTool(evoRepo),
-                    new QueryImagesTool(evidenceMessageRepo, groupId),
+                    imageQueryTool,
                     new QueryMessageContextTool(evidenceQueryRepo, evidenceMessageRepo, userId, groupId, sessionId),
                     new QueryThreadTool(evidenceQueryRepo, evidenceMessageRepo, userId, groupId, sessionId),
                     new QueryUserTopicHistoryTool(evidenceQueryRepo, evidenceMessageRepo, evidenceFactRepo,
@@ -917,6 +921,24 @@ public class BaiLianService {
                     new QueryGroupAtmosphereTool(evidenceQueryRepo, evidenceMessageRepo, userId, groupId, sessionId),
                     new QuerySimilarEventsTool(evidenceQueryRepo, evidenceMessageRepo, userId, groupId, sessionId)
             ));
+            if (agnesMediaService.isEnabled()) {
+                availableTools.add(imageGenerationTool);
+                availableTools.add(new GenerateMediaTool(botInstance, agnesMediaService, groupId, userId,
+                        sessionId, GenerateMediaTool.Kind.VIDEO));
+                systemPrompt += "\n\n【糖果熊的媒体创作能力】"
+                        + "你现在具备真实的生图和生视频能力，不要说自己不会画图或不能生成。"
+                        + "用户要求生成或修改图片时，调用 generate_image 查阅规范；首次调用只加载规范，不生成。"
+                        + "系统主动注入规范后，自主查询历史要求、图片和相关人物画像，满足条件再调用；指代不明或旧图未确认则先询问。"
+                        + "用户明确要求生成视频、动画或短片时，必须调用 generate_video。"
+                        + "图片查证或追问期间不能说已经开始生成；图片资料充分后工具会发送等待提示。视频请求可先用 send_status 自然地说正在生成、需要等待一会儿；"
+                        + "如果没有单独调用 send_status，媒体工具也会在真正请求前自动发送等待提示。"
+                        + "视频任务按队列串行处理，同一时间只生成一个；工具返回前面排队数量时，要如实告诉用户前边还有几个视频正在生成。"
+                        + "不要先用文字假装生成，也不要因为普通图片描述请求而调用生成工具。"
+                        + "4K 图片把 size 设为 4K；视频使用 text、keyframe 或 reference 中合适的模式。"
+                        + "工具会把生成结果自动发送到当前聊天，工具返回失败时如实说明失败原因。";
+            }
+            // 媒体能力提示必须在 system 消息加入请求前拼接，否则模型看不到它。
+            messages.add(Map.of("role", "system", "content", systemPrompt));
             // 归儿专属工具（code/audit/shell/self_evolve），非管理员不发，省 token
             if (isAdmin) {
                 availableTools.addAll(Arrays.asList(
@@ -1046,6 +1068,7 @@ public class BaiLianService {
 
                 // === 有工具调用 ===
                 List<ToolResult> toolResults = new ArrayList<>();
+                boolean stopToolLoop = false;
 
                 // 将 assistant 消息（含 tool_calls）加入对话历史
                 ObjectNode assistantMsg = MAPPER.createObjectNode();
@@ -1110,6 +1133,11 @@ public class BaiLianService {
                         ToolAuditService.recordStatic(toolName, userId, groupId, sessionId,
                                 argsJson, result, rejected, success, null, latency);
 
+                        if (("generate_image".equals(toolName) || "generate_video".equals(toolName))
+                                && (result.startsWith("Agnes ") || result.startsWith("拒绝使用"))) {
+                            stopToolLoop = true;
+                        }
+
                         toolCalls++;
                         WebDashboardListener.recordToolCall(toolName);
                         logger.info("🔧 [原生工具] {} args={} → {}", toolName,
@@ -1126,9 +1154,13 @@ public class BaiLianService {
                                     toolName + ": " + (result.length() > 80 ? result.substring(0, 80) + "..." : result));
                         }
 
-                        // 工具结果截断到500字，避免源码等大段内容撑爆上下文
-                        String trimmedResult = result.length() > 500
-                                ? result.substring(0, 500) + "\n...[已截断，原始共" + result.length() + "字符]"
+                        // Image selection needs complete IDs/time/alternatives, and the invocation rules must remain intact.
+                        boolean imageEvidence = "query_past_images".equals(toolName) || "generate_image".equals(toolName);
+                        boolean contextEvidence = List.of("query_message_context", "query_thread", "query_media_artifact",
+                                "query_user_profile", "manage_alias").contains(toolName);
+                        int resultLimit = imageEvidence ? result.length() : contextEvidence ? 16000 : 500;
+                        String trimmedResult = result.length() > resultLimit
+                                ? result.substring(0, resultLimit) + "\n...[已截断，原始共" + result.length() + "字符]"
                                 : result;
 
                         Map<String, Object> toolResultMsg = new HashMap<>();
@@ -1144,6 +1176,21 @@ public class BaiLianService {
                         unknownMsg.put("content", "未知工具: " + toolName);
                         messages.add(unknownMsg);
                     }
+                }
+
+                // Complete every tool response before injecting system rules. No call in this same batch may generate early.
+                if (toolResults.stream().anyMatch(tr -> "generate_image".equals(tr.name)
+                        && tr.result.startsWith(GenerateMediaTool.REQUIREMENTS_REQUIRED))) {
+                    imageGenerationTool.injectImageRequirements(messages);
+                }
+
+                if (stopToolLoop) {
+                    reply = toolResults.stream()
+                            .filter(tr -> "generate_image".equals(tr.name) || "generate_video".equals(tr.name))
+                            .map(tr -> tr.result)
+                            .reduce((a, b) -> a + "；" + b)
+                            .orElse(reply);
+                    break;
                 }
 
                 // 已达最大轮次 → 工具结果不再拼入回复，避免源码/日志泄露到聊天中

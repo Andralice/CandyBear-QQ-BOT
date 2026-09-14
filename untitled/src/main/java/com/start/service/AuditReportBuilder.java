@@ -23,9 +23,6 @@ public class AuditReportBuilder {
     private static final Logger logger = LoggerFactory.getLogger(AuditReportBuilder.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    // 匹配最外层 {...} JSON 对象（非贪婪，避免匹配多余内容）
-    private static final Pattern JSON_OBJECT_PATTERN = Pattern.compile("\\{[\\s\\S]*?\\}(?=\\s*$|[\\s\\n\\r}]|$)");
-
     /**
      * 从主 AI 输出文本中解析 AuditReport。失败返回 null。
      * 容忍：```json 包裹、首尾废话、空格换行。
@@ -43,30 +40,30 @@ public class AuditReportBuilder {
 
         try {
             JsonNode root = MAPPER.readTree(jsonText);
-            AuditReport report = new AuditReport();
-            report.setSeverity(textOr(root, "severity", "可忽略"));
-            report.setSummary(textOr(root, "summary", ""));
-            report.setLocation(textOr(root, "location", ""));
-            report.setExceptionType(textOr(root, "exceptionType", ""));
-
-            JsonNode sugNode = root.path("suggestions");
-            List<String> suggestions = new ArrayList<>();
-            if (sugNode.isArray()) {
-                for (JsonNode s : sugNode) {
-                    String t = s.asText("").trim();
-                    if (!t.isEmpty()) suggestions.add(t);
-                }
-            } else if (sugNode.isTextual()) {
-                // 主 AI 偶尔把 suggestions 写成一段文字，按行拆
-                String t = sugNode.asText("");
-                for (String line : t.split("[\\n;；]")) {
-                    String l = line.trim();
-                    if (!l.isEmpty()) suggestions.add(l);
-                }
+            if (!isReportObject(root)) {
+                logger.debug("AuditReportBuilder: JSON 未包含已知报告字段");
+                return null;
             }
+            AuditReport report = new AuditReport();
+            report.setSeverity(firstText(root, "可忽略", "severity"));
+            report.setSummary(firstText(root, "", "summary", "issue"));
+            String location = firstText(root, "", "location");
+            String affectedFiles = affectedFiles(root);
+            if (!affectedFiles.isEmpty()) {
+                location = location.isEmpty() ? affectedFiles : location + "；" + affectedFiles;
+            }
+            report.setLocation(location);
+            report.setExceptionType(firstText(root, "", "exceptionType"));
+            report.setRootCause(firstText(root, "", "rootCause", "root_cause"));
+            report.setEvidence(firstText(root, "", "evidence"));
+            report.setNote(firstText(root, "", "note"));
+
+            List<String> suggestions = new ArrayList<>();
+            appendSuggestions(suggestions, root.path("suggestions"));
+            if (suggestions.isEmpty()) appendSuggestions(suggestions, root.path("suggested_fix"));
             report.setSuggestions(suggestions);
 
-            JsonNode nf = root.path("needsFix");
+            JsonNode nf = root.has("needsFix") ? root.path("needsFix") : root.path("need_fix");
             if (nf.isBoolean()) {
                 report.setNeedsFix(nf.asBoolean());
             } else {
@@ -75,6 +72,10 @@ public class AuditReportBuilder {
             }
             return report;
         } catch (Exception e) {
+            // 某些模型会把 Markdown 中的下划线转义成非法 JSON 的 \_。
+            if (jsonText.contains("\\_")) {
+                return parse(jsonText.replace("\\_", "_"));
+            }
             logger.warn("AuditReportBuilder: JSON 解析失败: {}", e.getMessage());
             return null;
         }
@@ -107,6 +108,12 @@ public class AuditReportBuilder {
         if (!report.getExceptionType().isEmpty()) {
             sb.append("⚠️ 异常：").append(report.getExceptionType()).append("\n");
         }
+        if (!report.getRootCause().isEmpty()) {
+            sb.append("🧭 根因：").append(report.getRootCause()).append("\n");
+        }
+        if (!report.getEvidence().isEmpty()) {
+            sb.append("🔎 证据：").append(report.getEvidence()).append("\n");
+        }
         if (!report.getLocation().isEmpty()) {
             sb.append("📍 位置：").append(report.getLocation()).append("\n");
         }
@@ -117,6 +124,9 @@ public class AuditReportBuilder {
             for (String sug : report.getSuggestions()) {
                 sb.append("  • ").append(sug).append("\n");
             }
+        }
+        if (!report.getNote().isEmpty()) {
+            sb.append("\n📝 备注：").append(report.getNote()).append("\n");
         }
 
         // 是否需要修
@@ -163,5 +173,45 @@ public class AuditReportBuilder {
         if (n.isMissingNode() || n.isNull()) return fallback;
         String v = n.asText(fallback);
         return v == null ? fallback : v;
+    }
+
+    private static String firstText(JsonNode root, String fallback, String... fields) {
+        for (String field : fields) {
+            String value = textOr(root, field, "").trim();
+            if (!value.isEmpty()) return value;
+        }
+        return fallback;
+    }
+
+    private static String affectedFiles(JsonNode root) {
+        JsonNode files = root.path("affected_files");
+        if (!files.isArray()) return "";
+        List<String> values = new ArrayList<>();
+        for (JsonNode file : files) {
+            String value = file.asText("").trim();
+            if (!value.isEmpty()) values.add(value);
+        }
+        return String.join("、", values);
+    }
+
+    private static boolean isReportObject(JsonNode root) {
+        if (root == null || !root.isObject()) return false;
+        return root.has("severity") || root.has("summary") || root.has("issue")
+                || root.has("needsFix") || root.has("need_fix") || root.has("suggestions")
+                || root.has("suggested_fix") || root.has("root_cause") || root.has("affected_files");
+    }
+
+    private static void appendSuggestions(List<String> suggestions, JsonNode sugNode) {
+        if (sugNode.isArray()) {
+            for (JsonNode s : sugNode) {
+                String value = s.asText("").trim();
+                if (!value.isEmpty()) suggestions.add(value);
+            }
+        } else if (sugNode.isTextual()) {
+            for (String line : sugNode.asText("").split("[\\n;；]")) {
+                String value = line.trim();
+                if (!value.isEmpty()) suggestions.add(value);
+            }
+        }
     }
 }

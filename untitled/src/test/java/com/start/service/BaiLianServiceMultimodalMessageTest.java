@@ -24,4 +24,5 @@ class BaiLianServiceMultimodalMessageTest {
 
         assertEquals("看一下", message.get("content"));
     }
+
 }

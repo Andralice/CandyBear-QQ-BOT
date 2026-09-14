@@ -3,6 +3,7 @@ package com.start.agent;
 import com.start.Main;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * AI 发送进度状态消息。让糖果熊在使用工具时可以实时告诉用户在做什么，
@@ -15,6 +16,9 @@ import java.util.*;
  * 不接受显式 group_id/user_id 参数，只发到当前会话，避免串频道。
  */
 public class SendStatusTool implements Tool {
+    private static final long RECENT_STATUS_WINDOW_MS = 10_000L;
+    private static final Map<String, Long> recentStatuses = new ConcurrentHashMap<>();
+
     private final Main botInstance;
     private final String contextGroupId;
     private final String contextUserId;
@@ -54,16 +58,33 @@ public class SendStatusTool implements Tool {
         if (message == null || message.isBlank()) return "缺少 message";
 
         try {
+            boolean sent;
             if (contextGroupId != null) {
-                botInstance.sendGroupReply(Long.parseLong(contextGroupId), message.trim());
+                sent = botInstance.sendGroupReply(Long.parseLong(contextGroupId), message.trim());
             } else if (contextUserId != null) {
-                botInstance.sendPrivateReply(Long.parseLong(contextUserId), message.trim());
+                sent = botInstance.sendPrivateReply(Long.parseLong(contextUserId), message.trim());
             } else {
                 return "无法确定发送目标";
             }
+            if (sent) recentStatuses.put(statusKey(), System.currentTimeMillis());
             return "ok";
         } catch (Exception e) {
             return "发送失败: " + e.getMessage();
         }
+    }
+
+    /** Prevents a media tool from repeating a status the model just sent. */
+    public static boolean consumeRecent(String groupId, String userId) {
+        String key = key(groupId, userId);
+        Long sentAt = recentStatuses.remove(key);
+        return sentAt != null && System.currentTimeMillis() - sentAt <= RECENT_STATUS_WINDOW_MS;
+    }
+
+    private String statusKey() {
+        return key(contextGroupId, contextUserId);
+    }
+
+    private static String key(String groupId, String userId) {
+        return (groupId == null ? "private" : groupId) + ":" + (userId == null ? "" : userId);
     }
 }

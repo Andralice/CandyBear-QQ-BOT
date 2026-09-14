@@ -6,6 +6,7 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import java.lang.reflect.Method;
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.util.Locale;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -67,6 +68,18 @@ class DatabaseMigrationIdempotentIntegrationTest {
             assertColumnExists(conn, "messages", "availability_status");
             assertColumnExists(conn, "long_term_memories", "trigger_claimed_at");
             assertColumnExists(conn, "recurring_tasks", "fire_claimed_at");
+        }
+    }
+
+    @Test
+    void messagesContentHasAtLeastMediumTextCapacity() throws Exception {
+        try (Connection conn = DatabaseConfig.getConnection()) {
+            ResultSet rs = conn.getMetaData().getColumns(null, null, "messages", "content");
+            assertTrue(rs.next(), "messages.content 列应存在");
+            String type = rs.getString("TYPE_NAME").toLowerCase(Locale.ROOT);
+            assertTrue("mediumtext".equals(type) || "longtext".equals(type),
+                    "messages.content 应为 MEDIUMTEXT/LONGTEXT，实际: " + type);
+            rs.close();
         }
     }
 

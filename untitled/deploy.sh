@@ -164,8 +164,12 @@ JAVA_OPTS="${JAVA_OPTS:--Xms256m -Xmx768m}"
 
 # 启动
 screen -S qq-bot -d -m bash -c "
-  source /opt/qq-bot/.env 2>/dev/null || true
-  java ${JAVA_OPTS} -jar /opt/qq-bot/untitled-1.0-SNAPSHOT.jar >> /opt/qq-bot/qq-bot.log 2>&1
+  if [[ -f /opt/qq-bot/.env ]]; then
+    set -a
+    source /opt/qq-bot/.env
+    set +a
+  fi
+  exec java ${JAVA_OPTS} -jar /opt/qq-bot/untitled-1.0-SNAPSHOT.jar >> /opt/qq-bot/qq-bot.log 2>&1
 "
 
 sleep 3

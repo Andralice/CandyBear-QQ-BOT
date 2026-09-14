@@ -21,6 +21,15 @@ public class AuditReport {
     /** 异常类型（可空） */
     private String exceptionType = "";
 
+    /** 根因（兼容 snake_case 巡检报告协议） */
+    private String rootCause = "";
+
+    /** 证据（兼容 snake_case 巡检报告协议） */
+    private String evidence = "";
+
+    /** 备注（兼容 snake_case 巡检报告协议） */
+    private String note = "";
+
     /** 建议修复方案（可空，多条） */
     private List<String> suggestions = new ArrayList<>();
 
@@ -38,6 +47,15 @@ public class AuditReport {
 
     public String getExceptionType() { return exceptionType; }
     public void setExceptionType(String exceptionType) { this.exceptionType = exceptionType; }
+
+    public String getRootCause() { return rootCause; }
+    public void setRootCause(String rootCause) { this.rootCause = rootCause; }
+
+    public String getEvidence() { return evidence; }
+    public void setEvidence(String evidence) { this.evidence = evidence; }
+
+    public String getNote() { return note; }
+    public void setNote(String note) { this.note = note; }
 
     public List<String> getSuggestions() { return suggestions; }
     public void setSuggestions(List<String> suggestions) { this.suggestions = suggestions; }

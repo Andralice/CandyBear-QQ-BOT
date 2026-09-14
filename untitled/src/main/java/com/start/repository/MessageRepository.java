@@ -587,8 +587,43 @@ public class MessageRepository extends BaseRepository {
     }
 
     /**
-     * 搜索历史图片描述（按关键词模糊匹配 content 中的图片描述文本）
+     * Searches image messages with a fixed conversation scope and a request-relative time window.
      */
+    public DatabaseResult<List<Map<String, Object>>> searchImageMessages(
+            String groupId, String sessionId, String userId, String keyword, long messageId,
+            String providerMessageId, boolean includeOlder, LocalDateTime requestTime, long beforeId, int limit) {
+        boolean group = groupId != null && !groupId.isBlank();
+        if (!group && (sessionId == null || sessionId.isBlank())) return DatabaseResult.success(List.of());
+        StringBuilder sql = new StringBuilder("SELECT m.id, m.provider_message_id, m.user_id, m.created_at, " +
+                "m.is_robot_reply, m.content, m.image_data, m.raw_segments_json, m.availability_status FROM messages m WHERE ");
+        List<Object> params = new ArrayList<>();
+        sql.append(group ? "m.group_id=? AND m.is_private=FALSE " : "m.group_id IS NULL AND m.session_id=? AND m.is_private=TRUE ");
+        params.add(group ? groupId : sessionId);
+        sql.append("AND m.retracted_at IS NULL AND m.redacted_at IS NULL " +
+                "AND (m.image_data IS NOT NULL OR EXISTS (SELECT 1 FROM message_parts p " +
+                "WHERE p.message_id=m.id AND p.part_type='image') OR " +
+                "(m.is_robot_reply=TRUE AND m.content LIKE '%[CQ:image,%')) ");
+        if (userId != null && !userId.isBlank()) { sql.append("AND m.user_id=? "); params.add(userId); }
+        if (keyword != null && !keyword.isBlank()) {
+            sql.append("AND (m.content LIKE ? OR m.image_data LIKE ? OR EXISTS (" +
+                    "SELECT 1 FROM message_parts p JOIN media_artifacts a ON a.part_id=p.id " +
+                    "WHERE p.message_id=m.id AND p.part_type='image' AND a.status='SUCCEEDED' AND a.content_json LIKE ?)) ");
+            for (int i = 0; i < 3; i++) params.add("%" + keyword + "%");
+        }
+        if (messageId > 0) { sql.append("AND m.id=? "); params.add(messageId); }
+        if (providerMessageId != null && !providerMessageId.isBlank()) {
+            sql.append("AND m.provider_message_id=? "); params.add(providerMessageId);
+        }
+        if (!includeOlder && messageId == 0 && (providerMessageId == null || providerMessageId.isBlank())) {
+            sql.append("AND m.created_at>=? "); params.add(Timestamp.valueOf(requestTime.minusMinutes(5)));
+        }
+        sql.append("AND m.created_at<=? "); params.add(Timestamp.valueOf(requestTime));
+        if (beforeId > 0) { sql.append("AND m.id<? "); params.add(beforeId); }
+        sql.append("ORDER BY m.id DESC LIMIT ?"); params.add(Math.max(1, Math.min(limit, 10)));
+        return executeQuery(sql.toString(), this::mapToHashMap, params.toArray());
+    }
+
+    /** Legacy description lookup retained for existing callers. */
     public DatabaseResult<List<ChatMessage>> searchImageDescriptions(String groupId, String keyword, int limit) {
         return safeExecute(() -> {
             boolean hasGroup = groupId != null && !groupId.isBlank();

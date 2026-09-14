@@ -99,6 +99,17 @@ public class ToolAuthorizationService {
         }
     }
 
+    /** Return one reservation when the downstream operation was never accepted. */
+    public void release(String userId, String toolName) {
+        if (userId == null || toolName == null) return;
+        Deque<Long> history = rateLimitHistory.get(userId + "|" + toolName);
+        if (history == null) return;
+        synchronized (history) {
+            if (!history.isEmpty()) history.pollLast();
+            if (history.isEmpty()) rateLimitHistory.remove(userId + "|" + toolName, history);
+        }
+    }
+
     // ===== 业务级授权检查（统一返回） =====
 
     /**
