@@ -379,15 +379,14 @@ public class ProfileFactRepository implements Repository {
                     if (!differs) continue;
                     String resolution = "DENY".equals(candidate.polarity) ? "EXPLICIT_DENIAL" : null;
                     try (PreparedStatement conflict = conn.prepareStatement(
-                            "INSERT INTO profile_fact_conflicts (existing_fact_id, incoming_candidate_id, conflict_type, status, resolution, resolved_by, resolved_at) VALUES (?, ?, ?, ?, ?, 'SYSTEM_RULE', ?, ?)")) {
+                            "INSERT INTO profile_fact_conflicts (existing_fact_id, incoming_candidate_id, conflict_type, status, resolution, resolved_by, resolved_at) VALUES (?, ?, ?, ?, ?, 'SYSTEM_RULE', ?)")) {
                         conflict.setLong(1, existingId);
                         conflict.setLong(2, candidate.id);
                         conflict.setString(3, "CLAIM_KEY_COLLISION");
                         conflict.setString(4, resolution == null ? "OPEN" : "RESOLVED");
                         conflict.setString(5, resolution);
-                        if (resolution == null) conflict.setNull(6, Types.VARCHAR);
+                        if (resolution == null) conflict.setNull(6, Types.TIMESTAMP);
                         else conflict.setTimestamp(6, Timestamp.valueOf(LocalDateTime.now()));
-                        conflict.setTimestamp(7, Timestamp.valueOf(LocalDateTime.now()));
                         conflict.executeUpdate();
                     }
                     if (resolution != null) {

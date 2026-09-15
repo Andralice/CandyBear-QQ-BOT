@@ -112,13 +112,18 @@ public class MediaArtifactRepository extends BaseRepository {
                     result.add(new MediaArtifactSummary(rs.getLong("id"), rs.getLong("part_id"),
                             rs.getString("artifact_type"), rs.getString("parser_name"),
                             rs.getString("parser_version"), rs.getString("status"),
-                            rs.getString("content_json"), (Double) rs.getObject("confidence"),
+                            rs.getString("content_json"),
+                            toDoubleOrNull(rs.getObject("confidence")),
                             rs.getString("language"), rs.getString("error_code"), rs.getString("error_detail"),
                             completed == null ? null : completed.toLocalDateTime()));
                 }
             }
         }
         return List.copyOf(result);
+    }
+
+    static Double toDoubleOrNull(Object value) {
+        return value instanceof Number n ? n.doubleValue() : null;
     }
 
     public List<Map<String, Object>> findForwardNodes(long partId, int limit) throws SQLException {

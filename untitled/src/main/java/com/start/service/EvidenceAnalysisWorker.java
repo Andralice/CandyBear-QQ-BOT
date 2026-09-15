@@ -78,14 +78,18 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
     public EvidenceAnalysisWorker(BaiLianService aiService) {
         this(new AnalysisTaskRepository(), new MediaArtifactRepository(), new MessageRepository(),
                 new ProfileFactRepository(com.start.config.DatabaseConfig.getDataSource()), aiService,
-                "analysis-" + ProcessHandle.current().pid(), null, null);
+                "analysis-" + ProcessHandle.current().pid(), null,
+                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(8))
+                        .followRedirects(HttpClient.Redirect.NEVER).build());
     }
 
     public EvidenceAnalysisWorker(BaiLianService aiService, Main oneBotClient) {
         this(new AnalysisTaskRepository(), new MediaArtifactRepository(), new MessageRepository(),
                 new ProfileFactRepository(com.start.config.DatabaseConfig.getDataSource()), aiService,
                 "analysis-" + ProcessHandle.current().pid(),
-                oneBotClient == null ? null : oneBotClient::callOneBotApi, null);
+                oneBotClient == null ? null : oneBotClient::callOneBotApi,
+                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(8))
+                        .followRedirects(HttpClient.Redirect.NEVER).build());
     }
 
     EvidenceAnalysisWorker(AnalysisTaskRepository taskRepository, MediaArtifactRepository artifactRepository,
