@@ -39,8 +39,9 @@ public class QueryImagesTool implements Tool {
 
     @Override public String getDescription() {
         return "自主查找当前会话图片。可无关键词搜索，默认当前用户五分钟内的图；可按QQ、关键词、回复消息ID或游标定位。"
-                + "查旧图用 include_older=true；查糖果熊生成的图用 user_id=candybear。返回每张图的 image_id、发送者、完整时间、"
-                + "描述和原图来源状态，供 generate_image 的 reference_image_ids 使用。原图未实际下载前不保证可用；多候选须判断指代，超过五分钟先询问用户。";
+                + "查旧图用 include_older=true；查糖果熊生成的图必须用 user_id=candybear。返回每张图的 image_id、消息内 image_index、发送者、完整时间、"
+                + "描述和原图来源状态，供 generate_image 的 reference_image_ids 使用。没有明确发送者时，按消息时间、引用关系和 image_index 判断，必要时用 user_id=all；"
+                + "原图未实际下载前不保证可用；多候选须判断指代，超过五分钟先询问用户。";
     }
 
     @Override public Map<String, Object> getParameters() {
@@ -81,12 +82,15 @@ public class QueryImagesTool implements Tool {
                     Map<String, Object> item = new LinkedHashMap<>();
                     item.put("image_id", ref.id());
                     item.put("message_id", ref.messageId());
+                    item.put("image_index", ref.imageIndex());
                     item.put("provider_message_id", row.get("provider_message_id"));
                     item.put("user_id", row.get("user_id"));
+                    item.put("sender", "candybear".equals(String.valueOf(row.get("user_id"))) ? "糖果熊"
+                            : String.valueOf(row.get("user_id")));
                     item.put("sent_at", ref.sentAt() == null ? "UNKNOWN" : ref.sentAt().toString());
                     item.put("requires_confirmation", requiresConfirmation(ref));
                     item.put("description", ref.description());
-                    item.put("source_status", ref.source().isBlank() ? "UNAVAILABLE" : "RECORDED_NOT_DOWNLOADED");
+                    item.put("source_status", hasUsableSource(ref) ? "RECORDED_NOT_DOWNLOADED" : "UNAVAILABLE");
                     items.add(item);
                 }
             }
@@ -111,7 +115,7 @@ public class QueryImagesTool implements Tool {
                 throw new IllegalArgumentException("图片 " + id + " 已不可用或内容改变，请重新查询");
             if (requiresConfirmation(ref) && !confirmedIds.contains(id))
                 throw new IllegalArgumentException("图片 " + id + " 超过五分钟或时间未知，必须先询问用户并取得确认");
-            if (ref.source().isBlank()) throw new IllegalArgumentException("图片 " + id + " 没有可读取原图，请用户重发");
+            if (!hasUsableSource(ref)) throw new IllegalArgumentException("图片 " + id + " 没有可读取原图，请用户重发");
             selected.add(ref);
         }
         List<String> inputs = new ArrayList<>();
@@ -123,49 +127,65 @@ public class QueryImagesTool implements Tool {
         return ref.sentAt() == null || ref.sentAt().isBefore(requestTime.minusMinutes(5));
     }
 
+    private boolean hasUsableSource(ImageReference ref) {
+        if (ref == null || ref.source().isBlank()) return false;
+        return isHttpUrl(ref.source()) || ref.generated();
+    }
+
     private List<ImageReference> references(Map<String, Object> row) {
-        LinkedHashMap<String, String> images = new LinkedHashMap<>();
+        List<ImageCandidate> descriptionEntries = new ArrayList<>();
         String legacy = value(row.get("image_data"));
-        JsonNode descriptions = parse(legacy);
-        if (descriptions.isArray()) for (JsonNode image : descriptions)
-            images.put(image.path("url").asText(""), image.path("desc").asText(""));
+        JsonNode descriptionJson = parse(legacy);
+        if (descriptionJson.isArray()) for (JsonNode image : descriptionJson) {
+            String source = image.path("url").asText("");
+            if (source.isBlank()) {
+                String file = image.path("file").asText("");
+                if (isHttpUrl(file)) source = file;
+            }
+            descriptionEntries.add(new ImageCandidate(source, image.path("desc").asText("")));
+        }
         else if (!legacy.isBlank() && legacy.contains("|")) {
             String[] parts = legacy.split("\\|", 2);
-            images.put(parts[0], parts[1]);
+            descriptionEntries.add(new ImageCandidate(parts[0], parts[1]));
         }
         // Ordered raw segments include pictures even when Vision did not produce a description.
-        LinkedHashMap<String, String> ordered = new LinkedHashMap<>();
+        List<ImageCandidate> ordered = new ArrayList<>();
         JsonNode segments = parse(value(row.get("raw_segments_json")));
-        if (segments.isArray()) for (JsonNode part : segments) {
+        if (segments.isArray()) {
+            int rawIndex = 0;
+            for (JsonNode part : segments) {
             if (!"image".equals(part.path("type").asText())) continue;
             String source = part.path("data").path("url").asText("");
             if (source.isBlank()) {
                 String file = part.path("data").path("file").asText("");
                 if (file.startsWith("https://") || file.startsWith("http://")) source = file;
             }
-            // Preserve distinct images without URLs rather than losing ambiguity.
-            String key = source.isBlank() ? "unavailable:" + ordered.size() : source;
-            ordered.put(key, images.getOrDefault(source, ""));
+            ImageCandidate described = rawIndex < descriptionEntries.size() ? descriptionEntries.get(rawIndex) : null;
+            if (source.isBlank() && described != null) source = described.source();
+            ordered.add(new ImageCandidate(source, described == null ? "" : described.description()));
+            rawIndex++;
+            }
         }
-        images.forEach(ordered::putIfAbsent);
+        // Older rows may only have image_data. Keep those entries in their stored order.
+        for (int i = ordered.size(); i < descriptionEntries.size(); i++) ordered.add(descriptionEntries.get(i));
         boolean generated = "true".equalsIgnoreCase(value(row.get("is_robot_reply"))) || "1".equals(value(row.get("is_robot_reply")));
         if (generated) {
             var matcher = CQ_IMAGE.matcher(value(row.get("content")));
-            while (matcher.find()) ordered.putIfAbsent(matcher.group(1).replace("&#44;", ",").replace("&#91;", "[")
-                    .replace("&#93;", "]").replace("&amp;", "&"), "糖果熊之前发送的图片");
+            while (matcher.find()) ordered.add(new ImageCandidate(matcher.group(1).replace("&#44;", ",").replace("&#91;", "[")
+                    .replace("&#93;", "]").replace("&amp;", "&"), "糖果熊之前发送的图片"));
         }
         List<ImageReference> refs = new ArrayList<>();
         long messageId = number(row.get("id"), 0);
         LocalDateTime time = row.get("created_at") instanceof Timestamp ts ? ts.toLocalDateTime()
                 : row.get("created_at") instanceof LocalDateTime dt ? dt : null;
         int index = 0;
-        for (var image : ordered.entrySet()) {
-            String desc = image.getValue().isBlank() ? value(row.get("content")) : image.getValue();
+        for (ImageCandidate image : ordered) {
+            String desc = image.description().isBlank() ? value(row.get("content")) : image.description();
             // CQ paths and large text are not useful image descriptions.
             desc = CQ_IMAGE.matcher(desc).replaceAll("[图片]");
             if (desc.length() > 600) desc = desc.substring(0, 600) + "…";
             refs.add(new ImageReference(messageId + ":" + (++index), messageId, time,
-                    image.getKey().startsWith("unavailable:") ? "" : image.getKey(), desc, generated));
+                    image.source(), desc, generated, index));
         }
         return refs;
     }
@@ -177,8 +197,17 @@ public class QueryImagesTool implements Tool {
         } catch (Exception ignored) { return JSON.createArrayNode(); }
     }
     private static String value(Object value) { return value == null ? "" : String.valueOf(value).trim(); }
+
+    private static boolean isHttpUrl(String value) {
+        if (value == null) return false;
+        String trimmed = value.trim().toLowerCase(Locale.ROOT);
+        return trimmed.startsWith("http://") || trimmed.startsWith("https://");
+    }
+
     private static long number(Object value, long fallback) {
         try { return Long.parseLong(value(value)); } catch (Exception ignored) { return fallback; }
     }
-    private record ImageReference(String id, long messageId, LocalDateTime sentAt, String source, String description, boolean generated) {}
+    private record ImageCandidate(String source, String description) {}
+    private record ImageReference(String id, long messageId, LocalDateTime sentAt, String source,
+                                  String description, boolean generated, int imageIndex) {}
 }

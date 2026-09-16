@@ -38,6 +38,7 @@ public final class GroupDialogueAnalyzer {
             最新一句同时包含多个话题时，必须拆分各分句的对象，以最后一个主句和协议 reply_to/mentions 为主。仅仅有词语能回答糖果熊更早的问题，不代表整句是在回答糖果熊。
             若最新消息明确说“不是回糖果熊/是在回某群友”，或 reply_to/mentions 指向其他群友，除非另有直接对糖果熊的独立请求，否则 bot_has_next_turn=false。
             仅提到糖果熊、群友已经接手、群友转向别人时为 false。所有用户必须用输入中的 user_id 标识，消息必须用 message_id 标识。
+            同时判断最新一句在当前上下文中的 interaction_mode：BANTER=接梗、调侃或夸张玩笑；CASUAL_QUESTION=随口问事实或近况；SERIOUS_HELP=认真求助、解释或排查；EMOTIONAL_SUPPORT=倾诉、安慰或重要情绪交流；ACTION_REQUEST=真的要求执行工具、生成、发送、记录或操作；无法归类才用 OTHER。不要只看祈使句形式，结合上下文区分玩笑里的“给我变”与真实操作请求。
             """;
 
     private static final String OPPORTUNITY_SYSTEM = """
@@ -60,9 +61,10 @@ public final class GroupDialogueAnalyzer {
                 "next_turn_target_user_id":{"type":"string"},
                 "next_turn_target_message_id":{"type":"string"},
                 "turn_reason":{"type":"string"},
+                "interaction_mode":{"type":"string","enum":["BANTER","CASUAL_QUESTION","SERIOUS_HELP","EMOTIONAL_SUPPORT","ACTION_REQUEST","OTHER"]},
                 "forbidden_assumptions":{"type":"array","items":{"type":"string"}}
               },
-              "required":["latest_speaker_id","latest_addressee_ids","latest_topic","reply_chain","bot_role","bot_has_next_turn","next_turn_target_user_id","next_turn_target_message_id","turn_reason","forbidden_assumptions"]
+              "required":["latest_speaker_id","latest_addressee_ids","latest_topic","reply_chain","bot_role","bot_has_next_turn","next_turn_target_user_id","next_turn_target_message_id","turn_reason","interaction_mode","forbidden_assumptions"]
             }}}
             """);
 
@@ -378,6 +380,7 @@ public final class GroupDialogueAnalyzer {
                 node.path("next_turn_target_user_id").asText(""),
                 node.path("next_turn_target_message_id").asText(""),
                 node.path("turn_reason").asText(""),
+                parseInteractionMode(node.path("interaction_mode").asText("OTHER")),
                 stringList(node.path("forbidden_assumptions")));
     }
 
@@ -430,7 +433,15 @@ public final class GroupDialogueAnalyzer {
         return new GroupDialoguePlan.Relation(
                 relation.latestSpeakerId(), relation.latestAddresseeIds(), relation.latestTopic(),
                 relation.replyChain(), GroupDialoguePlan.BotRole.OUTSIDER, false,
-                "", "", reason, relation.forbiddenAssumptions());
+                "", "", reason, relation.interactionMode(), relation.forbiddenAssumptions());
+    }
+
+    private static GroupDialoguePlan.InteractionMode parseInteractionMode(String value) {
+        try {
+            return GroupDialoguePlan.InteractionMode.valueOf(value);
+        } catch (Exception ignored) {
+            return GroupDialoguePlan.InteractionMode.OTHER;
+        }
     }
 
     private static List<String> stringList(JsonNode node) {

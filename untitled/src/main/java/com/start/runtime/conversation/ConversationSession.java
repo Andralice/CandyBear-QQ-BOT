@@ -20,6 +20,8 @@ public class ConversationSession {
     private final String userId;
     private final String nickname;
     private final String userPrompt;
+    private final String capabilityText;
+    private final boolean attachedImage;
     private final List<Long> atUserIds;
     private final boolean allowSilence;
     private final long generation;
@@ -39,6 +41,8 @@ public class ConversationSession {
         this.userId = b.userId;
         this.nickname = b.nickname;
         this.userPrompt = b.userPrompt;
+        this.capabilityText = b.capabilityText;
+        this.attachedImage = b.attachedImage;
         this.atUserIds = b.atUserIds;
         this.allowSilence = b.allowSilence;
         this.generation = b.generation;
@@ -57,6 +61,9 @@ public class ConversationSession {
     public String userId() { return userId; }
     public String nickname() { return nickname; }
     public String userPrompt() { return userPrompt; }
+    /** Null means an older caller has not supplied separate source text. */
+    public String capabilityText() { return capabilityText; }
+    public boolean attachedImage() { return attachedImage; }
     public List<Long> atUserIds() { return atUserIds; }
     public boolean allowSilence() { return allowSilence; }
     public long generation() { return generation; }
@@ -92,6 +99,8 @@ public class ConversationSession {
         private final String userId;
         private final String nickname;
         private String userPrompt = "";
+        private String capabilityText;
+        private boolean attachedImage;
         private List<Long> atUserIds = List.of();
         private boolean allowSilence;
         private long generation;
@@ -110,6 +119,9 @@ public class ConversationSession {
         }
 
         public Builder userPrompt(String v) { userPrompt = v; return this; }
+        public Builder capabilityInput(String text, boolean hasImage) {
+            capabilityText = text; attachedImage = hasImage; return this;
+        }
         public Builder atUserIds(List<Long> v) { atUserIds = v; return this; }
         public Builder allowSilence(boolean v) { allowSilence = v; return this; }
         public Builder generation(long v) { generation = v; return this; }

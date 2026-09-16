@@ -57,8 +57,18 @@ public class ConversationState {
     }
 
     public void addImageInfo(String url, String file) {
+        addImageInfo(url, file, null, 0, null);
+    }
+
+    /** 保留图片所属的入站消息和消息内序号，避免缓冲多条消息后串图。 */
+    public void addImageInfo(String url, String file, String messageId, int imageIndex) {
+        addImageInfo(url, file, messageId, imageIndex, null);
+    }
+
+    /** 同时保留发送者，避免跨来源的缓冲图片被误归给最后一个触发用户。 */
+    public void addImageInfo(String url, String file, String messageId, int imageIndex, String senderId) {
         synchronized (imageInfos) {
-            imageInfos.add(new ImageInfo(url, file));
+            imageInfos.add(new ImageInfo(url, file, messageId, imageIndex, senderId));
         }
     }
 
@@ -121,5 +131,13 @@ public class ConversationState {
 
     public record MessageEntry(String text, long timestamp) {}
 
-    public record ImageInfo(String url, String file) {}
+    public record ImageInfo(String url, String file, String messageId, int imageIndex, String senderId) {
+        public ImageInfo(String url, String file) {
+            this(url, file, null, 0, null);
+        }
+
+        public ImageInfo(String url, String file, String messageId, int imageIndex) {
+            this(url, file, messageId, imageIndex, null);
+        }
+    }
 }

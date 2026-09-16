@@ -47,6 +47,7 @@ class GroupDialogueAnalyzerParsingTest {
                   "next_turn_target_user_id":"u3",
                   "next_turn_target_message_id":"m3",
                   "turn_reason":"回答了机器人的问题",
+                  "interaction_mode":"BANTER",
                   "forbidden_assumptions":["不要认错老王"]
                 }
                 """));
@@ -55,6 +56,7 @@ class GroupDialogueAnalyzerParsingTest {
         assertEquals("u3", relation.nextTurnTargetUserId());
         assertEquals("m3", relation.nextTurnTargetMessageId());
         assertEquals(GroupDialoguePlan.BotRole.ACTIVE_SECOND_PERSON, relation.botRole());
+        assertEquals(GroupDialoguePlan.InteractionMode.BANTER, relation.interactionMode());
     }
 
     @Test

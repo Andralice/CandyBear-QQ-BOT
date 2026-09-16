@@ -176,6 +176,7 @@ class LlmProtocolTest {
     void normalizesKnownProtocolNamesAndEndpoints() {
         assertEquals(LlmProtocol.Type.OPENAI, LlmProtocol.Type.parse(null));
         assertEquals(LlmProtocol.Type.OPENAI, LlmProtocol.Type.parse("openai"));
+        assertEquals(LlmProtocol.Type.OPENAI, LlmProtocol.Type.parse("openai-compatible"));
         assertEquals(LlmProtocol.Type.ANTHROPIC, LlmProtocol.Type.parse("claude-native"));
         assertEquals(baseUrl + "/v1/chat/completions",
                 LlmProtocol.endpoint(baseUrl + "/v1", LlmProtocol.Type.OPENAI));
@@ -191,6 +192,19 @@ class LlmProtocolTest {
                 LlmProtocol.Type.OPENAI, "openai-model", "", List.of(), List.of(), 128, "");
 
         assertFalse(body.containsKey("reasoning_effort"));
+    }
+
+    @Test
+    void extractsProtocolSpecificTokenUsage() throws Exception {
+        LlmProtocol.TokenUsage openAi = LlmProtocol.extractUsage(
+                JSON.readTree("{\"usage\":{\"prompt_tokens\":21,\"completion_tokens\":7}}"),
+                LlmProtocol.Type.OPENAI);
+        LlmProtocol.TokenUsage anthropic = LlmProtocol.extractUsage(
+                JSON.readTree("{\"usage\":{\"input_tokens\":19,\"output_tokens\":5}}"),
+                LlmProtocol.Type.ANTHROPIC);
+
+        assertEquals(new LlmProtocol.TokenUsage(21, 7), openAi);
+        assertEquals(new LlmProtocol.TokenUsage(19, 5), anthropic);
     }
 
     private HttpResponse<String> send(LlmProtocol.Type type, String url, String apiKey,

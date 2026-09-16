@@ -783,6 +783,7 @@ public class Main extends WebSocketClient {
         if (evidenceRetentionService != null) evidenceRetentionService.close();
         failPendingRequests(new IllegalStateException("机器人正在关闭"));
         if (conversationExecutor != null) conversationExecutor.shutdown();
+        if (baiLianService != null) baiLianService.close();
         if (dashboardListener != null) dashboardListener.stop();
         ToolAuditService.shutdown();
         try {

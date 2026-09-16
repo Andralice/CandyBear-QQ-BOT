@@ -17,6 +17,7 @@ public record GroupDialoguePlan(
     public enum Action { REPLY, SILENT }
     public enum EntryRole { SECOND_PERSON, THIRD_PERSON_INTERJECTION, OBSERVER }
     public enum BotRole { ACTIVE_SECOND_PERSON, INVITED_SECOND_PERSON, REFERENCED_ONLY, OUTSIDER }
+    public enum InteractionMode { BANTER, CASUAL_QUESTION, SERIOUS_HELP, EMOTIONAL_SUPPORT, ACTION_REQUEST, OTHER }
     public enum Risk { LOW, MEDIUM, HIGH }
 
     public record Relation(
@@ -29,11 +30,22 @@ public record GroupDialoguePlan(
             String nextTurnTargetUserId,
             String nextTurnTargetMessageId,
             String turnReason,
+            InteractionMode interactionMode,
             List<String> forbiddenAssumptions) {
 
         public Relation {
             latestAddresseeIds = latestAddresseeIds == null ? List.of() : List.copyOf(latestAddresseeIds);
+            interactionMode = interactionMode == null ? InteractionMode.OTHER : interactionMode;
             forbiddenAssumptions = forbiddenAssumptions == null ? List.of() : List.copyOf(forbiddenAssumptions);
+        }
+
+        public Relation(String latestSpeakerId, List<String> latestAddresseeIds, String latestTopic,
+                        String replyChain, BotRole botRole, boolean botHasNextTurn,
+                        String nextTurnTargetUserId, String nextTurnTargetMessageId,
+                        String turnReason, List<String> forbiddenAssumptions) {
+            this(latestSpeakerId, latestAddresseeIds, latestTopic, replyChain, botRole,
+                    botHasNextTurn, nextTurnTargetUserId, nextTurnTargetMessageId,
+                    turnReason, InteractionMode.OTHER, forbiddenAssumptions);
         }
     }
 
@@ -105,6 +117,17 @@ public record GroupDialoguePlan(
         } else {
             sb.append("。你只是旁观者，不要认领群友之间的前文。");
         }
+        if (relation.interactionMode() != InteractionMode.OTHER) {
+            sb.append("\n本轮互动类型：").append(relation.interactionMode()).append("。");
+            switch (relation.interactionMode()) {
+                case BANTER -> sb.append("这是接梗，不是真实执行请求；只接住梗本身，说出最先冒出的那句群聊反应就停，不附解释、建议或反问。");
+                case CASUAL_QUESTION -> sb.append("这是随口一问；直接回答眼前这一点，不展开成清单或说明书。");
+                case SERIOUS_HELP -> sb.append("这是认真求助；把解决问题真正需要的内容说清楚。");
+                case EMOTIONAL_SUPPORT -> sb.append("这是倾诉或情绪交流；先回应具体处境和感受，不急着分析或给建议。");
+                case ACTION_REQUEST -> sb.append("这是实际执行请求；按事实和工具结果处理，不能把请求或计划说成已经完成。");
+                case OTHER -> { }
+            }
+        }
         if (!relation.forbiddenAssumptions().isEmpty()) {
             sb.append("\n禁止误认：").append(String.join("；", relation.forbiddenAssumptions()));
         }
@@ -126,6 +149,7 @@ public record GroupDialoguePlan(
                 + " topic=\"" + logText(relation.latestTopic()) + "\""
                 + " chain=\"" + logText(relation.replyChain()) + "\""
                 + " turnReason=\"" + logText(relation.turnReason()) + "\""
+                + " interaction=" + relation.interactionMode()
                 + " openNeed=\"" + logText(opportunity.openNeed()) + "\""
                 + " contribution=\"" + logText(opportunity.concreteContribution()) + "\""
                 + " confidence=" + String.format(java.util.Locale.ROOT, "%.2f", opportunity.contributionConfidence())

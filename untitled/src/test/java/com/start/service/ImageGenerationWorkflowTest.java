@@ -84,6 +84,34 @@ class ImageGenerationWorkflowTest {
         assertTrue(submitted.path("prompt").asText().contains("只将背景改成蓝色"));
     }
 
+    @Test void preloadedImageRulesAllowFirstRealCallAndKeepOriginalLookup() {
+        CapabilityTools capabilities = new CapabilityTools(List.of(query, tool), RuleSetDefaults.defaults(), false);
+        capabilities.preload("修改这张图的背景", true, false, Set.of());
+        assertTrue(capabilities.prompt().contains("requirements_summary"));
+        assertEquals(0, submissions.get(), "Preloading must never submit or send media");
+        query.execute(Map.of("provider_message_id", "qq42"));
+        tool.execute(edit("42:1"));
+        assertEquals(1, submissions.get(), "No preliminary generate_image round when rules are already injected");
+        assertEquals("data:image/png;base64," + PNG, submitted.path("extra_body").path("image").get(0).asText());
+    }
+
+    @Test void dynamicallyLoadedImageKeepsPreviouslyQueriedReferencesAndSafetyChecks() {
+        CapabilityTools capabilities = new CapabilityTools(List.of(query, tool), RuleSetDefaults.defaults(), false);
+        capabilities.preload("看看这是什么", true, false, Set.of());
+        query.execute(Map.of("provider_message_id", "qq42"));
+        capabilities.execute(Map.of("capabilities", List.of("image")));
+        assertFalse(capabilities.activeTools().contains(tool));
+        assertTrue(tool.execute(edit("42:1")).startsWith(GenerateMediaTool.REQUIREMENTS_REQUIRED));
+        assertEquals(0, submissions.get());
+        capabilities.activatePending();
+        assertTrue(capabilities.activeTools().contains(tool));
+        assertTrue(capabilities.prompt().contains("超过五分钟"));
+        assertTrue(tool.execute(Map.of("prompt", "熊", "mode", "text")).contains("requirements_summary"));
+        assertEquals(0, submissions.get());
+        tool.execute(edit("42:1"));
+        assertEquals(1, submissions.get());
+    }
+
     @Test void olderImageRequiresConfirmationEvenWhenReplyTargetsIt() throws Exception {
         repo.rows.clear(); repo.rows.add(row(42, 6));
         tool.injectImageRequirements(new ArrayList<>());

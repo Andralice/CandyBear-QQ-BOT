@@ -37,6 +37,10 @@ public class BotConfig {
     private static int baiLianTimeoutMs;
     private static int baiLianMaxRetries;
     private static String baiLianReasoningEffort;
+    private static boolean baiLianPoolEnabled;
+    private static String baiLianPoolCandidates;
+    private static int baiLianPoolProbeIntervalMs;
+    private static int baiLianPoolProbeTimeoutMs;
 
     private static String agentApiKey;
     private static String agentBaseUrl;
@@ -154,6 +158,16 @@ public class BotConfig {
             baiLianTimeoutMs = parseInt(resolveOrEmpty(props.getProperty("bailian.timeout-ms", "90000")), 90000);
             baiLianMaxRetries = parseInt(resolveOrEmpty(props.getProperty("bailian.max-retries", "2")), 2);
             baiLianReasoningEffort = resolveOrEmpty(props.getProperty("bailian.reasoning-effort", ""));
+            baiLianPoolEnabled = Boolean.parseBoolean(resolveOrEmpty(
+                    props.getProperty("bailian.pool.enabled", "${BAILIAN_POOL_ENABLED:false}")));
+            baiLianPoolCandidates = resolveOrEmpty(
+                    props.getProperty("bailian.pool.candidates", "${BAILIAN_POOL_CANDIDATES:}"));
+            baiLianPoolProbeIntervalMs = parseInt(resolveOrEmpty(
+                    props.getProperty("bailian.pool.probe-interval-ms", "${BAILIAN_POOL_PROBE_INTERVAL_MS:600000}")),
+                    600000);
+            baiLianPoolProbeTimeoutMs = parseInt(resolveOrEmpty(
+                    props.getProperty("bailian.pool.probe-timeout-ms", "${BAILIAN_POOL_PROBE_TIMEOUT_MS:15000}")),
+                    15000);
 
             agentApiKey = resolveOrEmpty(props.getProperty("agent.api-key", ""));
             agentBaseUrl = resolveOrEmpty(props.getProperty("agent.base-url", "https://api.deepseek.com/v1/chat/completions"));
@@ -438,6 +452,14 @@ public class BotConfig {
     public static String getBaiLianReasoningEffort() {
         return baiLianReasoningEffort;
     }
+
+    public static boolean isBaiLianPoolEnabled() { return baiLianPoolEnabled; }
+
+    public static String getBaiLianPoolCandidates() { return baiLianPoolCandidates; }
+
+    public static int getBaiLianPoolProbeIntervalMs() { return baiLianPoolProbeIntervalMs; }
+
+    public static int getBaiLianPoolProbeTimeoutMs() { return baiLianPoolProbeTimeoutMs; }
 
     public static String getAgentApiKey() {
         return agentApiKey;

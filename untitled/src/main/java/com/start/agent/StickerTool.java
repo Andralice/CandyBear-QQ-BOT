@@ -13,7 +13,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 表情包发送工具 —— AI 在聊天中发送表情包/梗图/QQ 表情。
@@ -26,7 +30,15 @@ public class StickerTool implements Tool {
     private static final Logger logger = LoggerFactory.getLogger(StickerTool.class);
 
     private final Main bot;
-    private final Map<String, Long> lastSendTime = new ConcurrentHashMap<>();
+    /** 发送表情包不应占住群聊生成 worker；队列有界，满时如实返回失败。 */
+    private static final ThreadPoolExecutor SEND_EXECUTOR = new ThreadPoolExecutor(
+            2, 4, 30, TimeUnit.SECONDS, new ArrayBlockingQueue<>(64),
+            runnable -> {
+                Thread thread = new Thread(runnable, "CandyBear-Sticker-Sender");
+                thread.setDaemon(true);
+                return thread;
+            }, new ThreadPoolExecutor.AbortPolicy());
+    private static final Map<String, Long> lastSendTime = new ConcurrentHashMap<>();
     private static final long COOLDOWN_MS = 30_000;
 
     // QQ 内置表情 face id 映射（file 字段空时的回退）
@@ -122,14 +134,36 @@ public class StickerTool implements Tool {
                 return "表情包发送失败";
             }
 
-            if (isGroup) {
-                bot.sendGroupReply(Long.parseLong(groupId), cqCode);
-            } else {
-                bot.sendPrivateReply(Long.parseLong(userId), cqCode);
+            long targetId = Long.parseLong(isGroup ? groupId : userId);
+            long scheduledAt = System.currentTimeMillis();
+            final boolean[] coolingDown = {false};
+            lastSendTime.compute(cooldownKey, (key, previous) -> {
+                if (previous != null && scheduledAt - previous < COOLDOWN_MS) {
+                    coolingDown[0] = true;
+                    return previous;
+                }
+                return scheduledAt;
+            });
+            if (coolingDown[0]) return "表情包冷却中，稍后再发";
+
+            try {
+                SEND_EXECUTOR.execute(() -> {
+                    try {
+                        boolean sent = isGroup
+                                ? bot.sendGroupReply(targetId, cqCode)
+                                : bot.sendPrivateReply(targetId, cqCode);
+                        if (!sent) logger.warn("表情包发送未确认送达 target={} scope={}", targetId, cooldownKey);
+                    } catch (Exception sendError) {
+                        logger.warn("表情包后台发送失败 target={} scope={}", targetId, cooldownKey, sendError);
+                    }
+                });
+            } catch (RejectedExecutionException e) {
+                // 没有进入发送队列就不应消耗冷却时间。
+                lastSendTime.remove(cooldownKey, scheduledAt);
+                logger.warn("表情包发送队列已满 scope={}", cooldownKey);
+                return "暂时不可用：表情包发送队列已满，请稍后再发";
             }
-            // 只有真正走到发送调用后才开始冷却，选择/读文件失败不应锁住用户。
-            lastSendTime.put(cooldownKey, System.currentTimeMillis());
-            return "已发送表情包: " + String.join(",", selected.keywords);
+            return "已安排表情包，正在发送: " + String.join(",", selected.keywords);
         } catch (Exception e) {
             logger.warn("发送表情包失败", e);
             return "表情包发送失败: " + e.getMessage();

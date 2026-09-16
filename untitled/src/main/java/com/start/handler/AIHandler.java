@@ -48,6 +48,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -174,6 +175,13 @@ public class AIHandler implements MessageHandler {
 
         // 提取图片信息（只在 WebSocket 线程提取 URL，下载在 executor 内完成）
         List<Map<String, String>> imageInfos = MessageUtil.extractImages(msg.path("message"));
+        // 后续可能把多条群消息合并成一次生成；把消息 ID 和消息内序号一起带过缓冲区。
+        for (int i = 0; i < imageInfos.size(); i++) {
+            Map<String, String> image = imageInfos.get(i);
+            image.put("message_id", messageId);
+            image.put("image_index", String.valueOf(i + 1));
+            image.put("sender_id", String.valueOf(userId));
+        }
 
         // 消息接收阶段立即 fire ImageReceived：让 StickerHarvesterListener 异步入库，
         // 不依赖 conversation 是否被唤醒/速率限制/无关键 prompt。
@@ -181,8 +189,8 @@ public class AIHandler implements MessageHandler {
             String gidForSticker = "group".equals(messageType) ? String.valueOf(groupId) : "private";
             String uidForSticker = String.valueOf(userId);
             for (Map<String, String> img : imageInfos) {
-                String url = img.get("url");
-                if (url != null && !url.isEmpty()) {
+                String url = imageSource(img);
+                if (!url.isBlank()) {
                     try {
                         runtime.fire(new RuntimeEvent.ImageReceived(gidForSticker, uidForSticker, url));
                     } catch (Exception e) {
@@ -273,7 +281,8 @@ public class AIHandler implements MessageHandler {
         conv.addMessage(plainText, messageId);
         if (!imageInfos.isEmpty()) {
             for (Map<String, String> img : imageInfos) {
-                conv.addImageInfo(img.get("url"), img.get("file"));
+                conv.addImageInfo(img.get("url"), img.get("file"),
+                        img.get("message_id"), parseImageIndex(img.get("image_index")), img.get("sender_id"));
             }
         }
         for (String link : linksToFetch) {
@@ -719,6 +728,10 @@ public class AIHandler implements MessageHandler {
                 Map<String, String> m = new HashMap<>();
                 m.put("url", img.url());
                 m.put("file", img.file());
+                m.put("message_id", img.messageId());
+                m.put("image_index", String.valueOf(img.imageIndex()));
+                m.put("sender_id", img.senderId() == null || img.senderId().isBlank()
+                        ? userId : img.senderId());
                 imageInfoMaps.add(m);
             }
             List<String> imageDataUris = downloadImages(imageInfoMaps);
@@ -730,8 +743,7 @@ public class AIHandler implements MessageHandler {
                         .filter(id -> id != null && !id.isBlank())
                         .reduce((first, second) -> second)
                         .orElse(null);
-                bot.attachInboundImageData("group", gid, userId, latestMessageId,
-                        buildImageDataJson(imageInfoMaps, imageDesc));
+                attachImageDescriptions(bot, "group", gid, userId, imageInfoMaps, latestMessageId);
             }
 
             // Vision 描述完成 → 触发 ImageDescribed 事件，让 StickerHarvesterListener 异步入库
@@ -768,6 +780,7 @@ public class AIHandler implements MessageHandler {
 
                 ConversationSession session = ConversationSession.of(gid, userId, nickname)
                         .userPrompt(prompt)
+                        .capabilityInput(mergedText, !state.getImageInfos().isEmpty())
                         .atUserIds(ats)
                         .allowSilence(allowSilence)
                         .generation(state.getGeneration())
@@ -778,7 +791,8 @@ public class AIHandler implements MessageHandler {
                                 .filter(id -> id != null && !id.isBlank())
                                 .collect(java.util.stream.Collectors.toSet()))
                         .dialoguePlan(dialoguePlan)
-                        .imageDataUris(Collections.emptyList())
+                        .imageDataUris(BotConfig.isBaiLianMultimodalEnabled()
+                                ? imageDataUris : Collections.emptyList())
                         .startMs(startMs)
                         .build();
 
@@ -969,7 +983,8 @@ public class AIHandler implements MessageHandler {
                 return;
             }
         }
-        String prompt = buildReplyContext(msg, bot) + extractPrompt(rawMessage, plainText);
+        String currentText = extractPrompt(rawMessage, plainText);
+        String prompt = buildReplyContext(msg, bot) + currentText;
         String sessionId = "private_" + userId;
 
         if (isClearCommand(prompt)) {
@@ -981,7 +996,7 @@ public class AIHandler implements MessageHandler {
         if (prompt.isEmpty() && imageInfos.isEmpty()) prompt = EMPTY_MENTION_PROMPT;
         if (prompt.isEmpty()) prompt = "看一下这张图片";
 
-        replyWithAI(bot, msg, sessionId, String.valueOf(userId), prompt, null, nickname, Collections.emptyList(), imageInfos, linksToFetch);
+        replyWithAI(bot, msg, sessionId, String.valueOf(userId), prompt, null, nickname, Collections.emptyList(), imageInfos, linksToFetch, currentText);
     }
 
     private boolean isExplicitTrigger(JsonNode msg, String rawMessage) {
@@ -1003,7 +1018,7 @@ public class AIHandler implements MessageHandler {
     }
 
 
-    private void replyWithAI(Main bot, JsonNode originalMsg, String sessionId, String userId, String prompt, String groupId, String nickname, List<Long> atUserIds, List<Map<String, String>> imageInfos, List<String> linksToFetch) {
+    private void replyWithAI(Main bot, JsonNode originalMsg, String sessionId, String userId, String prompt, String groupId, String nickname, List<Long> atUserIds, List<Map<String, String>> imageInfos, List<String> linksToFetch, String currentText) {
         groupExecutor.execute(sessionId, () -> {
             List<String> imageDataUris = downloadImages(imageInfos);
             String imageDesc = describeImagesWithCache(imageInfos, imageDataUris);
@@ -1016,11 +1031,12 @@ public class AIHandler implements MessageHandler {
 
             // 回填到 Main 在入站时创建的同一条记录，不在 generate() 里插入重复用户消息。
             if (!imageDesc.isEmpty()) {
-                bot.attachInboundImageData("private", null, userId,
-                        originalMsg.path("message_id").asText(), buildImageDataJson(imageInfos, imageDesc));
+                attachImageDescriptions(bot, "private", null, userId, imageInfos,
+                        originalMsg.path("message_id").asText());
             }
             String reply = aiService.generate(sessionId, userId, fullPrompt, groupId, nickname, atUserIds,
-                    Collections.emptyList());
+                    BotConfig.isBaiLianMultimodalEnabled() ? imageDataUris : Collections.emptyList(),
+                    currentText, !imageInfos.isEmpty());
 
             if (reply == null || reply.trim().isEmpty()) {
                 logger.debug("AI 未返回可发送的私聊内容，sessionId={}", sessionId);
@@ -1088,10 +1104,15 @@ public class AIHandler implements MessageHandler {
         if (imageInfoMaps == null || imageInfoMaps.isEmpty() || imageDesc == null || imageDesc.isEmpty()) return;
         int limit = Math.min(imageInfoMaps.size(), 3);
         for (int i = 0; i < limit; i++) {
-            String url = imageInfoMaps.get(i).get("url");
-            if (url == null || url.isEmpty()) continue;
+            Map<String, String> image = imageInfoMaps.get(i);
+            String url = imageSource(image);
+            String description = image.get("description");
+            if (url.isBlank() || description == null || description.isBlank()) continue;
             try {
-                runtime.fire(new RuntimeEvent.ImageDescribed(groupId, userId, url, imageDesc));
+                String senderId = image.get("sender_id");
+                runtime.fire(new RuntimeEvent.ImageDescribed(groupId,
+                        senderId == null || senderId.isBlank() ? userId : senderId,
+                        url, description));
             } catch (Exception e) {
                 logger.debug("fire ImageDescribed 失败: {}", e.getMessage());
             }
@@ -1099,37 +1120,132 @@ public class AIHandler implements MessageHandler {
     }
 
     /**
-     * Vision 描述（带 sticker-ingest 缓存复用）。StickerHarvesterListener 在 handle 入口就 fire 了
-     * ImageReceived 并开始 vision 描述，本方法查 cache 命中就直接返回，避免重复 vision 调用。
-     * 命中条件：imageInfoMaps 第一张图的 url 在 sticker-ingest vision 缓存里（60s 内）。
+     * Vision 描述（带 sticker-ingest 缓存复用）。每张图片单独命中/生成描述，并把结果写回
+     * 同一个图片 map。这样下载失败、重复 URL、单条多图和多条缓冲消息都不会串图。
      */
     private String describeImagesWithCache(List<Map<String, String>> imageInfoMaps, List<String> imageDataUris) {
         if (imageInfoMaps == null || imageInfoMaps.isEmpty()) return "";
-        try {
-            StickerIngestService sticker = StickerIngestService.getInstance();
-            String firstUrl = imageInfoMaps.get(0).get("url");
-            if (firstUrl != null) {
-                String cached = sticker.tryGetVisionDescription(firstUrl);
-                if (cached != null && !cached.isBlank()) {
-                    logger.debug("vision 描述命中 sticker-ingest 缓存: url={}", firstUrl);
-                    return cached;
+        int limit = Math.min(imageInfoMaps.size(), 3);
+        StringBuilder result = new StringBuilder("[用户发送了").append(limit).append("张图片]");
+        for (int i = 0; i < limit; i++) {
+            Map<String, String> image = imageInfoMaps.get(i);
+            image.remove("description");
+            String url = imageSource(image);
+            String description = null;
+
+            try {
+                if (url != null && !url.isBlank()) {
+                    String cached = StickerIngestService.getInstance().tryGetVisionDescription(url);
+                    if (isSingleImageDescription(cached)) {
+                        description = extractSingleImageDescription(cached);
+                        logger.debug("vision 描述命中 sticker-ingest 缓存: url={}", url);
+                    }
+                }
+            } catch (Exception ignored) {
+                // sticker-ingest 未初始化就降级到主视觉路径
+            }
+
+            String dataUri = imageDataUris != null && i < imageDataUris.size() ? imageDataUris.get(i) : "";
+            if ((description == null || description.isBlank()) && dataUri != null && !dataUri.isBlank()) {
+                String raw = aiService.describeImages(List.of(dataUri));
+                description = extractSingleImageDescription(raw);
+                if (description != null && !description.isBlank() && url != null && !url.isBlank()) {
+                    try {
+                        StickerIngestService.getInstance().cacheVisionDescription(url, description);
+                    } catch (Exception ignored) {}
                 }
             }
-        } catch (Exception ignored) {
-            // sticker-ingest 未初始化就降级
-        }
-        // cache 未命中，调 vision
-        String desc = aiService.describeImages(imageDataUris);
-        if (desc != null && !desc.isBlank()) {
-            try {
-                StickerIngestService sticker = StickerIngestService.getInstance();
-                for (Map<String, String> img : imageInfoMaps) {
-                    String url = img.get("url");
-                    if (url != null) sticker.cacheVisionDescription(url, desc);
+
+            if (description != null && !description.isBlank()) {
+                description = description.trim();
+                image.put("description", description);
+                result.append("\n图片").append(i + 1);
+                String messageId = image.get("message_id");
+                if (messageId != null && !messageId.isBlank()) {
+                    result.append("（消息ID=").append(messageId)
+                            .append("，消息内第").append(parseImageIndex(image.get("image_index"), i + 1)).append("张");
+                    String senderId = image.get("sender_id");
+                    if (senderId != null && !senderId.isBlank()) result.append("，发送者=").append(senderId);
+                    result.append("）");
                 }
-            } catch (Exception ignored) {}
+                result.append("内容：").append(description);
+            } else {
+                // Keep the image's identity in the prompt even when download/Vision failed;
+                // otherwise a later image can be mistaken for this one.
+                result.append("\n图片").append(i + 1);
+                String messageId = image.get("message_id");
+                if (messageId != null && !messageId.isBlank()) {
+                    result.append("（消息ID=").append(messageId)
+                            .append("，消息内第").append(parseImageIndex(image.get("image_index"), i + 1)).append("张");
+                    String senderId = image.get("sender_id");
+                    if (senderId != null && !senderId.isBlank()) result.append("，发送者=").append(senderId);
+                    result.append("）");
+                }
+                result.append("内容：暂时无法读取原图，不能据此猜测内容");
+            }
         }
-        return desc == null ? "" : desc;
+        return result.toString();
+    }
+
+    /** 旧缓存可能保存过整段多图描述；这种值无法证明属于当前这张图，必须重新识别。 */
+    private boolean isSingleImageDescription(String value) {
+        if (value == null || value.isBlank()) return false;
+        int labels = 0;
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("图片\\d+内容：").matcher(value);
+        while (matcher.find()) labels++;
+        return labels <= 1;
+    }
+
+    /** 从视觉模型的单图结果中取出正文，去掉数量和图片序号包装。 */
+    private String extractSingleImageDescription(String value) {
+        if (value == null || value.isBlank()) return "";
+        String text = value.trim();
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("(?s)(?:^|\\n)图片\\d+内容：\\s*(.*?)(?=\\n图片\\d+内容：|$)")
+                .matcher(text);
+        if (matcher.find()) return matcher.group(1).trim();
+        text = text.replaceFirst("^\\[用户发送了\\d+张图片]\\s*", "").trim();
+        if (text.matches("图片\\d+内容：?\\s*")) return "";
+        return text;
+    }
+
+    /** 把视觉描述按原入站消息分别回填，保留同一消息内的图片顺序。 */
+    private void attachImageDescriptions(Main bot, String messageType, String groupId, String userId,
+                                         List<Map<String, String>> imageInfoMaps, String fallbackMessageId) {
+        if (imageInfoMaps == null || imageInfoMaps.isEmpty()) return;
+        Map<String, List<Map<String, String>>> byMessage = new LinkedHashMap<>();
+        for (Map<String, String> image : imageInfoMaps) {
+            String messageId = image.get("message_id");
+            if (messageId == null || messageId.isBlank()) messageId = fallbackMessageId;
+            if (messageId == null || messageId.isBlank()) continue;
+            byMessage.computeIfAbsent(messageId, ignored -> new ArrayList<>()).add(image);
+        }
+        for (Map.Entry<String, List<Map<String, String>>> entry : byMessage.entrySet()) {
+            boolean hasDescription = entry.getValue().stream()
+                    .anyMatch(image -> image.get("description") != null && !image.get("description").isBlank());
+            if (!hasDescription) continue;
+            String ownerId = entry.getValue().stream()
+                    .map(image -> image.get("sender_id"))
+                    .filter(sender -> sender != null && !sender.isBlank())
+                    .findFirst()
+                    .orElse(userId);
+            bot.attachInboundImageData(messageType, groupId, ownerId, entry.getKey(),
+                    buildImageDataJson(entry.getValue()));
+        }
+    }
+
+    private static int parseImageIndex(String value) {
+        return parseImageIndex(value, 0);
+    }
+
+    private static int parseImageIndex(String value, int fallback) {
+        try {
+            int parsed = Integer.parseInt(value == null ? "" : value.trim());
+            return parsed > 0 ? parsed : fallback;
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
     }
 
     // ===== 管理员表情包管理命令（私聊入口） =====
@@ -1213,44 +1329,53 @@ public class AIHandler implements MessageHandler {
         }
     }
 
-    /** 下载图片并转为 base64 data URI，失败则跳过 */
+    /** 下载图片并转为 base64 data URI，失败时保留空位，避免后续图片序号前移。 */
     private List<String> downloadImages(List<Map<String, String>> imageInfos) {
         List<String> uris = new ArrayList<>();
         if (imageInfos == null || imageInfos.isEmpty()) return uris;
         int limit = Math.min(imageInfos.size(), 3);
         for (int i = 0; i < limit; i++) {
-            String url = imageInfos.get(i).get("url");
-            if (url == null || url.isEmpty()) continue;
+            String url = imageSource(imageInfos.get(i));
+            if (url.isBlank()) {
+                uris.add("");
+                continue;
+            }
             String dataUri = ImageUtils.downloadImageAsBase64DataUri(url);
-            if (dataUri != null) uris.add(dataUri);
+            uris.add(dataUri == null ? "" : dataUri);
         }
         return uris;
     }
 
-    private String buildImageDataJson(List<Map<String, String>> imageInfos, String imageDesc) {
-        if (imageInfos == null || imageInfos.isEmpty() || imageDesc.isEmpty()) return null;
-        // 解析 vision 描述中的每条 "图片N内容：xxx"，与 imageInfos 的 URL 配对
-        StringBuilder sb = new StringBuilder("[");
+    private String buildImageDataJson(List<Map<String, String>> imageInfos) {
+        if (imageInfos == null || imageInfos.isEmpty()) return null;
+        ArrayNode entries = JsonNodeFactory.instance.arrayNode();
         int limit = Math.min(imageInfos.size(), 3);
         for (int i = 0; i < limit; i++) {
-            String url = imageInfos.get(i).get("url");
-            if (url == null) url = "";
-            // 从 imageDesc 提取对应描述
-            String prefix = "图片" + (i + 1) + "内容：";
-            int idx = imageDesc.indexOf(prefix);
-            String desc = "";
-            if (idx >= 0) {
-                int start = idx + prefix.length();
-                int end = imageDesc.indexOf("\n", start);
-                if (end < 0) end = imageDesc.length();
-                desc = imageDesc.substring(start, end).trim().replace("\\", "\\\\").replace("\"", "\\\"");
-            }
-            if (i > 0) sb.append(",");
-            sb.append("{\"url\":\"").append(url.replace("\\", "\\\\").replace("\"", "\\\"")).append("\"")
-              .append(",\"desc\":\"").append(desc).append("\"}");
+            Map<String, String> image = imageInfos.get(i);
+            ObjectNode entry = entries.addObject();
+            entry.put("url", imageSource(image));
+            entry.put("file", image.getOrDefault("file", ""));
+            entry.put("desc", image.getOrDefault("description", ""));
+            entry.put("image_index", parseImageIndex(image.get("image_index"), i + 1));
+            String messageId = image.get("message_id");
+            if (messageId != null && !messageId.isBlank()) entry.put("message_id", messageId);
         }
-        sb.append("]");
-        return sb.toString();
+        return entries.toString();
+    }
+
+    /** Only HTTP(S) provider URLs are safe for the inbound Vision/download path. */
+    private static String imageSource(Map<String, String> image) {
+        if (image == null) return "";
+        String url = image.get("url");
+        if (isHttpUrl(url)) return url.trim();
+        String file = image.get("file");
+        return isHttpUrl(file) ? file.trim() : "";
+    }
+
+    private static boolean isHttpUrl(String value) {
+        if (value == null) return false;
+        String trimmed = value.trim().toLowerCase(java.util.Locale.ROOT);
+        return trimmed.startsWith("http://") || trimmed.startsWith("https://");
     }
 
     /** 私聊同样拆分，避免一大段砸过去 */

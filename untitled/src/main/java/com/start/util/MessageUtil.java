@@ -152,10 +152,11 @@ public class MessageUtil {
             JsonNode data = seg.path("data");
             if (data == null || !data.isObject()) continue;
             String url = data.path("url").asText("");
-            if (url.isEmpty()) continue;
+            String file = data.path("file").asText("");
+            if (url.isEmpty() && file.isEmpty()) continue;
             Map<String, String> info = new HashMap<>();
             info.put("url", url);
-            info.put("file", data.path("file").asText(""));
+            info.put("file", file);
             info.put("file_size", data.path("file_size").asText(""));
             images.add(info);
         }

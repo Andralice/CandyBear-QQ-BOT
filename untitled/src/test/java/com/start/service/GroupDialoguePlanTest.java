@@ -32,6 +32,7 @@ class GroupDialoguePlanTest {
         assertTrue(plan.toPromptNarrative().contains("前面的对话不是对你说的"));
         assertTrue(plan.toPromptNarrative().contains("只是承载最新消息的会话锚点"));
         assertTrue(plan.compactSummary().contains("parallelMs=40"));
+        assertTrue(plan.compactSummary().contains("interaction=OTHER"));
         assertTrue(plan.compactSummary().contains("contribution=\"可提供两位小数正则\""));
     }
 

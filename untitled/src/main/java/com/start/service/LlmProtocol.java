@@ -24,6 +24,7 @@ final class LlmProtocol {
             if (value == null) return OPENAI;
             return switch (value.trim().toLowerCase()) {
                 case "anthropic", "claude", "claude-native" -> ANTHROPIC;
+                case "openai", "openai-compatible" -> OPENAI;
                 default -> OPENAI;
             };
         }
@@ -96,6 +97,16 @@ final class LlmProtocol {
         return specs;
     }
 
+    /** Replace only the primary OpenAI system message; tool call/result ordering stays intact. */
+    static void updateSystemPrompt(Type type, List<Map<String, Object>> messages, String prompt) {
+        if (type.isAnthropic()) return; // Anthropic uses the top-level system field.
+        if (!messages.isEmpty() && "system".equals(messages.get(0).get("role"))) {
+            messages.set(0, Map.of("role", "system", "content", prompt));
+        } else {
+            messages.add(0, Map.of("role", "system", "content", prompt));
+        }
+    }
+
     static Map<String, Object> buildRequestBody(Type type, String model, String systemPrompt,
                                                   List<Map<String, Object>> messages,
                                                   List<Map<String, Object>> toolSpecs,
@@ -160,6 +171,22 @@ final class LlmProtocol {
         normalized.set("_anthropic_content", content.deepCopy());
         return normalized;
     }
+
+    /** Providers expose equivalent usage fields under protocol-specific names. */
+    static TokenUsage extractUsage(JsonNode root, Type type) {
+        JsonNode usage = root == null ? null : root.path("usage");
+        if (usage == null || !usage.isObject()) return new TokenUsage(0, 0);
+        if (type == Type.ANTHROPIC) {
+            return new TokenUsage(
+                    usage.path("input_tokens").asInt(0),
+                    usage.path("output_tokens").asInt(0));
+        }
+        return new TokenUsage(
+                usage.path("prompt_tokens").asInt(0),
+                usage.path("completion_tokens").asInt(0));
+    }
+
+    record TokenUsage(int inputTokens, int outputTokens) {}
 
     static String extractText(JsonNode message) {
         JsonNode content = message == null ? null : message.get("content");

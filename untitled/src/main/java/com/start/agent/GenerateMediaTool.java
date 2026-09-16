@@ -55,8 +55,9 @@ public final class GenerateMediaTool implements Tool {
     /** Returns the one-time image rules and marks them as reviewed for native protocols. */
     public String consumeImageRequirements() {
         if (kind != Kind.IMAGE || imageRequirementsReviewed) return "";
+        String requirements = invocationRequirements();
         imageRequirementsReviewed = true;
-        return invocationRequirements();
+        return requirements;
     }
 
     /** Called only after the complete tool-call batch and system injection, before the next LLM round. */
@@ -75,7 +76,7 @@ public final class GenerateMediaTool implements Tool {
     @Override
     public String getDescription() {
         if (kind == Kind.IMAGE) {
-            return "生成、参考图片创作或修改图片，完成后自动发送。首次调用只加载生图规范，不生成；系统注入规范后必须先查证再调用。"
+            return "生成、参考图片创作或修改图片，完成后自动发送。先遵守系统注入的生图规范并查证；若尚未加载规范，首次调用只返回规范、不生成。"
                     + "先 query_message_context 汇总此前要求；自主 query_past_images 查原图和回复目标，人物按@QQ/别名查 query_user_profile。"
                     + "多图指代不明须追问，五分钟前图片须用户确认。参考/修改必须填已查询的 reference_image_ids 和 selection_reason，"
                     + "修改需明确改变和保留区域；未指定画风时从电影写实、纪实街拍、商业人像、产品/场景写实中选择一个并写入完整 prompt，"

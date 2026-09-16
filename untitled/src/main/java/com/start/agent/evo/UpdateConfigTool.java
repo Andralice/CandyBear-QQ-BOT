@@ -38,7 +38,7 @@ public class UpdateConfigTool implements Tool {
         return "热重载运行时配置（提示词、工具描述等），改完立即生效无需重启。\n" +
                "参数: action(list/set/delete/approve/reject/pending/restore), key(配置键名), value(配置值)。\n" +
                "常用键: system_prompt_override(完全替换提示词), system_prompt_patch(追加到提示词末尾), " +
-               "tool_desc_<工具名>(覆盖工具描述)。\n" +
+               "tool_desc_<工具名>(覆盖工具描述), main_model_pool_candidates(热增删主模型候选；只写密钥环境变量名)。\n" +
                "⚠️ system_prompt_override 和 system_prompt_patch 写入时会自动备份旧值，并转为提案暂存，需归儿人工确认后才生效。\n" +
                "仅管理员(归儿)可用。";
     }

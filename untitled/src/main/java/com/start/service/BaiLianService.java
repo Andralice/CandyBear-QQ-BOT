@@ -152,7 +152,7 @@ import java.util.stream.Collectors;
  * @see com.start.agent.Tool
  * @see com.start.service.KeywordKnowledgeService
  */
-public class BaiLianService {
+public class BaiLianService implements AutoCloseable {
     private final KeywordKnowledgeService knowledgeService;
     private final UserAffinityRepository userAffinityRepo;
 
@@ -165,8 +165,7 @@ public class BaiLianService {
     );
     /** 模型不可用时的事实状态；正常回复不会走这里。 */
     public static final String GENERATION_FAILURE_MESSAGE = "这次请求没有成功，请稍后再试。";
-
-
+    private static final int MAX_RUNTIME_ROUTE_ATTEMPTS = 3;
     private final UserProfileRepository profileRepo = new UserProfileRepository(DatabaseConfig.getDataSource());
     private final ProfilePrivacyRepository profilePrivacyRepo = new ProfilePrivacyRepository(DatabaseConfig.getDataSource());
     private final UserAliasRepository userAliasRepo = new UserAliasRepository();
@@ -243,6 +242,7 @@ public class BaiLianService {
             .executor(Executors.newFixedThreadPool(10))
             .build();
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final MainModelPool mainModelPool;
 
     private final TtsService ttsService;
     private final AgnesMediaService agnesMediaService = new AgnesMediaService();
@@ -275,6 +275,23 @@ public class BaiLianService {
         this.knowledgeService = Objects.requireNonNull(knowledgeService, "knowledgeService cannot be null");
         this.userAffinityRepo = Objects.requireNonNull(userAffinityRepo, "userAffinityRepo cannot be null");
         this.ttsService = Objects.requireNonNull(ttsService, "ttsService cannot be null");
+
+        MainModelPool.Candidate legacyRoute = MainModelPool.Candidate.fromBaseUrl(
+                "legacy", baiLianBaseUrl, bailianChatModel, baiLianProtocol.name(),
+                "BAILIAN_API_KEY", baiLianApiKey);
+        this.mainModelPool = MainModelPool.fromConfig(
+                legacyRoute,
+                BotConfig.isBaiLianPoolEnabled(),
+                BotConfig.getBaiLianPoolCandidates(),
+                BotConfig.getBaiLianPoolProbeIntervalMs(),
+                BotConfig.getBaiLianPoolProbeTimeoutMs(),
+                System::getenv);
+        this.mainModelPool.start(
+                this::probeMainModel,
+                this::configuredMainModelPoolSpec,
+                System::getenv);
+        logger.info("主模型池: enabled={}, candidates={}",
+                mainModelPool.isEnabled(), mainModelPool.candidates());
     }
     // === 上下文管理 ===
     private final Map<String, List<Message>> sessions = new ConcurrentHashMap<>(); // sessionId -> 消息历史
@@ -439,7 +456,10 @@ public class BaiLianService {
 
     // ===== 公共方法 =====
 
+    private final CapabilityTools.Recent recentCapabilities = new CapabilityTools.Recent();
+
     public void clearContext(String sessionId) {
+        recentCapabilities.clear(sessionId);
         // 只设标记，由下次 generate() 实际清理。避免跨线程 race。
         lastClearTime.put(sessionId, System.currentTimeMillis());
     }
@@ -536,6 +556,232 @@ public class BaiLianService {
         return java.time.LocalDate.now(ZoneId.of("Asia/Shanghai")).minusDays(2).format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
     }
 
+    /**
+     * 以完整非流式响应作为候选池探测指标；不重试，避免把退避时间计入下一轮线路判断。
+     * 只返回状态和耗时，不记录响应体或凭据。
+     */
+    private MainModelPool.ProbeResult probeMainModel(MainModelPool.Candidate candidate, int timeoutMs) {
+        long startedAt = System.nanoTime();
+        try {
+            List<Map<String, Object>> messages = List.of(
+                    buildMessage("user", "只回复“你好”", List.of(), candidate.protocol()));
+            Map<String, Object> body = LlmProtocol.buildRequestBody(
+                    candidate.protocol(), candidate.model(), "", messages,
+                    Collections.emptyList(), 8, "");
+            HttpRequest request = LlmProtocol.addAuthHeaders(HttpRequest.newBuilder()
+                            .uri(URI.create(candidate.endpoint())), candidate.protocol(), candidate.apiKey())
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))
+                    .timeout(Duration.ofMillis(timeoutMs))
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            long latencyMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                return MainModelPool.ProbeResult.failed(candidate, latencyMs,
+                        "HTTP " + response.statusCode());
+            }
+
+            JsonNode root = objectMapper.readTree(response.body());
+            if (root.has("error")) {
+                return MainModelPool.ProbeResult.failed(candidate, latencyMs, "provider error");
+            }
+            JsonNode message = LlmProtocol.normalizeAssistantResponse(objectMapper, root, candidate.protocol());
+            if (LlmProtocol.extractText(message).isBlank()) {
+                return MainModelPool.ProbeResult.failed(candidate, latencyMs, "empty assistant response");
+            }
+            LlmProtocol.TokenUsage usage = LlmProtocol.extractUsage(root, candidate.protocol());
+            return MainModelPool.ProbeResult.healthy(
+                    candidate, latencyMs, usage.inputTokens(), usage.outputTokens());
+        } catch (Exception e) {
+            long latencyMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+            return MainModelPool.ProbeResult.failed(candidate, latencyMs, e.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * 首次模型调用尚未执行任何工具，可以在候选之间安全重建协议请求并透明故障转移。
+     * 进入工具循环后则固定本次返回的线路，避免跨模型重放有副作用的工具。
+     */
+    private InitialMainTurn requestInitialMainTurn(String systemPrompt,
+                                                    List<Message> historySnapshot,
+                                                    boolean suppress,
+                                                    String userPrompt,
+                                                    List<String> imageDataUris,
+                                                    List<Tool> availableTools,
+                                                    String sessionId) throws Exception {
+        reloadMainModelPoolConfig();
+        List<MainModelPool.Candidate> routes = mainModelPool.attemptOrder();
+        int attempts = mainModelPool.isEnabled()
+                ? Math.min(MAX_RUNTIME_ROUTE_ATTEMPTS, routes.size())
+                : 1;
+        Exception lastFailure = null;
+
+        for (int i = 0; i < attempts; i++) {
+            MainModelPool.Candidate route = routes.get(i);
+            try {
+                List<Map<String, Object>> messages = buildInitialMessages(
+                        historySnapshot, suppress, userPrompt, imageDataUris,
+                        systemPrompt, route.protocol());
+                List<Map<String, Object>> toolSpecs = LlmProtocol.buildToolSpecs(
+                        route.protocol(), availableTools,
+                        name -> runtimeConfig.get("tool_desc_" + name));
+                Map<String, Object> body = LlmProtocol.buildRequestBody(
+                        route.protocol(), route.model(), systemPrompt, messages, toolSpecs,
+                        1024, baiLianReasoningEffort);
+                String requestBody = objectMapper.writeValueAsString(body);
+                logger.debug("发送 AI 请求，route={}, model={}, sessionId={}, chars={}",
+                        route.id(), route.model(), sessionId, requestBody.length());
+
+                HttpRequest request = LlmProtocol.addAuthHeaders(HttpRequest.newBuilder()
+                                .uri(URI.create(route.endpoint())), route.protocol(), route.apiKey())
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                        .timeout(Duration.ofMillis(this.bailianTimeoutMs))
+                        .build();
+                int retries = mainModelPool.isEnabled() ? 0 : this.bailianMaxRetries;
+                long requestStartedAt = System.nanoTime();
+                HttpResponse<String> response = BailianRetryExecutor.executeHttp(
+                        "主模型线路 " + route.id(),
+                        () -> httpClient.send(request, HttpResponse.BodyHandlers.ofString()),
+                        retries);
+                long responseLatencyMs = TimeUnit.NANOSECONDS.toMillis(
+                        System.nanoTime() - requestStartedAt);
+                if (response.statusCode() != 200) {
+                    ErrorMonitorService.reportMainApiError(response.statusCode(), response.body());
+                    throw new RuntimeException("HTTP " + response.statusCode());
+                }
+
+                JsonNode root = objectMapper.readTree(response.body());
+                if (root.has("error")) {
+                    throw new RuntimeException("provider error: "
+                            + root.path("error").path("code").asText("UNKNOWN"));
+                }
+                JsonNode message = LlmProtocol.normalizeAssistantResponse(
+                        objectMapper, root, route.protocol());
+                if (!LlmProtocol.hasToolCalls(message) && LlmProtocol.extractText(message).isBlank()) {
+                    throw new RuntimeException("empty assistant response");
+                }
+
+                mainModelPool.reportSuccess(route, responseLatencyMs);
+                return new InitialMainTurn(route, messages, toolSpecs, message);
+            } catch (Exception e) {
+                lastFailure = e;
+                mainModelPool.reportFailure(route, e.getClass().getSimpleName() + ": " + e.getMessage());
+                logger.warn("主模型线路 {} 首次请求失败，第 {}/{} 条候选: {}",
+                        route.id(), i + 1, attempts, e.getMessage());
+            }
+        }
+
+        throw lastFailure != null ? lastFailure : new IllegalStateException("没有可用的主模型线路");
+    }
+
+    private List<Map<String, Object>> buildInitialMessages(List<Message> historySnapshot,
+                                                            boolean suppress,
+                                                            String userPrompt,
+                                                            List<String> imageDataUris,
+                                                            String systemPrompt,
+                                                            LlmProtocol.Type protocol) {
+        List<Map<String, Object>> messages = new ArrayList<>();
+        DateTimeFormatter shortTs = DateTimeFormatter.ofPattern("MM-dd HH:mm");
+        int snapshotStart = Math.max(0, historySnapshot.size() - 4);
+        for (int i = snapshotStart; i < historySnapshot.size(); i++) {
+            Message msg = historySnapshot.get(i);
+            String role = "assistant".equals(msg.role) ? "assistant" : "user";
+            String content = msg.content.length() > 600
+                    ? msg.content.substring(0, 600) + "..."
+                    : msg.content;
+            String timePrefix = java.time.LocalDateTime.ofInstant(
+                    java.time.Instant.ofEpochMilli(msg.timestamp), ZoneId.of("Asia/Shanghai"))
+                    .format(shortTs);
+            List<String> turnImages = !suppress && i == historySnapshot.size() - 1
+                    && "user".equals(role) ? imageDataUris : Collections.emptyList();
+            messages.add(buildMessage(role, "[" + timePrefix + "] " + content, turnImages, protocol));
+        }
+        if (suppress) {
+            messages.add(buildUserMessage(userPrompt, imageDataUris, protocol));
+        }
+        if (!protocol.isAnthropic()) {
+            messages.add(0, Map.of("role", "system", "content", systemPrompt));
+        }
+        return messages;
+    }
+
+    /** 工具已经执行后只让备用模型整理结果，绝不跨线路重放工具。 */
+    private String recoverAfterToolFailure(String systemPrompt,
+                                           List<Message> historySnapshot,
+                                           boolean suppress,
+                                           String userPrompt,
+                                           List<String> imageDataUris,
+                                           List<ToolResult> toolResults,
+                                           MainModelPool.Candidate failedRoute) {
+        String evidence = toolResults.stream()
+                .filter(result -> !"send_status".equals(result.name()))
+                .map(result -> result.name() + ": " + result.result())
+                .filter(result -> !result.isBlank())
+                .collect(Collectors.joining("\n"));
+        if (evidence.isBlank()) return "";
+        if (evidence.length() > 16_000) evidence = evidence.substring(0, 16_000) + "\n...[已截断]";
+
+        String recoveryPrompt = "上一条模型调用中断，但工具已经执行完成。"
+                + "请根据以下工具结果直接完成对用户的自然回复，不要再次调用工具，也不要提及模型切换。\n"
+                + evidence;
+        int attempted = 0;
+        for (MainModelPool.Candidate route : mainModelPool.attemptOrder()) {
+            if (route.id().equals(failedRoute.id())) continue;
+            if (attempted++ >= 2) break;
+            try {
+                List<Map<String, Object>> recoveryMessages = buildInitialMessages(
+                        historySnapshot, suppress, userPrompt, imageDataUris,
+                        systemPrompt, route.protocol());
+                recoveryMessages.add(buildMessage(
+                        "user", recoveryPrompt, Collections.emptyList(), route.protocol()));
+                Map<String, Object> body = LlmProtocol.buildRequestBody(
+                        route.protocol(), route.model(), systemPrompt, recoveryMessages,
+                        Collections.emptyList(), 1024, baiLianReasoningEffort);
+                HttpRequest request = LlmProtocol.addAuthHeaders(HttpRequest.newBuilder()
+                                .uri(URI.create(route.endpoint())), route.protocol(), route.apiKey())
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))
+                        .timeout(Duration.ofMillis(this.bailianTimeoutMs))
+                        .build();
+                HttpResponse<String> response = BailianRetryExecutor.executeHttp(
+                        "工具结果收尾线路 " + route.id(),
+                        () -> httpClient.send(request, HttpResponse.BodyHandlers.ofString()), 0);
+                if (response.statusCode() != 200) {
+                    throw new RuntimeException("HTTP " + response.statusCode());
+                }
+                JsonNode root = objectMapper.readTree(response.body());
+                if (root.has("error")) throw new RuntimeException("provider error");
+                JsonNode message = LlmProtocol.normalizeAssistantResponse(
+                        objectMapper, root, route.protocol());
+                String reply = LlmProtocol.extractText(message).trim();
+                if (reply.isEmpty()) throw new RuntimeException("empty assistant response");
+                mainModelPool.reportSuccess(route);
+                return reply;
+            } catch (Exception e) {
+                mainModelPool.reportFailure(route, e.getClass().getSimpleName() + ": " + e.getMessage());
+                logger.warn("备用线路 {} 整理工具结果失败: {}", route.id(), e.getMessage());
+            }
+        }
+        return "";
+    }
+
+    private void reloadMainModelPoolConfig() {
+        mainModelPool.reloadCandidates(configuredMainModelPoolSpec(), System::getenv);
+    }
+
+    private String configuredMainModelPoolSpec() {
+        String dynamic = runtimeConfig.get("main_model_pool_candidates");
+        return dynamic == null || dynamic.isBlank()
+                ? BotConfig.getBaiLianPoolCandidates()
+                : dynamic;
+    }
+
+    private record InitialMainTurn(MainModelPool.Candidate route,
+                                   List<Map<String, Object>> messages,
+                                   List<Map<String, Object>> toolSpecs,
+                                   JsonNode message) {}
+
     // 调用 AI（同步），返回模型文本（空字符串表示没有可发送内容）
     /**
      * 生成 AI 回复消息。
@@ -571,27 +817,35 @@ public class BaiLianService {
     public String generate(String sessionId, String userId, String userPrompt, String groupId, String nickname,
                            List<Long> atUserIds, List<String> imageDataUris) {
         return generate(sessionId, userId, userPrompt, groupId, nickname, atUserIds, false,
-                Collections.emptySet(), ConversationEvent.NOTHING, null, imageDataUris).reply();
+                Collections.emptySet(), ConversationEvent.NOTHING, null, imageDataUris, null, false).reply();
+    }
+
+    /** The main prompt retains evidence; only current source text drives cheap preloading. */
+    public String generate(String sessionId, String userId, String userPrompt, String groupId, String nickname,
+                           List<Long> atUserIds, List<String> imageDataUris, String capabilityText, boolean attachedImage) {
+        return generate(sessionId, userId, userPrompt, groupId, nickname, atUserIds, false,
+                Collections.emptySet(), ConversationEvent.NOTHING, null, imageDataUris, capabilityText, attachedImage).reply();
     }
 
     /** 基于 ConversationSession 的生成入口。 */
     public GenerationResult generate(com.start.runtime.conversation.ConversationSession session) {
         return generate(session.sessionId(), session.userId(), session.userPrompt(),
                 session.groupId(), session.nickname(), session.atUserIds(), session.allowSilence(),
-                session.excludedPublicMessageIds(), session.event(), session.dialoguePlan(), session.imageDataUris());
+                session.excludedPublicMessageIds(), session.event(), session.dialoguePlan(), session.imageDataUris(),
+                session.capabilityText(), session.attachedImage());
     }
 
     /** 带沉默权的生成方法。allowSilence=true 时模型可以输出 <NO_REPLY> 选择沉默。 */
     public GenerationResult generate(String sessionId, String userId, String userPrompt, String groupId, String nickname, List<Long> atUserIds, boolean allowSilence) {
         return generate(sessionId, userId, userPrompt, groupId, nickname, atUserIds, allowSilence,
-                Collections.emptySet(), ConversationEvent.NOTHING, null, Collections.emptyList());
+                Collections.emptySet(), ConversationEvent.NOTHING, null, Collections.emptyList(), null, false);
     }
 
     private GenerationResult generate(String sessionId, String userId, String userPrompt, String groupId,
                                       String nickname, List<Long> atUserIds, boolean allowSilence,
                                       java.util.Set<String> excludedPublicMessageIds,
                                       ConversationEvent event, GroupDialoguePlan dialoguePlan,
-                                      List<String> imageDataUris) {
+                                      List<String> imageDataUris, String capabilityText, boolean attachedImage) {
         logger.info("🧠 AI 调用: sessionId={}, prompt=[{}], ats={}, allowSilence={}", sessionId, userPrompt, atUserIds, allowSilence);
 
         String context = "";
@@ -814,48 +1068,10 @@ public class BaiLianService {
             String promptPatch = runtimeConfig.get("system_prompt_patch");
             ctx.promptPatch(promptPatch);
 
-            String systemPrompt;
-            if (overridePrompt != null && !overridePrompt.isBlank()) {
-                systemPrompt = promptBuilder.build(overridePrompt, ctx);
-            } else {
-                systemPrompt = promptBuilder.buildRuleBook(getRuleSet(), ctx);
-            }
-
-            logger.debug("已构建 AI system prompt，sessionId={}, chars={}", sessionId, systemPrompt.length());
-
-            List<Map<String, Object>> messages = new ArrayList<>();
-            java.time.format.DateTimeFormatter shortTs = java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm");
             List<Message> historySnapshot;
             synchronized (history) {
                 historySnapshot = List.copyOf(history);
             }
-            int snapshotStart = Math.max(0, historySnapshot.size() - 4);
-            for (int i = snapshotStart; i < historySnapshot.size(); i++) {
-                Message msg = historySnapshot.get(i);
-                String role = "assistant".equals(msg.role) ? "assistant" : "user";
-
-                String content = msg.content;
-                if (content.length() > 600) {
-                    content = content.substring(0, 600) + "...";
-                }
-
-                // 给 history 注入 [MM-dd HH:mm] 时间戳前缀，让 LLM 知道每条消息的时序
-                String timePrefix = java.time.LocalDateTime.ofInstant(
-                        java.time.Instant.ofEpochMilli(msg.timestamp),
-                        java.time.ZoneId.of("Asia/Shanghai")
-                ).format(shortTs);
-                String messageContent = "[" + timePrefix + "] " + content;
-                messages.add(buildMessage(role, messageContent, imageDataUris));
-            }
-
-            // PR4: suppress 模式下 user message 不在 history 中，手动追加到 messages 数组
-            if (suppress) {
-                messages.add(buildUserMessage(userPrompt, imageDataUris));
-            }
-
-            String url = this.baiLianUrl;
-            String apiKey = this.baiLianApiKey;
-            String modelName = this.bailianChatModel;
 
             // 构建工具列表及 OpenAI 原生 function calling specs
             LongTermMemoryRepository ltmRepo = new LongTermMemoryRepository(DatabaseConfig.getDataSource());
@@ -872,7 +1088,7 @@ public class BaiLianService {
             GenerateMediaTool imageGenerationTool = new GenerateMediaTool(botInstance, agnesMediaService,
                     groupId, userId, sessionId, GenerateMediaTool.Kind.IMAGE, imageQueryTool);
 
-            final List<Tool> availableTools = new ArrayList<>(Arrays.asList(
+            final List<Tool> authorizedTools = new ArrayList<>(Arrays.asList(
                     new WeatherTool(userAliasRepo),
                     new UserAffinityTool(userAffinityRepo),
                     new UserAliasTool(userAliasRepo, String.valueOf(BotConfig.getBotQq()),
@@ -926,28 +1142,14 @@ public class BaiLianService {
                     new QuerySimilarEventsTool(evidenceQueryRepo, evidenceMessageRepo, userId, groupId, sessionId)
             ));
             if (agnesMediaService.isEnabled()) {
-                availableTools.add(imageGenerationTool);
-                availableTools.add(new GenerateMediaTool(botInstance, agnesMediaService, groupId, userId,
+                authorizedTools.add(imageGenerationTool);
+                authorizedTools.add(new GenerateMediaTool(botInstance, agnesMediaService, groupId, userId,
                         sessionId, GenerateMediaTool.Kind.VIDEO));
-                systemPrompt += "\n\n【糖果熊的媒体创作能力】"
-                        + "你现在具备真实的生图和生视频能力，不要说自己不会画图或不能生成。"
-                        + "用户要求生成或修改图片时，调用 generate_image 查阅规范；首次调用只加载规范，不生成。"
-                        + "系统主动注入规范后，自主查询历史要求、图片和相关人物画像，满足条件再调用；指代不明或旧图未确认则先询问。"
-                        + "用户明确要求生成视频、动画或短片时，必须调用 generate_video。"
-                        + "图片查证或追问期间不能说已经开始生成；图片资料充分后工具会发送等待提示。视频请求可先用 send_status 自然地说正在生成、需要等待一会儿；"
-                        + "如果没有单独调用 send_status，媒体工具也会在真正请求前自动发送等待提示。"
-                        + "视频任务按队列串行处理，同一时间只生成一个；工具返回前面排队数量时，要如实告诉用户前边还有几个视频正在生成。"
-                        + "不要先用文字假装生成，也不要因为普通图片描述请求而调用生成工具。"
-                        + "4K 图片把 size 设为 4K；视频使用 text、keyframe 或 reference 中合适的模式。"
-                        + "工具会把生成结果自动发送到当前聊天，工具返回失败时如实说明失败原因。";
-            }
-            // OpenAI 把 system 放在 messages 首位；Anthropic 通过请求体的 system 字段发送。
-            if (!baiLianProtocol.isAnthropic()) {
-                messages.add(0, Map.of("role", "system", "content", systemPrompt));
+
             }
             // 归儿专属工具（code/audit/shell/self_evolve），非管理员不发，省 token
             if (isAdmin) {
-                availableTools.addAll(Arrays.asList(
+                authorizedTools.addAll(Arrays.asList(
                         new ShellTool(shellService != null ? shellService : new ServerAdminService(), userId),
                         new SelfEvolveTool(userId, evoRepo),
                         new RestartBotTool(userId),
@@ -961,56 +1163,41 @@ public class BaiLianService {
             }
             // Phase 3: 工作记忆存在时，set_belief 退场，由 set_working_memory 接管
             if (wm == null) {
-                availableTools.add(new SetBeliefTool(
+                authorizedTools.add(new SetBeliefTool(
                         beliefRepo != null ? beliefRepo : new BeliefRepository(DatabaseConfig.getDataSource()),
                         groupId, userId));
             }
-            availableTools.add(new SetWorkingMemoryTool(
+            authorizedTools.add(new SetWorkingMemoryTool(
                     new WorkingMemoryRepository(DatabaseConfig.getDataSource()),
                     new ThreadRepository(DatabaseConfig.getDataSource()), groupId, BOT_QQ));
 
-            List<Map<String, Object>> toolSpecs = LlmProtocol.buildToolSpecs(
-                    baiLianProtocol, availableTools,
-                    name -> runtimeConfig.get("tool_desc_" + name));
+            CapabilityTools capabilities = new CapabilityTools(authorizedTools, getRuleSet(),
+                    CapabilityTools.needsLegacyRules(runtimeConfig::get));
+            capabilities.preload(capabilityText != null ? capabilityText : userPrompt,
+                    attachedImage || (imageDataUris != null && !imageDataUris.isEmpty()),
+                    (ctx.spyGameDesc != null && !ctx.spyGameDesc.isBlank())
+                            || (ctx.numberGameDesc != null && !ctx.numberGameDesc.isBlank()),
+                    recentCapabilities.get(sessionId, userId, System.currentTimeMillis()));
+            final String baseSystemPrompt = overridePrompt != null && !overridePrompt.isBlank()
+                    ? promptBuilder.build(overridePrompt, ctx)
+                    : promptBuilder.buildRuleBook(capabilities.baseRules(), ctx);
+            String systemPrompt = baseSystemPrompt + capabilities.prompt();
+            List<Tool> availableTools = capabilities.activeTools();
+            logger.info("能力加载 sessionId={}, selected={}, tools={}/{}, promptChars={}",
+                    sessionId, capabilities.selected(), availableTools.size(), authorizedTools.size(), systemPrompt.length());
 
-            Map<String, Object> requestBodyObj = LlmProtocol.buildRequestBody(
-                    baiLianProtocol, modelName, systemPrompt, messages, toolSpecs,
-                    1024, baiLianReasoningEffort);
-
-            String requestBody = objectMapper.writeValueAsString(requestBodyObj);
-            logger.debug("发送 AI 请求，model={}, sessionId={}, chars={}",
-                    modelName, sessionId, requestBody.length());
-
-            HttpRequest request = LlmProtocol.addAuthHeaders(HttpRequest.newBuilder()
-                            .uri(URI.create(url)), baiLianProtocol, apiKey)
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(requestBody))
-                    .timeout(Duration.ofMillis(this.bailianTimeoutMs))
-                    .build();
-
-            HttpResponse<String> response = BailianRetryExecutor.executeHttp(
-                    "百炼 API 主请求",
-                    () -> httpClient.send(request, HttpResponse.BodyHandlers.ofString()),
-                    this.bailianMaxRetries
-            );
-
-            if (response.statusCode() != 200) {
-                logger.warn("Gemini API HTTP 错误 {}: {}", response.statusCode(), response.body());
-                ErrorMonitorService.reportMainApiError(response.statusCode(), response.body());
-                throw new RuntimeException("AI 服务暂时不可用 (HTTP " + response.statusCode() + ")");
-            }
-
-            JsonNode root = objectMapper.readTree(response.body());
-
-
-            if (root.has("error")) {
-                String errorMsg = root.path("error").path("message").asText("未知错误");
-                String errorCode = root.path("error").path("code").asText("UNKNOWN");
-                logger.warn("Gemini API 业务错误 [{}]: {}", errorCode, errorMsg);
-                throw new RuntimeException("AI 服务错误: " + errorMsg);
-            }
-
-            JsonNode lastMessage = LlmProtocol.normalizeAssistantResponse(objectMapper, root, baiLianProtocol);
+            InitialMainTurn initialTurn = requestInitialMainTurn(
+                    systemPrompt, historySnapshot, suppress, userPrompt,
+                    imageDataUris, availableTools, sessionId);
+            recentCapabilities.remember(sessionId, userId, capabilities.selected(), System.currentTimeMillis());
+            MainModelPool.Candidate modelRoute = initialTurn.route();
+            String url = modelRoute.endpoint();
+            String apiKey = modelRoute.apiKey();
+            String modelName = modelRoute.model();
+            LlmProtocol.Type modelProtocol = modelRoute.protocol();
+            List<Map<String, Object>> messages = initialTurn.messages();
+            List<Map<String, Object>> toolSpecs = initialTurn.toolSpecs();
+            JsonNode lastMessage = initialTurn.message();
             String reply = LlmProtocol.extractText(lastMessage).trim();
             logger.debug("AI raw reply (first 200 chars): {}", reply.length() > 200 ? reply.substring(0, 200) + "..." : reply);
 
@@ -1039,7 +1226,7 @@ public class BaiLianService {
                 boolean stopToolLoop = false;
 
                 // 将 assistant 消息（含 tool_calls）加入对话历史
-                LlmProtocol.appendAssistantToolMessage(MAPPER, messages, lastMessage, baiLianProtocol);
+                LlmProtocol.appendAssistantToolMessage(MAPPER, messages, lastMessage, modelProtocol);
 
                 // 遍历 tool_calls 逐一执行
                 ArrayNode toolCallsArray = (ArrayNode) lastMessage.get("tool_calls");
@@ -1065,7 +1252,7 @@ public class BaiLianService {
                             errMsg.put("role", "tool");
                             errMsg.put("tool_call_id", callId);
                             errMsg.put("content", "参数解析错误: " + e.getMessage());
-                            if (baiLianProtocol.isAnthropic()) {
+                            if (modelProtocol.isAnthropic()) {
                                 anthropicToolResultBlocks.add(LlmProtocol.buildAnthropicToolResult(
                                         callId, "参数解析错误: " + e.getMessage()));
                             } else {
@@ -1131,34 +1318,47 @@ public class BaiLianService {
                         toolResultMsg.put("role", "tool");
                         toolResultMsg.put("tool_call_id", callId);
                         toolResultMsg.put("content", trimmedResult);
-                        if (baiLianProtocol.isAnthropic()) {
+                        if (modelProtocol.isAnthropic()) {
                             anthropicToolResultBlocks.add(LlmProtocol.buildAnthropicToolResult(callId, trimmedResult));
                         } else {
                             messages.add(toolResultMsg);
                         }
                     } else {
-                        logger.warn("模型调用了未知工具: {}", toolName);
+                        logger.warn("模型调用了本轮未提供的工具: {}", toolName);
+                        String unavailableMessage = capabilities.unavailableToolMessage(toolName);
                         Map<String, Object> unknownMsg = new HashMap<>();
                         unknownMsg.put("role", "tool");
                         unknownMsg.put("tool_call_id", callId);
-                        unknownMsg.put("content", "未知工具: " + toolName);
-                        if (baiLianProtocol.isAnthropic()) {
+                        unknownMsg.put("content", unavailableMessage);
+                        if (modelProtocol.isAnthropic()) {
                             anthropicToolResultBlocks.add(LlmProtocol.buildAnthropicToolResult(
-                                    callId, "未知工具: " + toolName));
+                                    callId, unavailableMessage));
                         } else {
                             messages.add(unknownMsg);
                         }
                     }
                 }
 
-                if (baiLianProtocol.isAnthropic() && !anthropicToolResultBlocks.isEmpty()) {
+                if (modelProtocol.isAnthropic() && !anthropicToolResultBlocks.isEmpty()) {
                     messages.add(Map.of("role", "user", "content", anthropicToolResultBlocks));
+                }
+
+                // Publish newly loaded tools only after the complete batch: hidden same-batch calls stay blocked.
+                if (capabilities.activatePending()) {
+                    availableTools = capabilities.activeTools();
+                    systemPrompt = baseSystemPrompt + capabilities.prompt();
+                    LlmProtocol.updateSystemPrompt(modelProtocol, messages, systemPrompt);
+                    toolSpecs = LlmProtocol.buildToolSpecs(modelProtocol, availableTools,
+                            name -> runtimeConfig.get("tool_desc_" + name));
+                    recentCapabilities.remember(sessionId, userId, capabilities.selected(), System.currentTimeMillis());
+                    logger.info("能力补充加载 sessionId={}, selected={}, tools={}, promptChars={}",
+                            sessionId, capabilities.selected(), availableTools.size(), systemPrompt.length());
                 }
 
                 // Complete every tool response before injecting system rules. No call in this same batch may generate early.
                 if (toolResults.stream().anyMatch(tr -> "generate_image".equals(tr.name)
                         && tr.result.startsWith(GenerateMediaTool.REQUIREMENTS_REQUIRED))) {
-                    if (baiLianProtocol.isAnthropic()) {
+                    if (modelProtocol.isAnthropic()) {
                         String requirements = imageGenerationTool.consumeImageRequirements();
                         if (!requirements.isBlank()) {
                             systemPrompt += "\n\n【生图调用规范】\n" + requirements;
@@ -1181,7 +1381,7 @@ public class BaiLianService {
                 if (toolRound >= maxToolRounds) {
                     logger.info("已达最大工具调用轮次 {}", maxToolRounds);
                     reply = toolResults.stream()
-                            .filter(tr -> !"send_status".equals(tr.name()))
+                            .filter(tr -> !"send_status".equals(tr.name()) && !"load_capabilities".equals(tr.name()))
                             .map(tr -> tr.result)
                             .filter(result -> result != null && !result.isBlank())
                             .collect(Collectors.joining("；"));
@@ -1190,7 +1390,7 @@ public class BaiLianService {
 
                 // 构造 follow-up 请求（继续带 tools）
                 Map<String, Object> nextBody = LlmProtocol.buildRequestBody(
-                        baiLianProtocol, modelName, systemPrompt, messages, toolSpecs,
+                        modelProtocol, modelName, systemPrompt, messages, toolSpecs,
                         1024, baiLianReasoningEffort);
 
                 String nextBodyJson = objectMapper.writeValueAsString(nextBody);
@@ -1200,7 +1400,7 @@ public class BaiLianService {
                             "百炼 API 工具第" + toolRound + "轮",
                             () -> {
                                 HttpRequest nextReq = LlmProtocol.addAuthHeaders(HttpRequest.newBuilder()
-                                                .uri(URI.create(url)), baiLianProtocol, apiKey)
+                                                .uri(URI.create(url)), modelProtocol, apiKey)
                                         .header("Content-Type", "application/json")
                                         .POST(HttpRequest.BodyPublishers.ofString(nextBodyJson))
                                         .timeout(Duration.ofMillis(this.bailianTimeoutMs))
@@ -1211,9 +1411,13 @@ public class BaiLianService {
                     );
                     if (nextResp.statusCode() == 200) {
                         JsonNode sr = objectMapper.readTree(nextResp.body());
-                        nextMsg = LlmProtocol.normalizeAssistantResponse(objectMapper, sr, baiLianProtocol);
+                        nextMsg = LlmProtocol.normalizeAssistantResponse(objectMapper, sr, modelProtocol);
+                        mainModelPool.reportSuccess(modelRoute);
+                    } else {
+                        mainModelPool.reportFailure(modelRoute, "HTTP " + nextResp.statusCode());
                     }
                 } catch (Exception e) {
+                    mainModelPool.reportFailure(modelRoute, e.getClass().getSimpleName() + ": " + e.getMessage());
                     logger.warn("工具第{}轮回调失败: {}", toolRound, e.getMessage());
                 }
 
@@ -1222,11 +1426,14 @@ public class BaiLianService {
                 } else {
                     // 回调失败 → 用非 send_status 结果兜底
                     String fallback = toolResults.stream()
-                            .filter(tr -> !"send_status".equals(tr.name))
+                            .filter(tr -> !"send_status".equals(tr.name) && !"load_capabilities".equals(tr.name))
                             .map(tr -> tr.result)
                             .filter(result -> result != null && !result.isBlank())
                             .collect(Collectors.joining("；"));
-                    reply = fallback;
+                    String recovered = recoverAfterToolFailure(
+                            systemPrompt, historySnapshot, suppress, userPrompt,
+                            imageDataUris, toolResults, modelRoute);
+                    reply = recovered.isBlank() ? fallback : recovered;
                     break;
                 }
             } // end multi-round while
@@ -1295,10 +1502,10 @@ public class BaiLianService {
                         "你的上一条回复格式有误，无法解析。请直接用纯文本重新输出内容，不要用JSON包裹。不要输出```json代码块。"));
                 try {
                     Map<String, Object> retryBody = LlmProtocol.buildRequestBody(
-                            baiLianProtocol, modelName, systemPrompt, messages,
+                            modelProtocol, modelName, systemPrompt, messages,
                             Collections.emptyList(), 1024, baiLianReasoningEffort);
                     HttpRequest retryReq = LlmProtocol.addAuthHeaders(HttpRequest.newBuilder()
-                                    .uri(URI.create(url)), baiLianProtocol, apiKey)
+                                    .uri(URI.create(url)), modelProtocol, apiKey)
                             .header("Content-Type", "application/json")
                             .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(retryBody)))
                             .timeout(Duration.ofMillis(this.bailianTimeoutMs))
@@ -1307,21 +1514,30 @@ public class BaiLianService {
                     if (retryResp.statusCode() == 200) {
                         JsonNode retryRoot = objectMapper.readTree(retryResp.body());
                         JsonNode retryMessage = LlmProtocol.normalizeAssistantResponse(
-                                objectMapper, retryRoot, baiLianProtocol);
+                                objectMapper, retryRoot, modelProtocol);
                         String newReply = LlmProtocol.extractText(retryMessage).trim();
                         if (!newReply.isEmpty()) {
+                            mainModelPool.reportSuccess(modelRoute);
                             reply = newReply;
                             isLongJsonAttempt = reply.contains("\"long\"") && reply.contains("{");
                             continue;
                         }
+                    } else {
+                        mainModelPool.reportFailure(modelRoute, "HTTP " + retryResp.statusCode());
                     }
                 } catch (Exception retryEx) {
+                    mainModelPool.reportFailure(
+                            modelRoute, retryEx.getClass().getSimpleName() + ": " + retryEx.getMessage());
                     logger.warn("Long JSON 重试调用失败: {}", retryEx.getMessage());
                 }
                 break; // 重试也失败了，退出
             }
             break;
         }
+
+        // 规则书和画像只属于模型的思考上下文。模型偶尔把自我介绍写成设定清单时，
+        // 在最终出站前收窄为自然口语；普通回答的 Markdown 能力不受影响。
+        reply = sanitizePublicReply(userPrompt, reply);
 
         // 没有文本时标记为失败；上层只发送中性的事实状态，不发送拟人化兜底话术。
         if (reply.trim().isEmpty() || reply.trim().matches("[,\\s]+")) {
@@ -1371,12 +1587,147 @@ public class BaiLianService {
     }
 
     static Map<String, Object> buildMessage(String role, String text, List<String> imageDataUris) {
-        // imageDataUris 保留参数兼容旧调用方，但主聊天永远不发送原始图片。
+        return buildMessage(role, text, imageDataUris,
+                LlmProtocol.Type.parse(BotConfig.getBaiLianProtocol()));
+    }
+
+    static Map<String, Object> buildMessage(String role, String text, List<String> imageDataUris,
+                                             LlmProtocol.Type protocol) {
+        if (BotConfig.isBaiLianMultimodalEnabled() && imageDataUris != null
+                && imageDataUris.stream().anyMatch(uri -> uri != null && !uri.isBlank())) {
+            List<Map<String, Object>> content = new ArrayList<>();
+            content.add(Map.of("type", "text", "text", text == null ? "" : text));
+            for (String uri : imageDataUris) {
+                if (uri != null && !uri.isBlank()) {
+                    content.add(buildImageContent(uri, protocol));
+                }
+            }
+            return Map.of("role", role, "content", content);
+        }
         return Map.of("role", role, "content", text);
     }
 
     static Map<String, Object> buildUserMessage(String text, List<String> imageDataUris) {
-        return buildMessage("user", text, imageDataUris);
+        return buildMessage("user", text, imageDataUris,
+                LlmProtocol.Type.parse(BotConfig.getBaiLianProtocol()));
+    }
+
+    static Map<String, Object> buildUserMessage(String text, List<String> imageDataUris,
+                                                 LlmProtocol.Type protocol) {
+        return buildMessage("user", text, imageDataUris, protocol);
+    }
+
+    private static Map<String, Object> buildImageContent(String uri, LlmProtocol.Type protocol) {
+        if (protocol != LlmProtocol.Type.ANTHROPIC || !uri.startsWith("data:")) {
+            return Map.of("type", "image_url", "image_url", Map.of("url", uri));
+        }
+        int comma = uri.indexOf(',');
+        int semicolon = uri.indexOf(';', 5);
+        if (comma <= 5 || semicolon <= 5 || !uri.substring(semicolon + 1, comma).contains("base64")) {
+            return Map.of("type", "image_url", "image_url", Map.of("url", uri));
+        }
+        String mediaType = uri.substring(5, semicolon);
+        String data = uri.substring(comma + 1);
+        return Map.of("type", "image", "source", Map.of(
+                "type", "base64", "media_type", mediaType, "data", data));
+    }
+
+    /** 防止内部设定/规则书被原样当成自我介绍发到群里。 */
+    static String sanitizePublicReply(String userPrompt, String reply) {
+        if (reply == null) return "";
+        String text = reply.trim();
+        if (text.isEmpty() || "<NO_REPLY>".equals(text)) return text;
+
+        boolean identityQuestion = asksIdentity(userPrompt);
+        boolean selfIntroduction = identityQuestion || containsAny(userPrompt,
+                "介绍一下你自己", "介绍下你自己", "自我介绍", "你的设定", "你的人设");
+        boolean explicitFormat = containsAny(userPrompt, "Markdown", "markdown", "列表", "清单", "表格", "代码");
+        int settingFields = countAny(text, "角色名", "名字", "姓名", "年龄", "性别", "身份", "学校", "家庭",
+                "疾病", "背景", "性格", "爱好", "偏好", "系统身份");
+        boolean markdown = text.contains("```") || text.contains("###") || text.contains("|---|")
+                || text.matches("(?s).*\\n\\s*[-*]\\s+.*");
+        int internalMarkers = countAny(text, "===== 背景与相处 =====", "角色成长", "表达倾向", "工具能力与执行要求",
+                "安全规则", "回复与必要协议", "系统提示", "提示词", "规则优先级", "我的设定", "我的人设", "角色设定");
+        boolean internalHeader = java.util.regex.Pattern.compile(
+                "(?m)^\\s*(?:#{1,6}\\s*|={3,}\\s*)?(?:背景与相处|角色成长|表达倾向|工具能力(?:与执行要求)?|"
+                        + "安全规则|回复与必要协议|系统提示|提示词|规则优先级|我的设定|我的人设|角色设定)(?:\\s*[#=]*)?\\s*$")
+                .matcher(text).find();
+        boolean promptLeak = internalMarkers >= 2 || (internalMarkers >= 1 && internalHeader);
+        boolean labeledSettingList = countLabeledSettingFields(text) >= 3;
+        boolean inlineSettingList = settingFields >= 3
+                && (text.contains("=") || text.contains("：") || text.contains("；"));
+        boolean denseSettingList = settingFields >= 4 && (markdown || text.contains("\n"));
+        boolean settingDump = promptLeak || labeledSettingList || inlineSettingList || denseSettingList;
+        if (asksRobotIdentity(userPrompt) && claimsHumanIdentity(text)) {
+            return "我是聊天机器人，糖果熊是我在群里的名字。";
+        }
+
+        if (selfIntroduction && (settingDump || (identityQuestion && settingFields >= 2))) {
+            return asksRobotIdentity(userPrompt)
+                    ? "我是聊天机器人，糖果熊是我在群里的名字。"
+                    : "我是糖果熊，平时就在群里和大家聊天。";
+        }
+        if (selfIntroduction && !explicitFormat && markdown) {
+            String normalized = normalizeSelfIntroduction(text);
+            if (!normalized.isBlank()) return normalized;
+            return asksRobotIdentity(userPrompt)
+                    ? "我是聊天机器人，糖果熊是我在群里的名字。"
+                    : "我是糖果熊，平时就在群里和大家聊天。";
+        }
+        if (settingDump) {
+            return "我刚才说得太像说明书了，忽略那段，咱们接着聊。";
+        }
+        return text;
+    }
+
+    private static boolean asksIdentity(String prompt) {
+        return containsAny(prompt, "你是谁", "你是人", "真人", "机器人", "人工智能", "AI", "什么身份");
+    }
+
+    private static boolean asksRobotIdentity(String prompt) {
+        return containsAny(prompt, "机器人", "人工智能", "AI", "真人", "人类", "你是人", "是不是人");
+    }
+
+    private static boolean claimsHumanIdentity(String text) {
+        if (containsAny(text, "不是人", "不是人类", "不是真人", "并不是人")) return false;
+        return containsAny(text, "我是人", "我是人类", "我是个真人", "我是真人", "我确实是人", "确实是真人");
+    }
+
+    private static boolean containsAny(String value, String... needles) {
+        if (value == null || value.isBlank()) return false;
+        for (String needle : needles) if (value.contains(needle)) return true;
+        return false;
+    }
+
+    private static int countAny(String value, String... needles) {
+        if (value == null || value.isBlank()) return 0;
+        int count = 0;
+        for (String needle : needles) if (value.contains(needle)) count++;
+        return count;
+    }
+
+    private static int countLabeledSettingFields(String value) {
+        if (value == null || value.isBlank()) return 0;
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile(
+                "(?m)^\\s*(?:[-*]\\s*)?(?:角色名|名字|姓名|年龄|性别|身份|学校|家庭|疾病|背景|性格|爱好|偏好|系统身份)\\s*[：:＝=]")
+                .matcher(value);
+        int count = 0;
+        while (matcher.find()) count++;
+        return count;
+    }
+
+    /** Flatten harmless self-introduction formatting without rewriting its actual content. */
+    private static String normalizeSelfIntroduction(String value) {
+        String normalized = value
+                .replaceAll("```(?:markdown|text)?", "")
+                .replaceAll("```", "")
+                .replaceAll("(?m)^\\s*#{1,6}\\s*", "")
+                .replaceAll("(?m)^\\s*[-*+]\\s+", "")
+                .replaceAll("(?m)^\\s*\\d+[.)]\\s+", "")
+                .replaceAll("\\n{2,}", "\\n")
+                .trim();
+        if (normalized.contains("|---|") || normalized.contains("| --- |")) return "";
+        return normalized;
     }
 
 
@@ -1519,31 +1870,50 @@ public class BaiLianService {
 
     /** 简单调用聊天模型，返回纯文本响应（无工具、无会话、无状态注入） */
     public String generateRaw(String prompt) {
-        try {
-            List<Map<String, Object>> messages = new ArrayList<>();
-            messages.add(Map.of("role", "user", "content", prompt));
+        reloadMainModelPoolConfig();
+        List<MainModelPool.Candidate> routes = mainModelPool.attemptOrder();
+        int attempts = mainModelPool.isEnabled()
+                ? Math.min(MAX_RUNTIME_ROUTE_ATTEMPTS, routes.size())
+                : 1;
+        for (int i = 0; i < attempts; i++) {
+            MainModelPool.Candidate route = routes.get(i);
+            try {
+                List<Map<String, Object>> messages = List.of(
+                        Map.of("role", "user", "content", prompt));
+                Map<String, Object> body = LlmProtocol.buildRequestBody(
+                        route.protocol(), route.model(), "", messages, Collections.emptyList(),
+                        8192, "");
+                body.put("temperature", 0.8);
 
-            Map<String, Object> body = LlmProtocol.buildRequestBody(
-                    baiLianProtocol, bailianChatModel, "", messages, Collections.emptyList(),
-                    8192, "");
-            body.put("temperature", 0.8);
-
-            String jsonBody = MAPPER.writeValueAsString(body);
-            HttpRequest request = LlmProtocol.addAuthHeaders(HttpRequest.newBuilder()
-                            .uri(URI.create(baiLianUrl)), baiLianProtocol, baiLianApiKey)
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
-                    .timeout(Duration.ofSeconds(120))
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            JsonNode root = MAPPER.readTree(response.body());
-            JsonNode message = LlmProtocol.normalizeAssistantResponse(MAPPER, root, baiLianProtocol);
-            return LlmProtocol.extractText(message).trim();
-        } catch (Exception e) {
-            logger.warn("generateRaw 失败: {}", e.getMessage());
-            return "";
+                String jsonBody = MAPPER.writeValueAsString(body);
+                HttpRequest request = LlmProtocol.addAuthHeaders(HttpRequest.newBuilder()
+                                .uri(URI.create(route.endpoint())), route.protocol(), route.apiKey())
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
+                        .timeout(Duration.ofSeconds(120))
+                        .build();
+                int retries = mainModelPool.isEnabled() ? 0 : this.bailianMaxRetries;
+                HttpResponse<String> response = BailianRetryExecutor.executeHttp(
+                        "generateRaw 线路 " + route.id(),
+                        () -> httpClient.send(request, HttpResponse.BodyHandlers.ofString()),
+                        retries);
+                if (response.statusCode() != 200) {
+                    throw new RuntimeException("HTTP " + response.statusCode());
+                }
+                JsonNode root = MAPPER.readTree(response.body());
+                if (root.has("error")) throw new RuntimeException("provider error");
+                JsonNode message = LlmProtocol.normalizeAssistantResponse(MAPPER, root, route.protocol());
+                String text = LlmProtocol.extractText(message).trim();
+                if (text.isEmpty()) throw new RuntimeException("empty assistant response");
+                mainModelPool.reportSuccess(route);
+                return text;
+            } catch (Exception e) {
+                mainModelPool.reportFailure(route, e.getClass().getSimpleName() + ": " + e.getMessage());
+                logger.warn("generateRaw 线路 {} 失败，第 {}/{} 条候选: {}",
+                        route.id(), i + 1, attempts, e.getMessage());
+            }
         }
+        return "";
     }
 
     public String generateForAgent(String userPrompt, List<Tool> tools) {
@@ -1659,8 +2029,8 @@ public class BaiLianService {
         }
     }
 
-    // ===== 消息分段：优先 AI 自定分隔，兜底机械切分 =====
-    public List<String> splitIntoShortMessages(String reply) {
+    // ===== 消息分段：尊重模型显式协议，仅对超长回复机械切分 =====
+    public static List<String> splitIntoShortMessages(String reply) {
         if (reply == null || reply.trim().isEmpty()) {
             return Collections.emptyList();
         }
@@ -1687,31 +2057,8 @@ public class BaiLianService {
                     .collect(java.util.stream.Collectors.toList());
         }
 
-        // 兜底：AI 没用分隔符但有空行时，按空行切分段落
-        if (reply.contains("\n\n")) {
-            List<String> allParts = new ArrayList<>();
-            String[] paragraphs = reply.split("\\n\\s*\\n");
-            for (String para : paragraphs) {
-                para = para.trim();
-                if (para.isEmpty()) continue;
-                allParts.addAll(splitParagraphIntoSentences(para));
-            }
-            if (allParts.size() > 10) {
-                return new ArrayList<>(allParts.subList(0, 10));
-            }
-            return allParts.isEmpty() ? Arrays.asList(reply) : allParts;
-        }
-
-        // 单个换行切分：仅当切出 ≤5 条时生效，避免结构化内容（排行榜/表格）逐行刷屏
-        if (reply.contains("\n")) {
-            List<String> lines = new ArrayList<>();
-            for (String line : reply.split("\\n")) {
-                line = line.trim();
-                if (!line.isEmpty()) lines.add(line);
-            }
-            if (lines.size() <= 5) {
-                return lines;
-            }
+        if (reply.length() <= 600) {
+            return List.of(reply);
         }
 
         // 提取开头的 CQ 码，避免切分时截断
@@ -1757,30 +2104,6 @@ public class BaiLianService {
             return new ArrayList<>(parts.subList(0, MAX_PARTS));
         }
         return parts.isEmpty() ? Arrays.asList(cqPrefix + reply) : parts;
-    }
-
-    /** 将单个段落按句末标点切分为合理长度的消息片段 */
-    private List<String> splitParagraphIntoSentences(String para) {
-        // 包含代码块标记（read_code 输出的行号前缀）→ 不按标点拆分，避免代码被切碎刷屏
-        if (para.contains("│") || para.startsWith("📄")) {
-            return Arrays.asList(para);
-        }
-        List<String> result = new ArrayList<>();
-        String[] sentences = para.split("(?<=[。！？；~?!…])(?![。！？；~?!…])");
-        StringBuilder current = new StringBuilder();
-        for (String sent : sentences) {
-            sent = sent.trim();
-            if (sent.isEmpty()) continue;
-            if (current.length() + sent.length() <= 600) {
-                if (current.length() > 0) current.append("\n");
-                current.append(sent);
-            } else {
-                if (current.length() > 0) result.add(current.toString());
-                current = new StringBuilder(sent);
-            }
-        }
-        if (current.length() > 0) result.add(current.toString());
-        return result.isEmpty() ? Arrays.asList(para) : result;
     }
 
     /** 将时间戳转为相对时间标签，如 "今天 14:30"、"昨天 09:15" */
@@ -2017,5 +2340,10 @@ public class BaiLianService {
         List<PublicMessage> copy = new ArrayList<>(history);
         int start = Math.max(0, copy.size() - limit);
         return List.copyOf(copy.subList(start, copy.size()));
+    }
+
+    @Override
+    public void close() {
+        mainModelPool.close();
     }
 }
