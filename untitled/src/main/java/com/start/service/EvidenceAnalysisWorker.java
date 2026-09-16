@@ -426,7 +426,8 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
                 if (id instanceof Number n) {
                     long value = n.longValue();
                     allowedSubjectMessages.add(value);
-                    String text = string(row.get("content"));
+                    String text = string(row.get("raw_content"));
+                    if (text.isBlank()) text = string(row.get("content"));
                     subjectMessageText.put(value, text);
                     if (!text.isBlank() || hasUsableMediaPart(value)) usableSubjectMessages.add(value);
                 }
@@ -473,7 +474,8 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
             boolean hasUsableEvidence = false;
             for (Long evidenceId : evidence) {
                 hasUsableEvidence |= addUsableEvidence(candidateId, evidenceId, subjectMessageText.get(evidenceId),
-                        input.quoteOrSpanJson(), "SELF_REPORTED".equals(epistemic) ? 1.0 : 0.6);
+                        json("message_id", evidenceId, "source_text", subjectMessageText.get(evidenceId)).toString(),
+                        "SELF_REPORTED".equals(epistemic) ? 1.0 : 0.6);
             }
             if (!hasUsableEvidence) { rejected++; continue; }
             factRepository.promoteCandidate(candidateId);

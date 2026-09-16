@@ -38,6 +38,10 @@ class ToolUserIdEnforcementTest {
         public void insert(LongTermMemory m) {
             captured.set(m);
         }
+        @Override
+        public void insertGrounded(LongTermMemory m, java.time.LocalDateTime cutoff) {
+            captured.set(m);
+        }
     }
 
     @Test
@@ -47,6 +51,7 @@ class ToolUserIdEnforcementTest {
 
         Map<String, Object> args = new HashMap<>();
         args.put("content", "今天吃了火锅");
+        args.put("source_message_id", "17");
         args.put("user_id", "FAKE-999");
         args.put("group_id", "FAKE-GROUP-888");
         args.put("memory_type", "fact");

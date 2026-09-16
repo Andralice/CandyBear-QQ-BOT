@@ -63,16 +63,20 @@ public class EstablishFactTool implements Tool {
         try {
             // 1. 检查是否有同名未过期的事实 → 强化确认
             List<LongTermMemory> similar = repo.findSimilar(userId, null, trimmedContent, keywords);
-            if (!similar.isEmpty()) {
-                LongTermMemory existing = similar.get(0);
+            var exact = similar.stream().filter(m -> "AUTO_FORMED".equals(m.getSource())
+                    && trimmedContent.equals(m.getContent())).findFirst();
+            if (exact.isPresent()) {
+                LongTermMemory existing = exact.get();
                 repo.upsertConfirm(existing.getId());
                 return "已强化已有设定: " + trimmedContent + "（之前已存在，已更新确认时间）";
             }
 
             // 2. 检查是否有同名已过期的事实 → 刷新复用
             List<LongTermMemory> expired = repo.findExpiredByUser(userId, trimmedContent);
-            if (!expired.isEmpty()) {
-                LongTermMemory old = expired.get(0);
+            var expiredExact = expired.stream().filter(m -> "AUTO_FORMED".equals(m.getSource())
+                    && trimmedContent.equals(m.getContent())).findFirst();
+            if (expiredExact.isPresent()) {
+                LongTermMemory old = expiredExact.get();
                 repo.refreshExpired(old.getId(), trimmedContent, keywords, expiresAt);
                 return "已刷新过期设定: " + trimmedContent + "（之前已过期，已更新内容和有效期"
                         + (ttlHours > 0 ? "，" + ttlHours + "h后过期" : "，永久有效") + "）";

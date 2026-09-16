@@ -88,10 +88,10 @@ public record GroupDialoguePlan(
         sb.append("\n最新话语关系：").append(text(relation.replyChain()));
         sb.append("\n糖果熊的位置：").append(entryRole);
         if (entryRole == EntryRole.SECOND_PERSON) {
-            sb.append("。你是正在对话的第二人，应承接对方这一轮，不要假装刚加入。")
+            sb.append("。你正参与当前这一轮，结合这条补充与前文自然接话。")
                     .append("\n回复目标用户QQ：").append(text(targetUserId))
-                    .append("\n准确回应对方最新补充；证据不足时继续问一个最相关的问题，")
-                    .append("不要仅凭一句现象就擅自断定原因。");
+                    .append("\n准确回应对方明确说出的内容；证据不足时不要断定原因，可以说明还不确定，")
+                    .append("确实有助于推进时再问一个关键问题。");
         } else if (entryRole == EntryRole.THIRD_PERSON_INTERJECTION) {
             sb.append("。你是准备加入的第三人，前面的对话不是对你说的；只能以自然补充的姿态加入。")
                     .append("\n可提供的具体帮助：").append(text(opportunity.concreteContribution()))
@@ -99,9 +99,9 @@ public record GroupDialoguePlan(
                     .append("\n注意：system 中的“当前与你对话的是”只是承载最新消息的会话锚点，")
                     .append("不代表此前所有群聊都在对你说，也不一定是这次帮助的受益者。")
                     .append("不要声称对方刚才问了你，也不要把其他人的经历说成自己的。")
-                    .append("\n本轮之所以允许你插话，只因为上面的具体帮助。你必须在回复中直接给出这项帮助；")
-                    .append("不能只接梗、附和、说自己也不会或泛泛安慰。此规则高于一般的‘优先接梗/不主动科普’风格规则，")
-                    .append("但表达仍应简短自然。");
+                    .append("\n本轮允许你插话，是因为上面有一项可能有用的具体帮助。结合原始上下文判断它是否仍适用；")
+                    .append("适用时自然说出最关键部分，不必逐字照搬。信息不足时可以先澄清或说明限制，")
+                    .append("不要只为插话而接梗、附和或重复泛泛安慰；表达仍应简短自然。");
         } else {
             sb.append("。你只是旁观者，不要认领群友之间的前文。");
         }

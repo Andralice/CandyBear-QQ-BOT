@@ -74,22 +74,9 @@ public class UserProfileTool implements Tool {
         try {
             var facts = factRepo.findActiveByUserId(userId, privateContext, 10);
             if (!facts.isEmpty()) {
-                StringBuilder result = new StringBuilder("【目标用户个人档案事实（内部参考）】\n");
-                facts.forEach(fact -> {
-                    result.append("- fact_id=").append(fact.id())
-                        .append(" [").append(fact.kind()).append('/').append(fact.stability())
-                        .append(", confidence=")
-                        .append(String.format(java.util.Locale.ROOT, "%.2f", fact.confidence()))
-                        .append("] ").append(fact.claim());
-                    try {
-                        var evidence = factRepo.findEvidenceForFact(fact.id(), 3);
-                        result.append(" evidence=").append(evidence);
-                    } catch (Exception ignored) {
-                        result.append(" evidence=[]");
-                    }
-                    result.append('\n');
-                });
-                return result.toString().trim();
+                return "【个人档案线索及当前范围可见的原话】\n" + com.start.memory.MemoryEvidence.renderProfile(
+                        new com.start.repository.LongTermMemoryRepository(factRepo.getDataSource()),
+                        factRepo, facts, userId, currentGroupId);
             }
 
             // Legacy profile_text remains for migration and compatibility only. It has no

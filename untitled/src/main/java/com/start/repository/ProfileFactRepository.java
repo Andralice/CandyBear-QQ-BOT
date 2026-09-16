@@ -161,7 +161,7 @@ public class ProfileFactRepository implements Repository {
 
     public List<Map<String, Object>> findEvidenceForFact(long factId, int limit) throws SQLException {
         String sql = "SELECT e.message_id, m.provider_message_id, m.user_id AS sender_id, m.group_id, " +
-                "m.created_at, m.availability_status, e.part_id, e.artifact_id, e.modality, e.availability_snapshot FROM profile_fact_evidence e " +
+                "m.created_at, m.availability_status, e.part_id, e.artifact_id, e.modality, e.evidence_role, e.availability_snapshot FROM profile_fact_evidence e " +
                 "JOIN messages m ON m.id=e.message_id WHERE e.fact_id=? ORDER BY m.created_at DESC LIMIT ?";
         List<Map<String, Object>> result = new ArrayList<>();
         try (Connection conn = dataSource.getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -179,6 +179,7 @@ public class ProfileFactRepository implements Repository {
                     row.put("part_id", rs.getObject("part_id"));
                     row.put("artifact_id", rs.getObject("artifact_id"));
                     row.put("modality", rs.getString("modality"));
+                    row.put("evidence_role", rs.getString("evidence_role"));
                     row.put("availability_snapshot", rs.getString("availability_snapshot"));
                     result.add(row);
                 }
@@ -232,6 +233,8 @@ public class ProfileFactRepository implements Repository {
                     conn.commit();
                     return 0;
                 }
+                EvidenceStats stats = evidenceStats(conn, candidateId);
+                if (stats.messageCount == 0) { conn.commit(); return 0; }
                 if ("PROMOTED".equals(candidate.status)) {
                     long existingFactId = findFactByCandidate(conn, candidateId);
                     if (existingFactId == 0) {
@@ -258,9 +261,8 @@ public class ProfileFactRepository implements Repository {
                     conn.commit();
                     return 0;
                 }
-                EvidenceStats stats = evidenceStats(conn, candidateId);
                 boolean stableKind = List.of("interest", "preference", "habit").contains(candidate.kind);
-                boolean stable = stableKind && !"MODEL_INFERENCE".equals(candidate.epistemicType)
+                boolean stable = candidate.validUntil == null && stableKind && !"MODEL_INFERENCE".equals(candidate.epistemicType)
                         && "ASSERT".equals(candidate.polarity)
                         && stats.messageCount >= 3 && stats.dayCount >= 2 && stats.eventCount >= 2;
                 boolean temporary = "SELF_REPORTED".equals(candidate.epistemicType)
@@ -303,12 +305,16 @@ public class ProfileFactRepository implements Repository {
     private long findOrInsertFact(Connection conn, CandidateRow candidate, String stability,
                                   double confidence) throws SQLException {
         String find = "SELECT id FROM profile_facts WHERE subject_user_id=? AND claim_key=? AND claim=? " +
-                "AND polarity=? AND status='ACTIVE' ORDER BY id DESC LIMIT 1 FOR UPDATE";
+                "AND polarity=? AND scope=? AND ((valid_until IS NULL AND ? IS NULL) OR valid_until=?) " +
+                "AND status='ACTIVE' ORDER BY id DESC LIMIT 1 FOR UPDATE";
         try (PreparedStatement ps = conn.prepareStatement(find)) {
             ps.setString(1, candidate.subjectUserId);
             ps.setString(2, candidate.claimKey);
             ps.setString(3, candidate.claim);
             ps.setString(4, candidate.polarity);
+            ps.setString(5, candidate.scope);
+            ps.setObject(6, candidate.validUntil);
+            ps.setObject(7, candidate.validUntil);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
                     long id = rs.getLong(1);
@@ -366,18 +372,21 @@ public class ProfileFactRepository implements Repository {
 
     private void resolveConflicts(Connection conn, CandidateRow candidate, long newFactId) throws SQLException {
         String sql = "SELECT id, claim, polarity FROM profile_facts WHERE subject_user_id=? AND claim_key=? " +
-                "AND status='ACTIVE' AND id<>? FOR UPDATE";
+                "AND status='ACTIVE' AND id<>? AND scope=? FOR UPDATE";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, candidate.subjectUserId);
             ps.setString(2, candidate.claimKey);
             ps.setLong(3, newFactId);
+            ps.setString(4, candidate.scope);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     long existingId = rs.getLong("id");
                     boolean differs = !candidate.claim.equals(rs.getString("claim"))
                             || !candidate.polarity.equals(rs.getString("polarity"));
                     if (!differs) continue;
-                    String resolution = "DENY".equals(candidate.polarity) ? "EXPLICIT_DENIAL" : null;
+                    // A bounded exception must not retire the standing preference it temporarily overrides.
+                    String resolution = "DENY".equals(candidate.polarity) && candidate.validUntil == null
+                            ? "EXPLICIT_DENIAL" : null;
                     try (PreparedStatement conflict = conn.prepareStatement(
                             "INSERT INTO profile_fact_conflicts (existing_fact_id, incoming_candidate_id, conflict_type, status, resolution, resolved_by, resolved_at) VALUES (?, ?, ?, ?, ?, 'SYSTEM_RULE', ?)")) {
                         conflict.setLong(1, existingId);
@@ -442,7 +451,12 @@ public class ProfileFactRepository implements Repository {
                 "COUNT(DISTINCT COALESCE(e.event_id, e.message_id)) FROM profile_fact_evidence e " +
                 "JOIN messages m ON m.id=e.message_id WHERE e.candidate_id=? AND e.evidence_role='SUPPORT' " +
                 "AND e.availability_snapshot='AVAILABLE' AND m.retracted_at IS NULL " +
-                "AND m.availability_status <> 'RETRACTED'";
+                "AND m.redacted_at IS NULL AND m.availability_status='AVAILABLE' " +
+                "AND m.is_robot_reply=FALSE AND m.sender_type='USER' " +
+                "AND EXISTS (SELECT 1 FROM profile_fact_candidates c WHERE c.id=e.candidate_id " +
+                "AND c.subject_user_id=m.user_id AND m.created_at<=c.last_observed_at " +
+                "AND ((c.scope='PRIVATE_ONLY' AND m.group_id IS NULL AND m.is_private=TRUE) " +
+                "OR (c.scope='PERSONAL' AND m.group_id=c.source_group_id AND m.is_private=FALSE)))";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, candidateId);
             try (ResultSet rs = ps.executeQuery()) {

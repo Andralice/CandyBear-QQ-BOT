@@ -1,16 +1,20 @@
 package com.start.repository;
 
 import com.start.model.LongTermMemory;
+import com.start.memory.MemoryEvidence.Source;
 
 import javax.sql.DataSource;
 import java.sql.*;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 public class LongTermMemoryRepository implements Repository {
 
     private final DataSource dataSource;
+    private static final String OBSERVED_TIME = "COALESCE((SELECT msg.created_at FROM messages msg "
+            + "WHERE msg.id=source_message_id), created_at)";
 
     @Override
     public DataSource getDataSource() { return dataSource; }
@@ -21,9 +25,12 @@ public class LongTermMemoryRepository implements Repository {
 
     /** 插入一条新记忆（含可选的定时触发时间） */
     public void insert(LongTermMemory m) throws SQLException {
-        String sql = "INSERT INTO long_term_memories (user_id, group_id, source_message_id, content, memory_type, keywords, importance, trigger_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
-        try (Connection conn = dataSource.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+        try (Connection conn = dataSource.getConnection()) { insert(conn, m); }
+    }
+
+    private void insert(Connection conn, LongTermMemory m) throws SQLException {
+        String sql = "INSERT INTO long_term_memories (user_id, group_id, source_message_id, content, memory_type, keywords, importance, trigger_at, expires_at, source, status, confidence, last_seen_at, last_confirmed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        try (PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             ps.setString(1, m.getUserId());
             ps.setString(2, m.getGroupId());
             if (m.getSourceMessageId() != null) ps.setLong(3, m.getSourceMessageId());
@@ -36,10 +43,105 @@ public class LongTermMemoryRepository implements Repository {
             else ps.setNull(8, Types.TIMESTAMP);
             if (m.getExpiresAt() != null) ps.setTimestamp(9, Timestamp.valueOf(m.getExpiresAt()));
             else ps.setNull(9, Types.TIMESTAMP);
+            ps.setString(10, m.getSource());
+            ps.setString(11, m.getStatus());
+            ps.setDouble(12, m.getConfidence());
+            ps.setObject(13, m.getLastSeenAt());
+            ps.setObject(14, m.getLastConfirmedAt());
             ps.executeUpdate();
             ResultSet keys = ps.getGeneratedKeys();
             if (keys.next()) m.setId(keys.getLong(1));
         }
+    }
+
+    private static String sourceScope(String groupId) {
+        return groupId == null || groupId.isBlank()
+                ? "group_id IS NULL AND is_private=TRUE" : "group_id=? AND is_private=FALSE";
+    }
+
+    private static final String AVAILABLE_SOURCE = " AND is_robot_reply=FALSE AND sender_type='USER' "
+            + "AND retracted_at IS NULL AND redacted_at IS NULL AND availability_status='AVAILABLE' "
+            + "AND raw_content IS NOT NULL AND raw_content<>'' AND created_at<=? ";
+
+    public Optional<Source> findSource(long id, String userId, String groupId, LocalDateTime cutoff) throws SQLException {
+        try (Connection conn = dataSource.getConnection()) {
+            return findSource(conn, id, userId, groupId, cutoff, false);
+        }
+    }
+
+    private Optional<Source> findSource(Connection conn, long id, String userId, String groupId,
+                                      LocalDateTime cutoff, boolean lock) throws SQLException {
+        String sql = "SELECT id,user_id,group_id,raw_content,created_at FROM messages WHERE id=? AND user_id=? AND "
+                + sourceScope(groupId) + AVAILABLE_SOURCE + (lock ? " FOR UPDATE" : "");
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, id); ps.setString(2, userId);
+            int index = 3;
+            if (groupId != null && !groupId.isBlank()) ps.setString(index++, groupId);
+            ps.setObject(index, cutoff);
+            try (ResultSet rs = ps.executeQuery()) { return rs.next() ? Optional.of(mapSource(rs)) : Optional.empty(); }
+        }
+    }
+
+    /** Preserve each observation. Only retries of the same source and cue are deduplicated. */
+    public void insertGrounded(LongTermMemory memory, LocalDateTime cutoff) throws SQLException {
+        if (memory.getSourceMessageId() == null) throw new IllegalArgumentException("缺少原始消息编号");
+        try (Connection conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                Source source = findSource(conn, memory.getSourceMessageId(), memory.getUserId(),
+                        memory.getGroupId(), cutoff, true).orElseThrow(() ->
+                        new IllegalArgumentException("来源不可用：需要当前用户在当前会话范围内、尚未撤回的原始消息"));
+                try (PreparedStatement ps = conn.prepareStatement("SELECT id FROM long_term_memories "
+                        + "WHERE source_message_id=? AND content=? AND memory_type=? "
+                        + "AND ((trigger_at IS NULL AND ? IS NULL) OR trigger_at=?) LIMIT 1")) {
+                    ps.setLong(1, source.id()); ps.setString(2, memory.getContent()); ps.setString(3, memory.getMemoryType());
+                    ps.setObject(4, memory.getTriggerAt()); ps.setObject(5, memory.getTriggerAt());
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) { memory.setId(rs.getLong(1)); conn.commit(); return; }
+                    }
+                }
+                memory.setSource(memory.getTriggerAt() == null ? "USER_MESSAGE" : "SCHEDULE_REQUEST");
+                memory.setStatus("UNCERTAIN");
+                memory.setConfidence(0.0); // No semantic verification score has been measured.
+                memory.setLastSeenAt(source.messageTime());
+                memory.setLastConfirmedAt(null);
+                insert(conn, memory);
+                conn.commit();
+            } catch (SQLException | RuntimeException e) {
+                conn.rollback(); throw e;
+            } finally { conn.setAutoCommit(true); }
+        }
+    }
+
+    public List<Source> findLaterSources(long anchorId, String userId, String groupId,
+                                        LocalDateTime cutoff, int limit) throws SQLException {
+        return findAdjacentSources(anchorId, userId, groupId, cutoff, limit, true);
+    }
+
+    public List<Source> findEarlierSources(long anchorId, String userId, String groupId,
+                                          LocalDateTime cutoff, int limit) throws SQLException {
+        return findAdjacentSources(anchorId, userId, groupId, cutoff, limit, false);
+    }
+
+    private List<Source> findAdjacentSources(long anchorId, String userId, String groupId,
+                                            LocalDateTime cutoff, int limit, boolean later) throws SQLException {
+        String sql = "SELECT id,user_id,group_id,raw_content,created_at FROM messages WHERE id" + (later ? ">" : "<") + "? AND user_id=? AND "
+                + sourceScope(groupId) + AVAILABLE_SOURCE + "ORDER BY id DESC LIMIT ?";
+        List<Source> rows = new ArrayList<>();
+        try (Connection conn = dataSource.getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, anchorId); ps.setString(2, userId);
+            int index = 3;
+            if (groupId != null && !groupId.isBlank()) ps.setString(index++, groupId);
+            ps.setObject(index++, cutoff); ps.setInt(index, Math.max(1, Math.min(limit, 20)));
+            try (ResultSet rs = ps.executeQuery()) { while (rs.next()) rows.add(mapSource(rs)); }
+        }
+        java.util.Collections.reverse(rows);
+        return rows;
+    }
+
+    private Source mapSource(ResultSet rs) throws SQLException {
+        return new Source(rs.getLong("id"), rs.getString("user_id"), rs.getString("group_id"),
+                rs.getString("raw_content"), rs.getTimestamp("created_at").toLocalDateTime());
     }
 
     /** 按用户+群检索记忆，关键词模糊匹配，排除已触发的定时事件 */
@@ -66,11 +168,11 @@ public class LongTermMemoryRepository implements Repository {
         }
 
         if (dateFrom != null && !dateFrom.isBlank()) {
-            sql.append("AND created_at >= ? ");
+            sql.append("AND ").append(OBSERVED_TIME).append(" >= ? ");
             params.add(normalizeDateFrom(dateFrom));
         }
         if (dateTo != null && !dateTo.isBlank()) {
-            sql.append("AND created_at <= ? ");
+            sql.append("AND ").append(OBSERVED_TIME).append(" <= ? ");
             params.add(normalizeDateTo(dateTo));
         }
 
@@ -115,11 +217,11 @@ public class LongTermMemoryRepository implements Repository {
         }
 
         if (dateFrom != null && !dateFrom.isBlank()) {
-            sql.append("AND created_at >= ? ");
+            sql.append("AND ").append(OBSERVED_TIME).append(" >= ? ");
             params.add(normalizeDateFrom(dateFrom));
         }
         if (dateTo != null && !dateTo.isBlank()) {
-            sql.append("AND created_at <= ? ");
+            sql.append("AND ").append(OBSERVED_TIME).append(" <= ? ");
             params.add(normalizeDateTo(dateTo));
         }
 

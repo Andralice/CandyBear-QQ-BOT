@@ -16,6 +16,7 @@ public class ScheduleEventTool implements Tool {
     private final LongTermMemoryRepository repo;
     private final String currentUserId;
     private final String currentGroupId;
+    private final LocalDateTime cutoff = LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
 
     private static final List<DateTimeFormatter> FORMATS = Arrays.asList(
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"),
@@ -49,14 +50,14 @@ public class ScheduleEventTool implements Tool {
     public Map<String, Object> getParameters() {
         return Map.of("type", "object",
                 "properties", Map.of(
-                        "user_id", Map.of("type", "string", "description", "用户QQ号"),
+                        "source_message_id", Map.of("type", "string", "description", "原始用户消息的本地编号，从 query_message_context 获取"),
                         "group_id", Map.of("type", "string", "description", "群号"),
                         "content", Map.of("type", "string", "description", "事件描述，简洁一句话，如归儿的生日、考试日"),
                         "trigger_time", Map.of("type", "string", "description", "触发时间，格式yyyy-MM-dd HH:mm:ss。只写日期则默认当天09:00触发"),
                         "event_type", Map.of("type", "string", "description", "事件类型：birthday/anniversary/meeting/custom"),
                          "importance", Map.of("type", "string", "description", "重要性 1-5，生日类建议5")
                  ),
-                 "required", Arrays.asList("content", "trigger_time"));
+                 "required", Arrays.asList("content", "trigger_time", "source_message_id"));
     }
 
     @Override
@@ -80,8 +81,10 @@ public class ScheduleEventTool implements Tool {
         }
 
         LongTermMemory m = new LongTermMemory();
+        try { m.setSourceMessageId(Long.parseLong(Objects.toString(args.get("source_message_id"), ""))); }
+        catch (NumberFormatException e) { return "缺少有效 source_message_id，请先查询原始消息"; }
         m.setUserId(userId);
-        m.setGroupId(groupId);
+        m.setGroupId(groupId == null || groupId.isBlank() ? null : groupId);
         m.setContent(content.trim());
         m.setMemoryType((String) args.getOrDefault("event_type", "event"));
         m.setKeywords("定时事件," + content.trim());
@@ -89,8 +92,8 @@ public class ScheduleEventTool implements Tool {
         m.setTriggerAt(triggerAt);
 
         try {
-            repo.insert(m);
-            return String.format("已记录定时事件: %s，将在 %s 触发", content, triggerTimeStr);
+            repo.insertGrounded(m, cutoff);
+            return String.format("已保存定时事件: %s，计划触发时间 %s；尚未触发或送达", content, triggerTimeStr);
         } catch (Exception e) {
             return "记录失败: " + e.getMessage();
         }
@@ -108,7 +111,7 @@ public class ScheduleEventTool implements Tool {
                 DateTimeFormatter.ofPattern("yyyy/MM/dd"),
                 DateTimeFormatter.ofPattern("yyyy年M月d日"))) {
             try {
-                return LocalDateTime.parse(s, fmt).withHour(9).withMinute(0).withSecond(0);
+                return java.time.LocalDate.parse(s, fmt).atTime(9, 0);
             } catch (DateTimeParseException ignored) {}
         }
         return null;

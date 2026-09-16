@@ -25,8 +25,6 @@ import com.start.service.ProactiveFeedbackDetector;
 import com.start.service.ProactiveInterjectionPolicy;
 import com.start.service.StickerIngestService;
 import com.start.service.ToolAuthorizationService;
-import com.start.memory.MemoryInterpreter;
-import com.start.memory.MemoryRecall;
 import com.start.model.DecisionContext;
 import com.start.model.DecisionTrace;
 import com.start.model.LongTermMemory;
@@ -82,7 +80,6 @@ public class AIHandler implements MessageHandler {
     private final GroupDialogueAnalyzer dialogueAnalyzer;
     /** 长期记忆仓库：rate_limited 时的快速记忆查询用（不调 LLM） */
     private final LongTermMemoryRepository memoryRepo = new LongTermMemoryRepository(DatabaseConfig.getDataSource());
-    private final MemoryInterpreter memoryInterpreter = new MemoryInterpreter();
     private final Random random = new Random();
     private final ConcurrentHashMap<String, Long> lastReactionTime = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> lastGroupReplyTime = new ConcurrentHashMap<>();
@@ -107,6 +104,9 @@ public class AIHandler implements MessageHandler {
     private static final Logger COGNITION_LOGGER = LoggerFactory.getLogger("com.start.cognition");
     /** 连续普通消息可与后续触发合并的最大窗口；群环境另由 publicGroupHistory 维护。 */
     private static final long UNTRIGGERED_BUFFER_TTL_MS = 120_000L;
+    /** 只 @ 糖果熊时交给模型理解的内部提示，不作为固定回复发送给用户。 */
+    private static final String EMPTY_MENTION_PROMPT =
+            "（用户只 @ 了糖果熊，没有附加文字。请结合当下关系和上下文自然回应。）";
 
     /** 记忆查询意图关键词：rate_limited 时如果用户明显在问"你还记得..."，不沉默，先查记忆给短回复 */
     private static final String[] MEMORY_QUERY_KEYWORDS = {
@@ -299,11 +299,6 @@ public class AIHandler implements MessageHandler {
                 logDecision(gid, uid, "MENTION", "REPLY", "clear", 0, 0, 0);
                 return;
             }
-            if (strippedPrompt.isEmpty() && imageInfos.isEmpty()) {
-                bot.sendReply(msg, "问点什么吧～");
-                conversationManager.remove(gid, uid);
-                return;
-            }
             conv.markSubmitted();
             long t0 = System.currentTimeMillis();
             runGroupConversation(bot, groupId, gid, uid, nickname, ats, false, t0, ConversationEvent.MENTION);
@@ -315,7 +310,7 @@ public class AIHandler implements MessageHandler {
 
         // ConversationInterpreter 识别事件类型
         ConversationInterpreter.InterpretResult result = interpreter.interpret(
-                gid, uid, senderNick, plainText, ats);
+                gid, uid, senderNick, plainText, rawMessage, ats);
 
         // 纯图片消息的追问处理
         boolean imageFollowUp = !imageInfos.isEmpty() && result.isNothing()
@@ -390,7 +385,7 @@ public class AIHandler implements MessageHandler {
 
         if (rateLimited) {
             // 记忆查询快路径：rate_limited 但用户明显在问"你还记得..."
-            // 不沉默，DB 查一下就发短回复——成本极低，避免"我刚才走神"答错体验。
+            // 不沉默，DB 查一下就发短回复——成本极低，避免把记忆问题交给泛化兜底。
             // 注意：只更新 groupReplyTime 不更新 userReactionTime，避免被刷屏
             String shortReply = tryFastMemoryReply(uid, gid, plainText);
             if (shortReply != null) {
@@ -428,7 +423,7 @@ public class AIHandler implements MessageHandler {
         boolean allowSilence = result.event().allowsSilence();
         long startMs = System.currentTimeMillis();
         runGroupConversation(bot, groupId, gid, uid, nickname, ats, allowSilence, startMs,
-                result.event(), dialoguePlan);
+                result.event(), dialoguePlan, result.prompt());
     }
 
     private void logDecision(String gid, String uid, String eventType, String decision,
@@ -471,7 +466,7 @@ public class AIHandler implements MessageHandler {
                 return;
             }
             runGroupConversation(bot, groupId, gid, uid, nickname, ats, true,
-                    System.currentTimeMillis(), result.event());
+                    System.currentTimeMillis(), result.event(), null, result.prompt());
         }), PROACTIVE_SETTLE_MS, TimeUnit.MILLISECONDS);
         pendingProactiveTasks.put(gid, task);
     }
@@ -685,9 +680,17 @@ public class AIHandler implements MessageHandler {
     private void runGroupConversation(Main bot, long groupId, String gid, String userId, String nickname,
                                       List<Long> ats, boolean allowSilence, long startMs, ConversationEvent event,
                                       GroupDialoguePlan precomputedPlan) {
+        runGroupConversation(bot, groupId, gid, userId, nickname, ats, allowSilence, startMs, event,
+                precomputedPlan, null);
+    }
+
+    private void runGroupConversation(Main bot, long groupId, String gid, String userId, String nickname,
+                                      List<Long> ats, boolean allowSilence, long startMs, ConversationEvent event,
+                                      GroupDialoguePlan precomputedPlan, String promptOverride) {
         groupExecutor.execute(gid, () -> {
             ConversationState state = conversationManager.get(gid, userId);
-            if (state == null || !state.hasContent()) return;
+            // 显式 @ 即使没有正文也已经提交给模型；普通空 buffer 仍然直接丢弃。
+            if (state == null || (!state.hasContent() && !state.isSubmitted())) return;
 
             GroupDialoguePlan dialoguePlan = precomputedPlan;
             GroupCognitionMode cognitionMode = dialogueAnalyzer.modeFor(gid);
@@ -747,9 +750,10 @@ public class AIHandler implements MessageHandler {
 
                 // 从 buffer 读取累积的消息文本（每次循环可能变化）
                 String mergedText = state.getMergedText();
-                String prompt = replyContext.isEmpty() ? mergedText : replyContext + mergedText;
-                if (prompt.isEmpty() && !state.getImageInfos().isEmpty()) {
-                    prompt = "看一下这张图片";
+                String prompt = composeGenerationPrompt(mergedText, promptOverride, attempt);
+                if (!replyContext.isEmpty()) prompt = replyContext + prompt;
+                if (prompt.isEmpty()) {
+                    prompt = state.getImageInfos().isEmpty() ? EMPTY_MENTION_PROMPT : "看一下这张图片";
                 }
                 if (!imageDesc.isEmpty()) prompt = prompt + "\n\n" + imageDesc;
                 if (!linkContext.isEmpty()) prompt = prompt + "\n\n" + linkContext;
@@ -820,7 +824,15 @@ public class AIHandler implements MessageHandler {
             long elapsed = System.currentTimeMillis() - startMs;
 
             String groupSessionId = com.start.service.SessionId.groupConversation(gid, String.valueOf(userId));
-            if (reply != null && !reply.trim().isEmpty() && !reply.equals("抱歉，刚才走神了...") && !reply.equals("嗯...再问一次吧")) {
+            if (genResult != null && genResult.isError()) {
+                String failureMessage = genResult.reply();
+                boolean delivered = failureMessage != null && !failureMessage.isBlank()
+                        && sendSplitGroupReplies(bot, groupId, failureMessage, groupSessionId);
+                if (delivered) recordDeliveredReaction(gid, userId);
+                logDecision(gid, userId, event.name(), delivered ? "REPLY" : "SILENT",
+                        delivered ? "generation_failed" : "send_failed",
+                        genResult.toolCalls(), 0, elapsed);
+            } else if (reply != null && !reply.trim().isEmpty()) {
                 boolean delivered = sendSplitGroupReplies(bot, groupId, reply, groupSessionId);
                 if (delivered) {
                     recordDeliveredReaction(gid, userId);
@@ -837,21 +849,24 @@ public class AIHandler implements MessageHandler {
                             genResult != null ? genResult.toolCalls() : 0, 0, elapsed);
                 }
             } else {
-                boolean delivered = bot.sendGroupReply(groupId, "刚刚走神了，再说一遍？", groupSessionId);
-                if (delivered) {
-                    recordDeliveredReaction(gid, userId);
-                    if (event == ConversationEvent.PROBABILISTIC
-                            || event == ConversationEvent.COGNITIVE_INTERJECTION) {
-                        recordProactiveDelivery(gid);
-                    }
-                }
                 logDecision(gid, userId, allowSilence ? "PROBABILISTIC" : "OTHER",
-                        delivered ? "REPLY" : "SILENT", delivered ? "fallback" : "send_failed",
+                        "SILENT", "empty_reply",
                         genResult != null ? genResult.toolCalls() : 0, 0, elapsed);
             }
 
             conversationManager.remove(gid, userId);
         });
+    }
+
+    /**
+     * InterpretResult 的语义提示只在首次请求使用；重新生成时以最新 buffer 为准，避免旧上下文覆盖新消息。
+     */
+    static String composeGenerationPrompt(String mergedText, String promptOverride, int attempt) {
+        String current = mergedText == null ? "" : mergedText.trim();
+        String override = promptOverride == null ? "" : promptOverride.trim();
+        if (attempt > 0 || override.isEmpty()) return current;
+        if (current.isEmpty() || override.contains(current)) return override;
+        return override + "\n本条消息中的可见文字：" + current;
     }
 
     private static String getMergedTextRange(List<ConversationState.MessageEntry> msgs, int start, int end) {
@@ -963,10 +978,7 @@ public class AIHandler implements MessageHandler {
             return;
         }
 
-        if (prompt.isEmpty() && imageInfos.isEmpty()) {
-            bot.sendReply(msg, "想聊什么？直接说就好～");
-            return;
-        }
+        if (prompt.isEmpty() && imageInfos.isEmpty()) prompt = EMPTY_MENTION_PROMPT;
         if (prompt.isEmpty()) prompt = "看一下这张图片";
 
         replyWithAI(bot, msg, sessionId, String.valueOf(userId), prompt, null, nickname, Collections.emptyList(), imageInfos, linksToFetch);
@@ -1011,7 +1023,7 @@ public class AIHandler implements MessageHandler {
                     Collections.emptyList());
 
             if (reply == null || reply.trim().isEmpty()) {
-                bot.sendReply(originalMsg, "稍等一下，我在走神...", sessionId);
+                logger.debug("AI 未返回可发送的私聊内容，sessionId={}", sessionId);
                 return;
             }
 
@@ -1289,13 +1301,11 @@ public class AIHandler implements MessageHandler {
             if (results.isEmpty()) return null;
             LongTermMemory m = results.get(0);
             try { memoryRepo.markRecalled(m.getId()); } catch (Exception ignored) {}
-            // 用 MemoryInterpreter 翻译成叙事语言
-            MemoryRecall r = memoryInterpreter.interpret(m, null);
-            StringBuilder sb = new StringBuilder("记得");
-            if (r.stabilityHint() != null && !r.stabilityHint().isEmpty()) sb.append(r.stabilityHint());
-            sb.append(r.content());
-            if (r.ageText() != null && !r.ageText().isEmpty()) sb.append("（").append(r.ageText()).append("）");
-            return sb.toString();
+            if (m.getSourceMessageId() == null) return null;
+            var source = memoryRepo.findSource(m.getSourceMessageId(), uid, gid,
+                    java.time.LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")));
+            if (source.isEmpty() || source.get().text().length() > 200 || source.get().text().contains("[CQ:")) return null;
+            return "你之前说过：“" + source.get().text() + "”";
         } catch (Exception e) {
             logger.debug("fast memory recall failed: {}", e.getMessage());
             return null;

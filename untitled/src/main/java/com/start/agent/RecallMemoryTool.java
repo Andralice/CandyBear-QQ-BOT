@@ -1,7 +1,7 @@
 package com.start.agent;
 
-import com.start.memory.MemoryInterpreter;
-import com.start.memory.MemoryRecall;
+import com.start.memory.MemoryEvidence;
+import com.start.config.BotConfig;
 import com.start.model.LongTermMemory;
 import com.start.repository.LongTermMemoryRepository;
 
@@ -10,21 +10,19 @@ import java.util.*;
 /**
  * AI 检索长期记忆。当用户提到某个话题、或者对话需要回忆之前的信息时调用。
  * 如果 LLM 未提供 keyword，则用预注入的关键词自动搜索。
- * 使用 MemoryInterpreter 将 DB 记录翻译为叙事语言。
+ * Returns scoped source evidence and bounded later context.
  */
 public class RecallMemoryTool implements Tool {
     private final LongTermMemoryRepository repo;
-    private final MemoryInterpreter interpreter;
+    private final String callerUserId;
+    private final String currentGroupId;
+    private final java.time.LocalDateTime cutoff = java.time.LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"));
     private List<String> autoKeywords;
 
-    public RecallMemoryTool(LongTermMemoryRepository repo) {
+    public RecallMemoryTool(LongTermMemoryRepository repo, String callerUserId, String currentGroupId) {
         this.repo = repo;
-        this.interpreter = new MemoryInterpreter();
-    }
-
-    public RecallMemoryTool(LongTermMemoryRepository repo, MemoryInterpreter interpreter) {
-        this.repo = repo;
-        this.interpreter = interpreter;
+        this.callerUserId = callerUserId;
+        this.currentGroupId = currentGroupId;
     }
 
     /** 预注入关键词，LLM 未提供 keyword 时自动使用 */
@@ -63,11 +61,17 @@ public class RecallMemoryTool implements Tool {
         String userId = (String) args.get("user_id");
         String groupId = (String) args.get("group_id");
         String keyword = (String) args.get("keyword");
-        int count = parseIntSafe((String) args.get("count"), 5);
+        int count = Math.max(1, Math.min(10, parseIntSafe(Objects.toString(args.get("count"), null), 5)));
         String dateFrom = (String) args.get("date_from");
         String dateTo = (String) args.get("date_to");
 
         if (userId == null) return "缺少 user_id";
+        boolean botPersona = userId.equals(String.valueOf(BotConfig.getBotQq()));
+        if (groupId != null && !groupId.isBlank() && !"null".equals(groupId) && !groupId.equals(currentGroupId))
+            return "拒绝跨群查询：只能查询当前会话范围";
+        if ((currentGroupId == null || currentGroupId.isBlank()) && !userId.equals(callerUserId) && !botPersona)
+            return "私聊中只能查询自己的记忆";
+        groupId = botPersona ? null : currentGroupId;
 
         List<String> keywords = autoKeywords;
         if ((keyword == null || keyword.isBlank()) && (keywords == null || keywords.isEmpty())) {
@@ -100,24 +104,8 @@ public class RecallMemoryTool implements Tool {
                 } catch (Exception ignored) {}
             }
 
-            // 使用 MemoryInterpreter 翻译为叙事格式
-            List<MemoryRecall> recalls = interpreter.interpretAll(results);
-            StringBuilder sb = new StringBuilder("关于该用户的记忆：\n");
-            for (int i = 0; i < recalls.size(); i++) {
-                MemoryRecall r = recalls.get(i);
-                sb.append(i + 1).append(". ");
-                if (r.stabilityHint() != null && !r.stabilityHint().isEmpty()) {
-                    sb.append(r.stabilityHint()).append(" ");
-                }
-                sb.append(r.content());
-                if (r.ageText() != null && !r.ageText().isEmpty()) {
-                    sb.append("（").append(r.ageText()).append("）");
-                }
-                sb.append(" (置信度:").append(String.format("%.0f%%", r.confidence() * 100));
-                sb.append(", 状态:").append(r.status());
-                sb.append(", 来源:").append(r.source()).append(")\n");
-            }
-            return sb.toString();
+            if (botPersona) results = results.stream().filter(m -> "AUTO_FORMED".equals(m.getSource())).toList();
+            return MemoryEvidence.render(repo, results, cutoff);
         } catch (Exception e) {
             return "检索记忆失败: " + e.getMessage();
         }

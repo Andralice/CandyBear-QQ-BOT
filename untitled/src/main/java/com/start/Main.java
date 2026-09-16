@@ -130,6 +130,9 @@ public class Main extends WebSocketClient {
      * 使用 ConcurrentHashMap 保证线程安全。
      */
     private final Map<String, CompletableFuture<JsonNode>> pendingRequests = new ConcurrentHashMap<>();
+    /** 防止重复通知或异常重放导致连续戳回。 */
+    private final Map<String, Long> lastPokeReplyAt = new ConcurrentHashMap<>();
+    private static final long POKE_REPLY_COOLDOWN_MS = 3_000L;
     private volatile boolean shuttingDown;
 
 
@@ -358,7 +361,7 @@ public class Main extends WebSocketClient {
                     groupId = event.path("group_id").asLong();
                     userId = event.path("user_id").asLong();
                 } catch (Exception ignored) {}
-                String fallback = "出了点小问题，等下再试～";
+                String fallback = BaiLianService.GENERATION_FAILURE_MESSAGE;
                 if ("group".equals(msgType) && groupId > 0) {
                     sendGroupReply(groupId, fallback);
                 } else if ("private".equals(msgType) && userId > 0) {
@@ -672,6 +675,10 @@ public class Main extends WebSocketClient {
 
     private void handleNoticeEvent(JsonNode event) {
         String noticeType = event.path("notice_type").asText();
+        if ("notify".equals(noticeType) && "poke".equals(event.path("sub_type").asText())) {
+            handlePokeNotice(event);
+            return;
+        }
         if (!"group_recall".equals(noticeType) && !"friend_recall".equals(noticeType)) return;
         String providerMessageId = event.path("message_id").asText("");
         if (providerMessageId.isBlank() || messageService == null) return;
@@ -680,6 +687,58 @@ public class Main extends WebSocketClient {
         int affected = messageService.handleRetraction(providerMessageId, groupId, actorId,
                 MessageService.eventHash(event.toString()));
         logger.info("OneBot 撤回事件已处理: message_id={}, group_id={}, affected={}", providerMessageId, groupId, affected);
+    }
+
+    private void handlePokeNotice(JsonNode event) {
+        ObjectNode params = buildPokeReplyParams(event, BotConfig.getBotQq());
+        if (params == null) return;
+
+        long actorId = params.path("user_id").asLong();
+        long groupId = params.path("group_id").asLong(0);
+        String key = (groupId > 0 ? "group:" + groupId : "private") + ":" + actorId;
+        long now = System.currentTimeMillis();
+        final boolean[] accepted = {false};
+        lastPokeReplyAt.compute(key, (ignored, previous) -> {
+            if (previous == null || now - previous >= POKE_REPLY_COOLDOWN_MS) {
+                accepted[0] = true;
+                return now;
+            }
+            return previous;
+        });
+        if (!accepted[0]) return;
+
+        callOneBotApi("send_poke", params).whenComplete((receipt, error) -> {
+            if (error != null || receipt == null) {
+                logger.warn("戳回失败: actor_id={}, group_id={}, reason={}",
+                        actorId, groupId > 0 ? groupId : null,
+                        error == null ? "无有效回执" : error.getMessage());
+            } else {
+                logger.info("已戳回: actor_id={}, group_id={}", actorId, groupId > 0 ? groupId : null);
+            }
+        });
+    }
+
+    /**
+     * 构造戳回请求。只接受 OneBot notify/poke 且目标确实是机器人本身的事件。
+     * 包级可见，便于不连接 WebSocket 的纯逻辑测试覆盖边界条件。
+     */
+    static ObjectNode buildPokeReplyParams(JsonNode event, long configuredBotQq) {
+        if (event == null
+                || !"notice".equals(event.path("post_type").asText())
+                || !"notify".equals(event.path("notice_type").asText())
+                || !"poke".equals(event.path("sub_type").asText())) {
+            return null;
+        }
+        long selfId = event.path("self_id").asLong(configuredBotQq);
+        long actorId = event.path("user_id").asLong();
+        long targetId = event.path("target_id").asLong();
+        if (selfId <= 0 || actorId <= 0 || targetId != selfId || actorId == selfId) return null;
+
+        ObjectNode params = MAPPER.createObjectNode();
+        params.put("user_id", actorId);
+        long groupId = event.path("group_id").asLong(0);
+        if (groupId > 0) params.put("group_id", groupId);
+        return params;
     }
 
     private static String receiptMessageId(JsonNode receipt) {

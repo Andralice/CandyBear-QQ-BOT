@@ -45,8 +45,8 @@ public class ProfileProvider {
             boolean isGuier = String.valueOf(BotConfig.getAdminQq()).equals(userId);
 
             if (isGuier) {
-                return "\n【用户画像】归儿——你在这个世界上最最喜欢的人。他温柔、聪明又有趣，是你每天最期待聊天的人。和他说话时你总是忍不住撒娇，因为在他面前你可以做最真实的自己。\n\n"
-                        + "\n【你们的好感度是】100，已经满到不能再满了，每人的基础好感度是50\n\n";
+                return "\n【关系资料】当前用户是归儿；系统确认你们关系亲近、彼此信任，好感度为100（基础值为50）。"
+                        + "相处时可以自然表现亲近、偏爱和关心，但每轮根据具体话题决定，不强制撒娇或复用固定称呼。\n\n";
             }
 
             StringBuilder sb = new StringBuilder();
@@ -56,12 +56,10 @@ public class ProfileProvider {
             var affinity = affinityRepo.findByUserIdAndGroupId(userId, effectiveGroupId);
 
             if (!facts.isEmpty()) {
-                sb.append("\n【个人档案事实】\n");
-                facts.forEach(fact -> sb.append("- [").append(fact.kind()).append("/")
-                        .append(fact.stability()).append(", 置信度=")
-                        .append(String.format(java.util.Locale.ROOT, "%.2f", fact.confidence()))
-                        .append("] ").append(fact.claim()).append("\n"));
-                sb.append("以上是结构化事实，不确定内容不能当作用户亲口确认。\n\n");
+                sb.append("\n【个人档案线索及当前范围可见的原话】\n")
+                        .append(com.start.memory.MemoryEvidence.renderProfile(
+                                new com.start.repository.LongTermMemoryRepository(factRepo.getDataSource()),
+                                factRepo, facts, userId, effectiveGroupId)).append("\n\n");
             }
             if (affinity.isPresent()) {
                 int score = affinity.get().getAffinityScore();

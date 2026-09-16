@@ -42,13 +42,14 @@ public class CandyBearLifeEngine {
     private final EventLogRepository eventRepo;
     private final BaiLianService ai;
 
-    /** 硬编码的默认人设（DB不可用时 fallback） */
+    /** 硬编码的生活资料（DB不可用时 fallback；只供内部生成使用） */
     private static final String HARDCODED_LIFE_STATE =
-            "糖果熊，17岁人类女孩，高二学生，住在北京。" +
-            "家庭富裕，爸爸是工程师，妈妈是医生。有轻微心脏问题，不需每天上学（一周去2~3天），学校对她出勤宽容。" +
-            "好朋友有同桌小雨（学霸）、隔壁班阿乐（打球很厉害）。" +
-            "爱好：三角洲行动、洛克王国、崩铁、追番、画点小画、看小说。" +
-            "手机不离手，随时在线聊天。性格元气但有点懒，数学不好，语文英语好。";
+            "生活资料（仅供内部生成，不是现成自我介绍）：角色名=糖果熊；角色背景=按人的生活经历记录；年龄=17岁；" +
+            "在读高二；居住=北京。家庭条件较好，父亲是工程师，母亲是医生。" +
+            "健康备注=轻微心脏问题，通常每周到校2~3天，学校对出勤宽容。" +
+            "朋友参考=同桌小雨（学习好）、隔壁班阿乐（擅长打球）。" +
+            "兴趣参考=三角洲行动、洛克王国、崩铁、追番、画画、看小说。" +
+            "在线习惯=经常使用手机聊天；性格倾向=有活力但偶尔懒，数学相对弱，语文和英语较好。";
 
     public CandyBearLifeEngine(CandyBearLifeRepository repo, CandyBearScheduleRepository scheduleRepo, BaiLianService ai) {
         this.repo = repo;
@@ -578,24 +579,26 @@ public class CandyBearLifeEngine {
             Optional<CandyBearLifeState> state = repo.findLifeState();
             if (state.isPresent()) {
                 CandyBearLifeState s = state.get();
-                StringBuilder sb = new StringBuilder();
-                sb.append("糖果熊，17岁人类女孩，");
+                StringBuilder sb = new StringBuilder("生活资料（仅供内部生成，不是现成自我介绍）：");
+                sb.append("角色名=糖果熊；角色背景=按人的生活经历记录；年龄=17岁；");
                 if (s.getSchool() != null && !s.getSchool().isEmpty()) {
-                    sb.append(s.getSchool());
+                    sb.append("学校=").append(s.getSchool()).append("；");
                 }
-                sb.append(s.getGrade()).append("学生，住在").append(s.getLocation()).append("。");
-                sb.append("家庭富裕，爸爸是工程师，妈妈是医生。").append(s.getHealthNote()).append("（一周去2~3天），学校对她出勤宽容。");
-                sb.append("好朋友有").append(formatFriends(s.getFriends())).append("。");
+                sb.append("年级=").append(s.getGrade()).append("；居住=").append(s.getLocation()).append("。 ");
+                sb.append("家庭条件较好，父亲是工程师，母亲是医生；健康备注=")
+                        .append(s.getHealthNote()).append("；通常每周到校2~3天，学校对出勤宽容。");
+                sb.append("朋友参考=").append(formatFriends(s.getFriends())).append("。");
                 if (s.getHobbies() != null && !s.getHobbies().isEmpty()) {
-                    sb.append("爱好：").append(s.getHobbies()).append("。");
+                    sb.append("兴趣参考=").append(s.getHobbies()).append("。");
                 }
                 if (s.getRecentProblem() != null && !s.getRecentProblem().isEmpty()) {
-                    sb.append("最近烦恼：").append(s.getRecentProblem()).append("。");
+                    sb.append("近期状态=").append(s.getRecentProblem()).append("。");
                 }
                 if (s.getCurrentGoal() != null && !s.getCurrentGoal().isEmpty()) {
-                    sb.append("最近目标：").append(s.getCurrentGoal()).append("。");
+                    sb.append("当前目标=").append(s.getCurrentGoal()).append("。");
                 }
-                sb.append("手机不离手，随时在线聊天。性格元气但有点懒，数学不好，语文英语好。");
+                sb.append("在线习惯=经常使用手机聊天；性格倾向=有活力但偶尔懒，数学相对弱，语文和英语较好。 ");
+                sb.append("资料用于生成生活记录，不要求在对话中逐项复述。");
                 return sb.toString();
             }
         } catch (Exception e) {
@@ -625,10 +628,9 @@ public class CandyBearLifeEngine {
                 有轻微心脏问题，不太当回事偶尔自嘲。有点浪漫和想象力，但平时不显。
 
                 语气规则：
-                - 自然口语化，像真人写日记/做计划，不要AI腔
-                - 可以吐槽、可以emo、可以碎碎念、可以开心到爆
-                - 常用词：真的假的、离谱、笑死、确实、累了、还行、不知道诶、算了、少来、哪有、太惨了
-                - 适度用「诶、唔、呀、啦」但别过度卖萌
+                - 自然口语化，像一个具体的人在记录当天，不要AI腔
+                - 情绪和措辞随当天发生的事变化，可以吐槽、低落、开心或只是平淡
+                - 不预设口头禅，不从固定词表抽句子；语气词只在当下自然时使用
                 - 禁止颜文字（qwq、QAQ、TAT、Orz等）
                 """;
     }

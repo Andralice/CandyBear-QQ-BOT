@@ -14,7 +14,9 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -91,6 +93,8 @@ public final class GroupDialogueAnalyzer {
     private final String reasoningEffort;
     private final String protocol;
     private final String thinkingType;
+    private final LlmProtocol.Type llmProtocol;
+    private final String requestUrl;
     private final HttpClient httpClient;
 
     public static GroupDialogueAnalyzer fromConfig() {
@@ -103,7 +107,9 @@ public final class GroupDialogueAnalyzer {
                 BotConfig.getGroupCognitionTimeoutMs(),
                 BotConfig.getGroupCognitionReasoningEffort(),
                 BotConfig.getGroupCognitionProtocol(),
-                BotConfig.getGroupCognitionThinkingType());
+                BotConfig.getGroupCognitionThinkingType(),
+                BotConfig.getGroupCognitionLlmProtocol(),
+                BotConfig.isGroupCognitionUsesMainEndpoint());
     }
 
     public GroupDialogueAnalyzer(GroupCognitionMode mode, Set<Long> enabledGroups, String apiKey,
@@ -132,6 +138,23 @@ public final class GroupDialogueAnalyzer {
                 HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build());
     }
 
+    public GroupDialogueAnalyzer(GroupCognitionMode mode, Set<Long> enabledGroups, String apiKey,
+                                 String baseUrl, String model, int timeoutMs, String reasoningEffort,
+                                 String protocol, String thinkingType, String llmProtocol) {
+        this(mode, enabledGroups, apiKey, baseUrl, model, timeoutMs, reasoningEffort, protocol, thinkingType,
+                llmProtocol, LlmProtocol.Type.parse(llmProtocol).isAnthropic(),
+                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build());
+    }
+
+    public GroupDialogueAnalyzer(GroupCognitionMode mode, Set<Long> enabledGroups, String apiKey,
+                                 String baseUrl, String model, int timeoutMs, String reasoningEffort,
+                                 String protocol, String thinkingType, String llmProtocol,
+                                 boolean useMainEndpoint) {
+        this(mode, enabledGroups, apiKey, baseUrl, model, timeoutMs, reasoningEffort, protocol, thinkingType,
+                llmProtocol, useMainEndpoint,
+                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build());
+    }
+
     GroupDialogueAnalyzer(GroupCognitionMode mode, Set<Long> enabledGroups, String apiKey,
                           String baseUrl, String model, int timeoutMs, HttpClient httpClient) {
         this(mode, enabledGroups, apiKey, baseUrl, model, timeoutMs, "", "response_format", httpClient);
@@ -152,10 +175,21 @@ public final class GroupDialogueAnalyzer {
     GroupDialogueAnalyzer(GroupCognitionMode mode, Set<Long> enabledGroups, String apiKey,
                           String baseUrl, String model, int timeoutMs, String reasoningEffort,
                           String protocol, String thinkingType, HttpClient httpClient) {
+        this(mode, enabledGroups, apiKey, baseUrl, model, timeoutMs, reasoningEffort, protocol, thinkingType,
+                "openai", false, httpClient);
+    }
+
+    GroupDialogueAnalyzer(GroupCognitionMode mode, Set<Long> enabledGroups, String apiKey,
+                          String baseUrl, String model, int timeoutMs, String reasoningEffort,
+                          String protocol, String thinkingType, String llmProtocol,
+                          boolean useMainEndpoint, HttpClient httpClient) {
         this.mode = mode == null ? GroupCognitionMode.OFF : mode;
         this.enabledGroups = enabledGroups == null ? Set.of() : Set.copyOf(enabledGroups);
         this.apiKey = apiKey == null ? "" : apiKey.trim();
         this.baseUrl = baseUrl == null ? "" : baseUrl.trim();
+        this.llmProtocol = LlmProtocol.Type.parse(llmProtocol);
+        this.requestUrl = useMainEndpoint || this.llmProtocol.isAnthropic()
+                ? LlmProtocol.endpoint(this.baseUrl, this.llmProtocol) : this.baseUrl;
         this.model = model == null ? "" : model.trim();
         this.timeoutMs = Math.max(1_000, timeoutMs);
         this.reasoningEffort = reasoningEffort == null ? "" : reasoningEffort.trim();
@@ -227,34 +261,53 @@ public final class GroupDialogueAnalyzer {
 
     private CompletableFuture<Part> call(String systemPrompt, String transcript,
                                          JsonNode responseFormat, String taskName) {
-        ObjectNode body = MAPPER.createObjectNode();
-        body.put("model", model);
-        ArrayNode messages = body.putArray("messages");
-        messages.addObject().put("role", "system").put("content", systemPrompt);
-        messages.addObject().put("role", "user").put("content", transcript);
-        body.put("temperature", 0.0);
-        body.put("top_p", 1.0);
-        body.put("max_tokens", 420);
-        if (!reasoningEffort.isBlank()) body.put("reasoning_effort", reasoningEffort);
-        if (!thinkingType.isBlank()) body.putObject("thinking").put("type", thinkingType);
-        body.put("seed", 42);
-        if ("tools".equals(protocol)) {
-            String toolName = "relation".equals(taskName) ? "group_relation" : "group_opportunity";
-            ArrayNode tools = body.putArray("tools");
-            tools.add(buildTool(toolName, responseFormat));
-            ObjectNode toolChoice = body.putObject("tool_choice");
-            toolChoice.put("type", "function");
-            toolChoice.putObject("function").put("name", toolName);
+        String toolName = "relation".equals(taskName) ? "group_relation" : "group_opportunity";
+        List<Map<String, Object>> messages = new ArrayList<>();
+        if (!llmProtocol.isAnthropic()) {
+            messages.add(Map.of("role", "system", "content", systemPrompt));
+        }
+        messages.add(Map.of("role", "user", "content", transcript));
+
+        Map<String, Object> body;
+        if (llmProtocol.isAnthropic()) {
+            Map<String, Object> tool = new LinkedHashMap<>();
+            tool.put("name", toolName);
+            tool.put("description", "返回 " + toolName + " 的群聊认知结果，不要输出普通文本");
+            tool.put("input_schema", responseFormat.path("json_schema").path("schema"));
+            body = LlmProtocol.buildRequestBody(
+                    llmProtocol, model, systemPrompt, messages, List.of(tool), 420, "");
+            body.put("temperature", 0.0);
+            body.put("tool_choice", Map.of("type", "tool", "name", toolName));
         } else {
-            body.set("response_format", responseFormat);
+            ObjectNode openAiBody = MAPPER.createObjectNode();
+            openAiBody.put("model", model);
+            ArrayNode openAiMessages = openAiBody.putArray("messages");
+            openAiMessages.addObject().put("role", "system").put("content", systemPrompt);
+            openAiMessages.addObject().put("role", "user").put("content", transcript);
+            openAiBody.put("temperature", 0.0);
+            openAiBody.put("top_p", 1.0);
+            openAiBody.put("max_tokens", 420);
+            if (!reasoningEffort.isBlank()) openAiBody.put("reasoning_effort", reasoningEffort);
+            if (!thinkingType.isBlank()) openAiBody.putObject("thinking").put("type", thinkingType);
+            openAiBody.put("seed", 42);
+            if ("tools".equals(protocol)) {
+                ArrayNode tools = openAiBody.putArray("tools");
+                tools.add(buildTool(toolName, responseFormat));
+                ObjectNode toolChoice = openAiBody.putObject("tool_choice");
+                toolChoice.put("type", "function");
+                toolChoice.putObject("function").put("name", toolName);
+            } else {
+                openAiBody.set("response_format", responseFormat);
+            }
+            body = MAPPER.convertValue(openAiBody, Map.class);
         }
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(baseUrl))
-                .header("Authorization", "Bearer " + apiKey)
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
+                .uri(URI.create(requestUrl))
                 .header("Content-Type", "application/json")
-                .timeout(Duration.ofMillis(timeoutMs))
-                .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
+                .timeout(Duration.ofMillis(timeoutMs));
+        HttpRequest request = LlmProtocol.addAuthHeaders(requestBuilder, llmProtocol, apiKey)
+                .POST(HttpRequest.BodyPublishers.ofString(MAPPER.valueToTree(body).toString()))
                 .build();
 
         long started = System.nanoTime();
@@ -266,24 +319,37 @@ public final class GroupDialogueAnalyzer {
                     }
                     try {
                         JsonNode root = MAPPER.readTree(response.body());
-                        JsonNode choices = root.path("choices");
-                        if (!choices.isArray() || choices.isEmpty()) {
-                            throw new IllegalStateException(taskName + " response has no choices");
-                        }
-                        JsonNode message = choices.get(0).path("message");
                         String content;
-                        if ("tools".equals(protocol)) {
+                        int tokens;
+                        if (llmProtocol.isAnthropic()) {
+                            JsonNode message = LlmProtocol.normalizeAssistantResponse(MAPPER, root, llmProtocol);
                             JsonNode toolCalls = message.path("tool_calls");
                             if (!toolCalls.isArray() || toolCalls.isEmpty()) {
-                                throw new IllegalStateException(taskName + " response has no tool call");
+                                content = LlmProtocol.extractText(message);
+                            } else {
+                                content = toolCalls.get(0).path("function").path("arguments").asText("");
                             }
-                            content = toolCalls.get(0).path("function").path("arguments").asText("");
+                            tokens = root.path("usage").path("input_tokens").asInt(0)
+                                    + root.path("usage").path("output_tokens").asInt(0);
                         } else {
-                            content = message.path("content").asText("");
+                            JsonNode choices = root.path("choices");
+                            if (!choices.isArray() || choices.isEmpty()) {
+                                throw new IllegalStateException(taskName + " response has no choices");
+                            }
+                            JsonNode message = choices.get(0).path("message");
+                            if ("tools".equals(protocol)) {
+                                JsonNode toolCalls = message.path("tool_calls");
+                                if (!toolCalls.isArray() || toolCalls.isEmpty()) {
+                                    throw new IllegalStateException(taskName + " response has no tool call");
+                                }
+                                content = toolCalls.get(0).path("function").path("arguments").asText("");
+                            } else {
+                                content = message.path("content").asText("");
+                            }
+                            tokens = root.path("usage").path("prompt_tokens").asInt(0)
+                                    + root.path("usage").path("completion_tokens").asInt(0);
                         }
                         if (content.isBlank()) throw new IllegalStateException(taskName + " response is empty");
-                        int tokens = root.path("usage").path("prompt_tokens").asInt(0)
-                                + root.path("usage").path("completion_tokens").asInt(0);
                         return new Part(MAPPER.readTree(content), latencyMs, tokens);
                     } catch (Exception e) {
                         throw new IllegalStateException(taskName + " response parse failed", e);

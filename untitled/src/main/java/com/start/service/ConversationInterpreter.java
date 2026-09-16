@@ -22,9 +22,21 @@ public class ConversationInterpreter {
     /** 识别当前消息触发的对话事件 */
     public InterpretResult interpret(String groupId, String userId, String nickname,
                                       String message, List<Long> ats) {
+        return interpret(groupId, userId, nickname, message, message, ats);
+    }
+
+    /**
+     * 识别当前消息触发的对话事件，并保留 raw_message 供协议型事件识别。
+     * 纯文本用于生成自然语言提示，raw_message 只用于识别红包/音乐等 CQ 消息。
+     */
+    public InterpretResult interpret(String groupId, String userId, String nickname,
+                                     String message, String rawMessage, List<Long> ats) {
         if (userId.equals(String.valueOf(BotConfig.getBotQq()))) {
             return InterpretResult.NOTHING;
         }
+
+        String text = message == null ? "" : message;
+        String protocolText = rawMessage == null ? text : rawMessage;
 
         long now = System.currentTimeMillis();
         String fullUserId = groupId + "_" + userId;
@@ -36,10 +48,11 @@ public class ConversationInterpreter {
         // 1. 追问检测（120s 窗口）
         ConversationStateStore.UserThread thread = stateStore.getUserThread(fullUserId);
         if (!atsOthers && thread != null && now - thread.lastInteraction() < 120_000) {
-            if (isFollowUpMessage(message)) {
+            if (isFollowUpMessage(text)) {
                 stateStore.removePendingAwait(fullUserId); // cancel await
                 String cleanReply = normalizeReplyForContext(thread.lastBotReply());
-                String prompt = "你之前说：" + cleanReply + "\n对方现在说：" + message + "\n请用一句自然的话回应。";
+                String prompt = "你之前说：" + cleanReply + "\n对方现在说：" + text
+                        + "\n结合上下文接住这次补充；闲聊可以简短，认真问题或明确求助时把需要说清楚，不必机械追问。";
                 return InterpretResult.of(ConversationEvent.FOLLOW_UP, prompt);
             }
         }
@@ -49,7 +62,7 @@ public class ConversationInterpreter {
         if (await != null && !await.isExpired()) {
             String prompt = "你之前问了" + await.targetNickname + "(" + await.targetUserId + "): " + await.question
                     + "\n你想了解的是: " + await.context
-                    + "\n\nTA的回复是: " + message
+                    + "\n\nTA的回复是: " + text
                     + "\n\n请根据TA的回复自然地继续对话。";
             return InterpretResult.of(ConversationEvent.AWAIT_REPLY, prompt);
         }
@@ -64,8 +77,12 @@ public class ConversationInterpreter {
         Map<String, Object> activeReply = (Map<String, Object>) personality.get("activeReply");
         double baseProbability = (double) activeReply.get("baseProbability");
         if (baseProbability >= 0.5) {
-            if (aiDatabaseService.shouldJoinTopic(message, groupId)) {
-                String prompt = "群友说：" + message + "\n作为糖果熊，请用一句话自然回应。不要长篇大论，不要分析。\n\n如果你觉得没必要回复（比如话题已经过去了、别人在聊别的、你刚说过话），只输出 <NO_REPLY>，不要输出任何其他内容。";
+            if (aiDatabaseService.shouldJoinTopic(text, groupId)) {
+                String prompt = "群友说：" + text
+                        + "\n结合当前话题、对象和前后对话自然回应：闲聊接住就停，明确问题或求助时把需要说清楚；"
+                        + "不要把倾诉自动变成劝导，也不必机械分析、追问或建议。"
+                        + "\n如果没有与你有关且值得补充的内容（例如话题已过去、其他人正处理、你刚回过），"
+                        + "只输出 <NO_REPLY>，不输出任何其他内容。";
                 return InterpretResult.of(ConversationEvent.PROBABILISTIC, prompt);
             }
         }
@@ -77,18 +94,19 @@ public class ConversationInterpreter {
                     .filter(e -> "ai_reply".equals(e.type()))
                     .reduce((first, second) -> second);
             if (lastAi.isPresent() && now - lastAi.get().timestamp() < 180_000) {
-                if (isResponseToAIMessage(message, lastAi.get().content())) {
+                if (isResponseToAIMessage(text, lastAi.get().content())) {
                     String cleanReply = normalizeReplyForContext(lastAi.get().content());
-                    String prompt = "你之前说：" + cleanReply + "\n另一个群友评论：" + message + "\n请友好地回应。";
+                    String prompt = "你之前说：" + cleanReply + "\n另一个群友评论：" + text
+                            + "\n结合上下文回应这句评论；需要时解释或修正，不必为了友好而机械附和。";
                     return InterpretResult.of(ConversationEvent.AI_COMMENTED, prompt);
                 }
             }
         }
 
         // 5. 被动触发
-        Optional<String> passive = checkPassiveReactions(message);
+        Optional<String> passive = checkPassiveReactions(protocolText);
         if (passive.isPresent()) {
-            return InterpretResult.direct(ConversationEvent.PASSIVE_TRIGGER, passive.get());
+            return InterpretResult.of(ConversationEvent.PASSIVE_TRIGGER, passive.get());
         }
 
         return InterpretResult.NOTHING;
@@ -142,12 +160,15 @@ public class ConversationInterpreter {
                 || (lower.contains("你") && userMsg.length() <= 20);
     }
 
-    /** 被动触发检测（红包、音乐等） */
+    /** 被动触发检测（红包、音乐等）。返回给模型的语义提示，不是用户可见话术。 */
     Optional<String> checkPassiveReactions(String message) {
-        String lower = message.toLowerCase();
-        if (message.contains("[CQ:redbag")) return Optional.of("诶？有红包？手慢无啊...");
-        if (message.contains("[CQ:music") || lower.contains("网易云") || lower.contains("music.163"))
-            return Optional.of("这首歌我也听过，挺不错的～");
+        String text = message == null ? "" : message;
+        String lower = text.toLowerCase();
+        if (text.contains("[CQ:redbag")) {
+            return Optional.of("群里刚出现了一个红包消息。结合当前群聊自然接住这件事；不要编造红包金额、发送者、是否抢到或其他不可见结果，是否拆成多条由你根据真实想法决定。");
+        }
+        if (text.contains("[CQ:music") || lower.contains("网易云") || lower.contains("music.163"))
+            return Optional.of("群里刚分享了一首音乐。结合可见的歌名、链接和群友评论自然回应；除非有证据，不要声称自己听过或编造歌曲细节，是否拆成多条由你根据真实想法决定。");
         return Optional.empty();
     }
 

@@ -13,6 +13,8 @@ ONEBOT_ACCESS_TOKEN=your_access_token
 # AI 服务配置 (OpenAI 兼容 API)
 BAILIAN_API_KEY=sk-your-key
 BAILIAN_BASE_URL=https://api.deepseek.com/v1/chat/completions
+# openai（默认）或 anthropic；Anthropic 可填服务的 /v1 根地址，程序会请求 /v1/messages
+BAILIAN_PROTOCOL=openai
 BAILIAN_CHAT_MODEL=deepseek-v4-pro
 # 保留兼容；聊天图片始终由独立 Vision 描述，主聊天不接收原图
 BAILIAN_MULTIMODAL_ENABLED=false

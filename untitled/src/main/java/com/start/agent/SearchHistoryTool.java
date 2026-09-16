@@ -2,6 +2,7 @@ package com.start.agent;
 
 import com.start.model.ChatMessage;
 import com.start.model.LongTermMemory;
+import com.start.memory.MemoryEvidence;
 import com.start.repository.LongTermMemoryRepository;
 import com.start.repository.MessageRepository;
 import org.slf4j.Logger;
@@ -83,16 +84,8 @@ public class SearchHistoryTool implements Tool {
             }
 
             if (memories != null && !memories.isEmpty()) {
-                DateTimeFormatter fmt = DateTimeFormatter.ofPattern("MM-dd HH:mm");
-                result.append("【结构化记忆】找到 ").append(memories.size()).append(" 条");
-                if (memories.size() >= memLimit) result.append("（已达上限，可能不全，请缩小时间范围）");
-                result.append("：\n");
-                for (int i = 0; i < memories.size(); i++) {
-                    LongTermMemory m = memories.get(i);
-                    result.append(i + 1).append(". [").append(m.getMemoryType()).append("] ");
-                    result.append(m.getUserId()).append(": ").append(m.getContent());
-                    result.append(" (").append(m.getCreatedAt() != null ? m.getCreatedAt().format(fmt) : "??").append(")\n");
-                }
+                result.append("【记忆线索及原话依据】\n").append(MemoryEvidence.render(memoryRepo, memories,
+                        java.time.LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))));
                 result.append("\n");
             }
         } catch (Exception e) {
@@ -126,13 +119,16 @@ public class SearchHistoryTool implements Tool {
         }
 
         DateTimeFormatter fmt = DateTimeFormatter.ofPattern("MM-dd HH:mm:ss");
-        result.append("【原始记录】找到 ").append(messages.size()).append(" 条");
+        result.append(MemoryEvidence.GUIDE).append("\n【原始记录】找到 ").append(messages.size()).append(" 条");
         if (messages.size() >= count) result.append("（已达上限，可能不全，请缩小时间范围）");
         result.append("：\n");
         for (int i = messages.size() - 1; i >= 0; i--) {
             ChatMessage msg = messages.get(i);
-            result.append("- [").append(msg.getCreatedAt() != null ? msg.getCreatedAt().format(fmt) : "??");
-            result.append("] ").append(msg.getUserId()).append(": ").append(msg.getContent()).append("\n");
+            result.append("- source_message_id=").append(msg.getId()).append(" message_time=")
+                    .append(msg.getCreatedAt() != null ? msg.getCreatedAt().format(fmt) : "未知");
+            result.append(" speaker=").append(msg.getUserId()).append(Boolean.TRUE.equals(msg.getIsRobotReply())
+                    ? " [助手历史输出，不是用户自述] " : " [用户历史消息] ");
+            result.append(msg.getContent()).append("\n");
         }
 
         return result.toString().trim();

@@ -42,7 +42,6 @@ public class HandlerRegistry {
         baiLianService.setShellService(shellService);
 
         handlers.add(new ShellHandler(shellService));
-        handlers.add(new HelloHandler());
         handlers.add(new LuckHandler());
         handlers.add(new JokeHandler());
         handlers.add(new ReminderHandler());

@@ -497,7 +497,8 @@ public class MessageRepository extends BaseRepository {
     public DatabaseResult<List<ChatMessage>> searchMessages(String groupId, String keyword, String userId,
                                                             String dateFrom, String dateTo, int limit) {
         return safeExecute(() -> {
-            StringBuilder sql = new StringBuilder("SELECT * FROM messages WHERE group_id = ? ");
+            StringBuilder sql = new StringBuilder("SELECT * FROM messages WHERE group_id = ? AND is_private=FALSE "
+                    + "AND retracted_at IS NULL AND redacted_at IS NULL AND availability_status='AVAILABLE' ");
             List<Object> params = new ArrayList<>();
             params.add(groupId);
 
@@ -534,8 +535,12 @@ public class MessageRepository extends BaseRepository {
                 List<ChatMessage> messages = new ArrayList<>();
                 while (rs.next()) {
                     ChatMessage msg = mapToChatMessage(rs);
-                    if (msg != null) messages.add(msg);
+                    if (msg != null) {
+                        if (rs.getString("raw_content") != null) msg.setContent(rs.getString("raw_content"));
+                        messages.add(msg);
+                    }
                 }
+                // Preserve source wording rather than model-enriched content on this evidence path.
                 logger.debug("searchMessages: sql={}, params={}, found={}", sql, params, messages.size());
                 return messages;
             } finally {

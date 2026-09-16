@@ -163,6 +163,8 @@ public class BaiLianService {
             "yyyy年M月d日 EEEE HH:mm:ss '北京时间'",
             Locale.CHINA
     );
+    /** 模型不可用时的事实状态；正常回复不会走这里。 */
+    public static final String GENERATION_FAILURE_MESSAGE = "这次请求没有成功，请稍后再试。";
 
 
     private final UserProfileRepository profileRepo = new UserProfileRepository(DatabaseConfig.getDataSource());
@@ -221,6 +223,8 @@ public class BaiLianService {
 
     private final String baiLianApiKey = BotConfig.getBaiLianApiKey();
     private final String baiLianBaseUrl = BotConfig.getBaiLianBaseUrl();
+    private final LlmProtocol.Type baiLianProtocol = LlmProtocol.Type.parse(BotConfig.getBaiLianProtocol());
+    private final String baiLianUrl = LlmProtocol.endpoint(baiLianBaseUrl, baiLianProtocol);
     private final String bailianChatModel = BotConfig.getBaiLianChatModel();
     private final int bailianTimeoutMs = BotConfig.getBaiLianTimeoutMs();
     private final int bailianMaxRetries = BotConfig.getBaiLianMaxRetries();
@@ -532,7 +536,7 @@ public class BaiLianService {
         return java.time.LocalDate.now(ZoneId.of("Asia/Shanghai")).minusDays(2).format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
     }
 
-    // 调用 AI（同步），返回第一条短回复（或空字符串表示不应回复）
+    // 调用 AI（同步），返回模型文本（空字符串表示没有可发送内容）
     /**
      * 生成 AI 回复消息。
      *
@@ -543,7 +547,7 @@ public class BaiLianService {
      * @param userId      用户唯一标识
      * @param userPrompt  用户当前输入的提示文本
      * @param groupId     群组 ID（若为私聊可为 null）
-     * @return AI 生成的回复文本；若失败或被限流则返回默认兜底语句
+     * @return AI 生成的回复文本；若失败或没有可发送内容则返回空字符串
      */
     /**
      * 生成AI回复的核心方法
@@ -553,7 +557,7 @@ public class BaiLianService {
      * @param userPrompt 用户发送的消息内容
      * @param groupId 群组ID（若为私聊则为null）
      * @param nickname 用户昵称
-     * @return AI生成的回复内容，若因限流等原因不回复则返回空字符串或兜底文本
+     * @return AI生成的回复内容，若因限流、失败或没有可发送内容则返回空字符串
      */
     public String generate(String sessionId, String userId, String userPrompt, String groupId, String nickname) {
         return generate(sessionId, userId, userPrompt, groupId, nickname, Collections.emptyList(), false).reply();
@@ -828,7 +832,7 @@ public class BaiLianService {
             int snapshotStart = Math.max(0, historySnapshot.size() - 4);
             for (int i = snapshotStart; i < historySnapshot.size(); i++) {
                 Message msg = historySnapshot.get(i);
-                String role = "user".equals(msg.role) ? "user" : "assistant";
+                String role = "assistant".equals(msg.role) ? "assistant" : "user";
 
                 String content = msg.content;
                 if (content.length() > 600) {
@@ -841,7 +845,7 @@ public class BaiLianService {
                         java.time.ZoneId.of("Asia/Shanghai")
                 ).format(shortTs);
                 String messageContent = "[" + timePrefix + "] " + content;
-                messages.add(buildUserMessage(messageContent, imageDataUris));
+                messages.add(buildMessage(role, messageContent, imageDataUris));
             }
 
             // PR4: suppress 模式下 user message 不在 history 中，手动追加到 messages 数组
@@ -849,13 +853,13 @@ public class BaiLianService {
                 messages.add(buildUserMessage(userPrompt, imageDataUris));
             }
 
-            String url = this.baiLianBaseUrl;
+            String url = this.baiLianUrl;
             String apiKey = this.baiLianApiKey;
             String modelName = this.bailianChatModel;
 
             // 构建工具列表及 OpenAI 原生 function calling specs
             LongTermMemoryRepository ltmRepo = new LongTermMemoryRepository(DatabaseConfig.getDataSource());
-            RecallMemoryTool recallMemoryTool = new RecallMemoryTool(ltmRepo);
+            RecallMemoryTool recallMemoryTool = new RecallMemoryTool(ltmRepo, userId, groupId);
             recallMemoryTool.setAutoKeywords(hanlpKeywords);
 
             EvolutionRecordRepository evoRepo = new EvolutionRecordRepository(DatabaseConfig.getDataSource());
@@ -937,8 +941,10 @@ public class BaiLianService {
                         + "4K 图片把 size 设为 4K；视频使用 text、keyframe 或 reference 中合适的模式。"
                         + "工具会把生成结果自动发送到当前聊天，工具返回失败时如实说明失败原因。";
             }
-            // 媒体能力提示必须在 system 消息加入请求前拼接，否则模型看不到它。
-            messages.add(Map.of("role", "system", "content", systemPrompt));
+            // OpenAI 把 system 放在 messages 首位；Anthropic 通过请求体的 system 字段发送。
+            if (!baiLianProtocol.isAnthropic()) {
+                messages.add(0, Map.of("role", "system", "content", systemPrompt));
+            }
             // 归儿专属工具（code/audit/shell/self_evolve），非管理员不发，省 token
             if (isAdmin) {
                 availableTools.addAll(Arrays.asList(
@@ -963,41 +969,20 @@ public class BaiLianService {
                     new WorkingMemoryRepository(DatabaseConfig.getDataSource()),
                     new ThreadRepository(DatabaseConfig.getDataSource()), groupId, BOT_QQ));
 
-            List<Map<String, Object>> toolSpecs = availableTools.stream()
-                    .map(Tool::getFunctionSpec)
-                    .collect(Collectors.toList());
+            List<Map<String, Object>> toolSpecs = LlmProtocol.buildToolSpecs(
+                    baiLianProtocol, availableTools,
+                    name -> runtimeConfig.get("tool_desc_" + name));
 
-            // 热重载：工具描述可从运行时配置覆盖
-            for (Map<String, Object> spec : toolSpecs) {
-                Object fnObj = spec.get("function");
-                if (fnObj instanceof Map<?, ?> fn) {
-                    String name = (String) fn.get("name");
-                    if (name != null) {
-                        String overrideDesc = runtimeConfig.get("tool_desc_" + name);
-                        if (overrideDesc != null && !overrideDesc.isBlank()) {
-                            @SuppressWarnings("unchecked")
-                            Map<String, Object> fnMap = (Map<String, Object>) fn;
-                            fnMap.put("description", overrideDesc);
-                        }
-                    }
-                }
-            }
-
-            Map<String, Object> requestBodyObj = new HashMap<>();
-            requestBodyObj.put("model", modelName);
-            requestBodyObj.put("messages", messages);
-            requestBodyObj.put("max_tokens", 1024);
-            addReasoningEffort(requestBodyObj, baiLianReasoningEffort);
-            requestBodyObj.put("tools", toolSpecs);
-            requestBodyObj.put("tool_choice", "auto");
+            Map<String, Object> requestBodyObj = LlmProtocol.buildRequestBody(
+                    baiLianProtocol, modelName, systemPrompt, messages, toolSpecs,
+                    1024, baiLianReasoningEffort);
 
             String requestBody = objectMapper.writeValueAsString(requestBodyObj);
             logger.debug("发送 AI 请求，model={}, sessionId={}, chars={}",
                     modelName, sessionId, requestBody.length());
 
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .header("Authorization", "Bearer " + apiKey)
+            HttpRequest request = LlmProtocol.addAuthHeaders(HttpRequest.newBuilder()
+                            .uri(URI.create(url)), baiLianProtocol, apiKey)
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                     .timeout(Duration.ofMillis(this.bailianTimeoutMs))
@@ -1025,26 +1010,11 @@ public class BaiLianService {
                 throw new RuntimeException("AI 服务错误: " + errorMsg);
             }
 
-            JsonNode choices = root.path("choices");
-
-            if (!choices.isArray() || choices.isEmpty()) {
-                logger.warn("Gemini API 返回结果中缺少 choices，响应: {}", response.body());
-                throw new RuntimeException("AI 未返回有效回复");
-            }
-
-            JsonNode firstChoice = choices.get(0);
-            if (firstChoice == null || !firstChoice.has("message")) {
-                logger.warn("choice[0] 格式异常，缺少 message 字段");
-                throw new RuntimeException("AI 回复格式错误");
-            }
-
-            JsonNode messageNode = firstChoice.get("message");
-            String reply = messageNode.path("content").asText().trim();
-            if ("null".equals(reply) || messageNode.path("content").isNull()) reply = "";
+            JsonNode lastMessage = LlmProtocol.normalizeAssistantResponse(objectMapper, root, baiLianProtocol);
+            String reply = LlmProtocol.extractText(lastMessage).trim();
             logger.debug("AI raw reply (first 200 chars): {}", reply.length() > 200 ? reply.substring(0, 200) + "..." : reply);
 
-            // === 多轮工具调用循环（OpenAI 原生 function calling，最多6轮）===
-            JsonNode lastMessage = firstChoice.get("message");
+            // === 多轮工具调用循环（OpenAI / Anthropic 原生工具调用，最多20轮）===
             int toolRound = 0;
             int maxToolRounds = 20;
             int toolCalls = 0;
@@ -1052,14 +1022,11 @@ public class BaiLianService {
             while (toolRound < maxToolRounds) {
                 toolRound++;
 
-                boolean hasToolCalls = lastMessage.has("tool_calls")
-                        && lastMessage.get("tool_calls").isArray()
-                        && !lastMessage.get("tool_calls").isEmpty();
+                boolean hasToolCalls = LlmProtocol.hasToolCalls(lastMessage);
 
                 if (!hasToolCalls) {
                     // 模型直接返回文本 —— 正常结束
-                    String content = lastMessage.path("content").asText();
-                    if ("null".equals(content) || lastMessage.path("content").isNull()) content = "";
+                    String content = LlmProtocol.extractText(lastMessage);
                     if (!content.isEmpty()) {
                         reply = content;
                     }
@@ -1068,19 +1035,11 @@ public class BaiLianService {
 
                 // === 有工具调用 ===
                 List<ToolResult> toolResults = new ArrayList<>();
+                List<Map<String, Object>> anthropicToolResultBlocks = new ArrayList<>();
                 boolean stopToolLoop = false;
 
                 // 将 assistant 消息（含 tool_calls）加入对话历史
-                ObjectNode assistantMsg = MAPPER.createObjectNode();
-                assistantMsg.put("role", "assistant");
-                String asstContent = lastMessage.path("content").asText();
-                if ("null".equals(asstContent) || lastMessage.path("content").isNull()) {
-                    assistantMsg.putNull("content");
-                } else {
-                    assistantMsg.put("content", asstContent);
-                }
-                assistantMsg.set("tool_calls", lastMessage.get("tool_calls"));
-                messages.add(MAPPER.convertValue(assistantMsg, Map.class));
+                LlmProtocol.appendAssistantToolMessage(MAPPER, messages, lastMessage, baiLianProtocol);
 
                 // 遍历 tool_calls 逐一执行
                 ArrayNode toolCallsArray = (ArrayNode) lastMessage.get("tool_calls");
@@ -1106,7 +1065,12 @@ public class BaiLianService {
                             errMsg.put("role", "tool");
                             errMsg.put("tool_call_id", callId);
                             errMsg.put("content", "参数解析错误: " + e.getMessage());
-                            messages.add(errMsg);
+                            if (baiLianProtocol.isAnthropic()) {
+                                anthropicToolResultBlocks.add(LlmProtocol.buildAnthropicToolResult(
+                                        callId, "参数解析错误: " + e.getMessage()));
+                            } else {
+                                messages.add(errMsg);
+                            }
                             continue;
                         }
 
@@ -1157,7 +1121,7 @@ public class BaiLianService {
                         // Image selection needs complete IDs/time/alternatives, and the invocation rules must remain intact.
                         boolean imageEvidence = "query_past_images".equals(toolName) || "generate_image".equals(toolName);
                         boolean contextEvidence = List.of("query_message_context", "query_thread", "query_media_artifact",
-                                "query_user_profile", "manage_alias").contains(toolName);
+                                "query_user_profile", "manage_alias", "recall_memory", "search_chat_history").contains(toolName);
                         int resultLimit = imageEvidence ? result.length() : contextEvidence ? 16000 : 500;
                         String trimmedResult = result.length() > resultLimit
                                 ? result.substring(0, resultLimit) + "\n...[已截断，原始共" + result.length() + "字符]"
@@ -1167,21 +1131,41 @@ public class BaiLianService {
                         toolResultMsg.put("role", "tool");
                         toolResultMsg.put("tool_call_id", callId);
                         toolResultMsg.put("content", trimmedResult);
-                        messages.add(toolResultMsg);
+                        if (baiLianProtocol.isAnthropic()) {
+                            anthropicToolResultBlocks.add(LlmProtocol.buildAnthropicToolResult(callId, trimmedResult));
+                        } else {
+                            messages.add(toolResultMsg);
+                        }
                     } else {
                         logger.warn("模型调用了未知工具: {}", toolName);
                         Map<String, Object> unknownMsg = new HashMap<>();
                         unknownMsg.put("role", "tool");
                         unknownMsg.put("tool_call_id", callId);
                         unknownMsg.put("content", "未知工具: " + toolName);
-                        messages.add(unknownMsg);
+                        if (baiLianProtocol.isAnthropic()) {
+                            anthropicToolResultBlocks.add(LlmProtocol.buildAnthropicToolResult(
+                                    callId, "未知工具: " + toolName));
+                        } else {
+                            messages.add(unknownMsg);
+                        }
                     }
+                }
+
+                if (baiLianProtocol.isAnthropic() && !anthropicToolResultBlocks.isEmpty()) {
+                    messages.add(Map.of("role", "user", "content", anthropicToolResultBlocks));
                 }
 
                 // Complete every tool response before injecting system rules. No call in this same batch may generate early.
                 if (toolResults.stream().anyMatch(tr -> "generate_image".equals(tr.name)
                         && tr.result.startsWith(GenerateMediaTool.REQUIREMENTS_REQUIRED))) {
-                    imageGenerationTool.injectImageRequirements(messages);
+                    if (baiLianProtocol.isAnthropic()) {
+                        String requirements = imageGenerationTool.consumeImageRequirements();
+                        if (!requirements.isBlank()) {
+                            systemPrompt += "\n\n【生图调用规范】\n" + requirements;
+                        }
+                    } else {
+                        imageGenerationTool.injectImageRequirements(messages);
+                    }
                 }
 
                 if (stopToolLoop) {
@@ -1196,18 +1180,18 @@ public class BaiLianService {
                 // 已达最大轮次 → 工具结果不再拼入回复，避免源码/日志泄露到聊天中
                 if (toolRound >= maxToolRounds) {
                     logger.info("已达最大工具调用轮次 {}", maxToolRounds);
-                    reply = "唔……查是查到了但是说不完啦，大概就这样~";
+                    reply = toolResults.stream()
+                            .filter(tr -> !"send_status".equals(tr.name()))
+                            .map(tr -> tr.result)
+                            .filter(result -> result != null && !result.isBlank())
+                            .collect(Collectors.joining("；"));
                     break;
                 }
 
                 // 构造 follow-up 请求（继续带 tools）
-                Map<String, Object> nextBody = new HashMap<>();
-                nextBody.put("model", modelName);
-                nextBody.put("messages", messages);
-                nextBody.put("max_tokens", 1024);
-                addReasoningEffort(nextBody, baiLianReasoningEffort);
-                nextBody.put("tools", toolSpecs);
-                nextBody.put("tool_choice", "auto");
+                Map<String, Object> nextBody = LlmProtocol.buildRequestBody(
+                        baiLianProtocol, modelName, systemPrompt, messages, toolSpecs,
+                        1024, baiLianReasoningEffort);
 
                 String nextBodyJson = objectMapper.writeValueAsString(nextBody);
                 JsonNode nextMsg = null;
@@ -1215,9 +1199,8 @@ public class BaiLianService {
                     HttpResponse<String> nextResp = BailianRetryExecutor.executeHttp(
                             "百炼 API 工具第" + toolRound + "轮",
                             () -> {
-                                HttpRequest nextReq = HttpRequest.newBuilder()
-                                        .uri(URI.create(url))
-                                        .header("Authorization", "Bearer " + apiKey)
+                                HttpRequest nextReq = LlmProtocol.addAuthHeaders(HttpRequest.newBuilder()
+                                                .uri(URI.create(url)), baiLianProtocol, apiKey)
                                         .header("Content-Type", "application/json")
                                         .POST(HttpRequest.BodyPublishers.ofString(nextBodyJson))
                                         .timeout(Duration.ofMillis(this.bailianTimeoutMs))
@@ -1228,10 +1211,7 @@ public class BaiLianService {
                     );
                     if (nextResp.statusCode() == 200) {
                         JsonNode sr = objectMapper.readTree(nextResp.body());
-                        JsonNode sc = sr.path("choices");
-                        if (sc.isArray() && !sc.isEmpty()) {
-                            nextMsg = sc.get(0).path("message");
-                        }
+                        nextMsg = LlmProtocol.normalizeAssistantResponse(objectMapper, sr, baiLianProtocol);
                     }
                 } catch (Exception e) {
                     logger.warn("工具第{}轮回调失败: {}", toolRound, e.getMessage());
@@ -1244,8 +1224,9 @@ public class BaiLianService {
                     String fallback = toolResults.stream()
                             .filter(tr -> !"send_status".equals(tr.name))
                             .map(tr -> tr.result)
-                            .reduce((a, b) -> a + "；" + b).orElse("");
-                    reply = fallback.isEmpty() ? "唔……查是查到了但是脑子有点转不过来，你再说一遍？" : fallback;
+                            .filter(result -> result != null && !result.isBlank())
+                            .collect(Collectors.joining("；"));
+                    reply = fallback;
                     break;
                 }
             } // end multi-round while
@@ -1313,14 +1294,11 @@ public class BaiLianService {
                 messages.add(Map.of("role", "user", "content",
                         "你的上一条回复格式有误，无法解析。请直接用纯文本重新输出内容，不要用JSON包裹。不要输出```json代码块。"));
                 try {
-                    Map<String, Object> retryBody = new HashMap<>();
-                    retryBody.put("model", modelName);
-                    retryBody.put("messages", messages);
-                    retryBody.put("max_tokens", 1024);
-                    addReasoningEffort(retryBody, baiLianReasoningEffort);
-                    HttpRequest retryReq = HttpRequest.newBuilder()
-                            .uri(URI.create(url))
-                            .header("Authorization", "Bearer " + apiKey)
+                    Map<String, Object> retryBody = LlmProtocol.buildRequestBody(
+                            baiLianProtocol, modelName, systemPrompt, messages,
+                            Collections.emptyList(), 1024, baiLianReasoningEffort);
+                    HttpRequest retryReq = LlmProtocol.addAuthHeaders(HttpRequest.newBuilder()
+                                    .uri(URI.create(url)), baiLianProtocol, apiKey)
                             .header("Content-Type", "application/json")
                             .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(retryBody)))
                             .timeout(Duration.ofMillis(this.bailianTimeoutMs))
@@ -1328,15 +1306,13 @@ public class BaiLianService {
                     HttpResponse<String> retryResp = httpClient.send(retryReq, HttpResponse.BodyHandlers.ofString());
                     if (retryResp.statusCode() == 200) {
                         JsonNode retryRoot = objectMapper.readTree(retryResp.body());
-                        JsonNode retryChoices = retryRoot.path("choices");
-                        if (retryChoices.isArray() && !retryChoices.isEmpty()) {
-                            String newReply = retryChoices.get(0).path("message").path("content").asText().trim();
-                            if ("null".equals(newReply)) newReply = "";
-                            if (!newReply.isEmpty()) {
-                                reply = newReply;
-                                isLongJsonAttempt = reply.contains("\"long\"") && reply.contains("{");
-                                continue;
-                            }
+                        JsonNode retryMessage = LlmProtocol.normalizeAssistantResponse(
+                                objectMapper, retryRoot, baiLianProtocol);
+                        String newReply = LlmProtocol.extractText(retryMessage).trim();
+                        if (!newReply.isEmpty()) {
+                            reply = newReply;
+                            isLongJsonAttempt = reply.contains("\"long\"") && reply.contains("{");
+                            continue;
                         }
                     }
                 } catch (Exception retryEx) {
@@ -1347,9 +1323,10 @@ public class BaiLianService {
             break;
         }
 
-        // 最终兜底
+        // 没有文本时标记为失败；上层只发送中性的事实状态，不发送拟人化兜底话术。
         if (reply.trim().isEmpty() || reply.trim().matches("[,\\s]+")) {
-            reply = "嗯...再问一次吧";
+            logger.info("AI 未返回可发送文本: sessionId={}", sessionId);
+            return GenerationResult.error(GENERATION_FAILURE_MESSAGE);
         }
 
             if (!suppress) {
@@ -1360,9 +1337,7 @@ public class BaiLianService {
                 if (groupId != null) {
                     recordUserInteraction(groupId, userId, reply);
 
-                    if (!reply.equals("抱歉，刚才走神了...") &&
-                            !reply.equals("嗯...再问一次吧") &&
-                            !reply.trim().isEmpty()) {
+                    if (!reply.trim().isEmpty()) {
 
                         Deque<Long> msgHistory = botMessageHistory.computeIfAbsent(
                                 groupId, k -> new ConcurrentLinkedDeque<>());
@@ -1387,17 +1362,21 @@ public class BaiLianService {
                 return GenerationResult.silent(toolCalls, 0);
             }
 
-            return GenerationResult.reply(reply.isEmpty() ? "嗯...再问一次吧" : reply, toolCalls, 0);
+            return GenerationResult.reply(reply, toolCalls, 0);
 
         } catch (Exception e) {
             logger.error("AI 调用失败", e);
-            return GenerationResult.error("抱歉，刚才走神了...");
+            return GenerationResult.error(GENERATION_FAILURE_MESSAGE);
         }
     }
 
-    static Map<String, Object> buildUserMessage(String text, List<String> imageDataUris) {
+    static Map<String, Object> buildMessage(String role, String text, List<String> imageDataUris) {
         // imageDataUris 保留参数兼容旧调用方，但主聊天永远不发送原始图片。
-        return Map.of("role", "user", "content", text);
+        return Map.of("role", role, "content", text);
+    }
+
+    static Map<String, Object> buildUserMessage(String text, List<String> imageDataUris) {
+        return buildMessage("user", text, imageDataUris);
     }
 
 
@@ -1541,19 +1520,17 @@ public class BaiLianService {
     /** 简单调用聊天模型，返回纯文本响应（无工具、无会话、无状态注入） */
     public String generateRaw(String prompt) {
         try {
-            List<Map<String, String>> messages = new ArrayList<>();
+            List<Map<String, Object>> messages = new ArrayList<>();
             messages.add(Map.of("role", "user", "content", prompt));
 
-            Map<String, Object> body = new HashMap<>();
-            body.put("model", bailianChatModel);
-            body.put("messages", messages);
-            body.put("max_tokens", 8192);
+            Map<String, Object> body = LlmProtocol.buildRequestBody(
+                    baiLianProtocol, bailianChatModel, "", messages, Collections.emptyList(),
+                    8192, "");
             body.put("temperature", 0.8);
 
             String jsonBody = MAPPER.writeValueAsString(body);
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(baiLianBaseUrl))
-                    .header("Authorization", "Bearer " + baiLianApiKey)
+            HttpRequest request = LlmProtocol.addAuthHeaders(HttpRequest.newBuilder()
+                            .uri(URI.create(baiLianUrl)), baiLianProtocol, baiLianApiKey)
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
                     .timeout(Duration.ofSeconds(120))
@@ -1561,9 +1538,8 @@ public class BaiLianService {
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             JsonNode root = MAPPER.readTree(response.body());
-
-            String content = root.path("choices").get(0).path("message").path("content").asText("");
-            return content != null ? content.trim() : "";
+            JsonNode message = LlmProtocol.normalizeAssistantResponse(MAPPER, root, baiLianProtocol);
+            return LlmProtocol.extractText(message).trim();
         } catch (Exception e) {
             logger.warn("generateRaw 失败: {}", e.getMessage());
             return "";
@@ -1686,7 +1662,7 @@ public class BaiLianService {
     // ===== 消息分段：优先 AI 自定分隔，兜底机械切分 =====
     public List<String> splitIntoShortMessages(String reply) {
         if (reply == null || reply.trim().isEmpty()) {
-            return Arrays.asList("嗯...再问一次吧");
+            return Collections.emptyList();
         }
         reply = reply.trim();
 

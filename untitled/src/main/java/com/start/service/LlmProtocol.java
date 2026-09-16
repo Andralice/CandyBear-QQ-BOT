@@ -1,0 +1,240 @@
+package com.start.service;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.start.agent.Tool;
+
+import java.net.http.HttpRequest;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+
+/** Protocol-specific request and tool-call translations for the main chat model. */
+final class LlmProtocol {
+
+    enum Type {
+        OPENAI,
+        ANTHROPIC;
+
+        static Type parse(String value) {
+            if (value == null) return OPENAI;
+            return switch (value.trim().toLowerCase()) {
+                case "anthropic", "claude", "claude-native" -> ANTHROPIC;
+                default -> OPENAI;
+            };
+        }
+
+        boolean isAnthropic() {
+            return this == ANTHROPIC;
+        }
+    }
+
+    private LlmProtocol() {}
+
+    /** Keep old OpenAI URLs untouched; native Claude can be configured with a /v1 base URL. */
+    static String endpoint(String configuredUrl, Type type) {
+        if (configuredUrl == null || configuredUrl.isBlank()) return configuredUrl;
+        String url = configuredUrl.trim().replaceFirst("/+$", "");
+        if (type == Type.OPENAI) {
+            return url.endsWith("/v1") ? url + "/chat/completions" : url;
+        }
+        if (url.endsWith("/messages")) return url;
+        if (url.endsWith("/chat/completions")) {
+            return url.substring(0, url.length() - "/chat/completions".length()) + "/messages";
+        }
+        return url + "/messages";
+    }
+
+    static HttpRequest.Builder addAuthHeaders(HttpRequest.Builder builder, Type type, String apiKey) {
+        String key = apiKey == null ? "" : apiKey;
+        if (type == Type.ANTHROPIC) {
+            return builder.header("x-api-key", key)
+                    .header("anthropic-version", "2023-06-01");
+        }
+        return builder.header("Authorization", "Bearer " + key);
+    }
+
+    /** Convert each Tool independently so Tool.getFunctionSpec() remains the OpenAI contract. */
+    static List<Map<String, Object>> buildToolSpecs(Type type, List<Tool> tools,
+                                                      Function<String, String> descriptionOverride) {
+        List<Map<String, Object>> specs = new ArrayList<>();
+        for (Tool tool : tools) {
+            String description = tool.getDescription();
+            if (descriptionOverride != null) {
+                String override = descriptionOverride.apply(tool.getName());
+                if (override != null && !override.isBlank()) description = override;
+            }
+
+            if (type == Type.ANTHROPIC) {
+                Map<String, Object> spec = new LinkedHashMap<>();
+                spec.put("name", tool.getName());
+                spec.put("description", description);
+                spec.put("input_schema", tool.getParameters());
+                specs.add(spec);
+                continue;
+            }
+
+            // Preserve the existing nested OpenAI function schema, including any future fields.
+            Map<String, Object> spec = new LinkedHashMap<>(tool.getFunctionSpec());
+            Map<String, Object> function = new LinkedHashMap<>();
+            Object originalFunction = spec.get("function");
+            if (originalFunction instanceof Map<?, ?> original) {
+                for (Map.Entry<?, ?> entry : original.entrySet()) {
+                    if (entry.getKey() != null) function.put(String.valueOf(entry.getKey()), entry.getValue());
+                }
+            }
+            function.put("name", tool.getName());
+            function.put("description", description);
+            function.put("parameters", tool.getParameters());
+            spec.put("function", function);
+            specs.add(spec);
+        }
+        return specs;
+    }
+
+    static Map<String, Object> buildRequestBody(Type type, String model, String systemPrompt,
+                                                  List<Map<String, Object>> messages,
+                                                  List<Map<String, Object>> toolSpecs,
+                                                  int maxTokens, String reasoningEffort) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("model", model);
+        if (type == Type.ANTHROPIC) {
+            body.put("max_tokens", maxTokens);
+            if (systemPrompt != null && !systemPrompt.isBlank()) body.put("system", systemPrompt);
+            body.put("messages", messages);
+            if (toolSpecs != null && !toolSpecs.isEmpty()) {
+                body.put("tools", toolSpecs);
+                body.put("tool_choice", Map.of("type", "auto"));
+            }
+            return body;
+        }
+
+        body.put("messages", messages);
+        body.put("max_tokens", maxTokens);
+        if (reasoningEffort != null && !reasoningEffort.isBlank()) {
+            body.put("reasoning_effort", reasoningEffort.trim());
+        }
+        if (toolSpecs != null && !toolSpecs.isEmpty()) {
+            body.put("tools", toolSpecs);
+            body.put("tool_choice", "auto");
+        }
+        return body;
+    }
+
+    static JsonNode normalizeAssistantResponse(ObjectMapper mapper, JsonNode root, Type type) {
+        if (type == Type.OPENAI) {
+            JsonNode choices = root.path("choices");
+            if (!choices.isArray() || choices.isEmpty()) {
+                throw new IllegalArgumentException("AI 未返回有效 choices");
+            }
+            JsonNode message = choices.get(0).path("message");
+            if (!message.isObject()) throw new IllegalArgumentException("AI 回复缺少 message");
+            return message;
+        }
+
+        JsonNode content = root.path("content");
+        if (!content.isArray()) throw new IllegalArgumentException("Anthropic 回复缺少 content");
+
+        ObjectNode normalized = mapper.createObjectNode();
+        String text = extractTextBlocks(content);
+        if (text.isEmpty()) normalized.putNull("content");
+        else normalized.put("content", text);
+
+        ArrayNode toolCalls = mapper.createArrayNode();
+        for (JsonNode block : content) {
+            if (!"tool_use".equals(block.path("type").asText())) continue;
+            ObjectNode toolCall = mapper.createObjectNode();
+            toolCall.put("id", block.path("id").asText());
+            ObjectNode function = mapper.createObjectNode();
+            function.put("name", block.path("name").asText());
+            JsonNode input = block.get("input");
+            function.put("arguments", input == null || input.isNull() ? "{}" : input.toString());
+            toolCall.set("function", function);
+            toolCalls.add(toolCall);
+        }
+        if (!toolCalls.isEmpty()) normalized.set("tool_calls", toolCalls);
+        normalized.set("_anthropic_content", content.deepCopy());
+        return normalized;
+    }
+
+    static String extractText(JsonNode message) {
+        JsonNode content = message == null ? null : message.get("content");
+        if (content == null || content.isNull()) return "";
+        if (content.isTextual()) return content.asText();
+        return content.isArray() ? extractTextBlocks(content) : content.asText("");
+    }
+
+    private static String extractTextBlocks(JsonNode contentBlocks) {
+        StringBuilder result = new StringBuilder();
+        for (JsonNode block : contentBlocks) {
+            if (!"text".equals(block.path("type").asText())) continue;
+            String text = block.path("text").asText("");
+            if (text.isEmpty()) continue;
+            if (result.length() > 0) result.append('\n');
+            result.append(text);
+        }
+        return result.toString();
+    }
+
+    static boolean hasToolCalls(JsonNode message) {
+        return message != null && message.path("tool_calls").isArray()
+                && !message.path("tool_calls").isEmpty();
+    }
+
+    static void appendAssistantToolMessage(ObjectMapper mapper, List<Map<String, Object>> messages,
+                                            JsonNode message, Type type) {
+        if (type == Type.ANTHROPIC) {
+            ObjectNode assistant = mapper.createObjectNode();
+            assistant.put("role", "assistant");
+            JsonNode nativeContent = message.get("_anthropic_content");
+            if (nativeContent != null && nativeContent.isArray()) {
+                assistant.set("content", nativeContent.deepCopy());
+            } else {
+                ArrayNode blocks = mapper.createArrayNode();
+                String text = extractText(message);
+                if (!text.isEmpty()) {
+                    ObjectNode textBlock = mapper.createObjectNode();
+                    textBlock.put("type", "text");
+                    textBlock.put("text", text);
+                    blocks.add(textBlock);
+                }
+                for (JsonNode toolCall : message.path("tool_calls")) {
+                    ObjectNode use = mapper.createObjectNode();
+                    use.put("type", "tool_use");
+                    use.put("id", toolCall.path("id").asText());
+                    use.put("name", toolCall.path("function").path("name").asText());
+                    try {
+                        use.set("input", mapper.readTree(
+                                toolCall.path("function").path("arguments").asText("{}")));
+                    } catch (Exception ignored) {
+                        use.set("input", mapper.createObjectNode());
+                    }
+                    blocks.add(use);
+                }
+                assistant.set("content", blocks);
+            }
+            messages.add(mapper.convertValue(assistant, Map.class));
+            return;
+        }
+
+        ObjectNode assistant = mapper.createObjectNode();
+        assistant.put("role", "assistant");
+        JsonNode content = message.get("content");
+        if (content == null || content.isNull()) assistant.putNull("content");
+        else assistant.set("content", content.deepCopy());
+        assistant.set("tool_calls", message.get("tool_calls").deepCopy());
+        messages.add(mapper.convertValue(assistant, Map.class));
+    }
+
+    static Map<String, Object> buildAnthropicToolResult(String callId, String content) {
+        Map<String, Object> block = new LinkedHashMap<>();
+        block.put("type", "tool_result");
+        block.put("tool_use_id", callId);
+        block.put("content", content);
+        return block;
+    }
+}

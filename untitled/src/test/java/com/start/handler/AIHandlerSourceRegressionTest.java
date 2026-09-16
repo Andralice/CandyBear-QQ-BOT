@@ -7,6 +7,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * AIHandler 源码静态扫描（第二阶段 2.2 回归保护）。
@@ -35,6 +36,15 @@ class AIHandlerSourceRegressionTest {
         // 不应再有 bot.sendReply(originalMsg, "稍等一下...") 无 sessionId 形式
         assertFalse(src.contains("sendReply(originalMsg, \"稍等一下，我在走神...\")"),
                 "AIHandler 仍调用无 sessionId 的 sendReply for fallback 稍等一下");
+    }
+
+    @Test
+    void mentionOnlyMessageIsPassedToModel() throws Exception {
+        String src = readAIHandler();
+        assertFalse(src.contains("问点什么吧～"), "只 @ 时不应再走固定短句");
+        assertTrue(src.contains("EMPTY_MENTION_PROMPT"), "只 @ 时应注入模型上下文提示");
+        assertTrue(src.contains("!state.hasContent() && !state.isSubmitted()"),
+                "已提交的空正文会话也必须允许进入生成流程");
     }
 
     @Test

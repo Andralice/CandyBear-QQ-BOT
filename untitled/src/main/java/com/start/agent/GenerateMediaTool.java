@@ -52,11 +52,19 @@ public final class GenerateMediaTool implements Tool {
         } catch (java.io.IOException e) { throw new IllegalStateException("无法读取生图调用规范", e); }
     }
 
+    /** Returns the one-time image rules and marks them as reviewed for native protocols. */
+    public String consumeImageRequirements() {
+        if (kind != Kind.IMAGE || imageRequirementsReviewed) return "";
+        imageRequirementsReviewed = true;
+        return invocationRequirements();
+    }
+
     /** Called only after the complete tool-call batch and system injection, before the next LLM round. */
     public void injectImageRequirements(List<Map<String, Object>> messages) {
-        if (kind != Kind.IMAGE || imageRequirementsReviewed) return;
-        messages.add(Map.of("role", "system", "content", invocationRequirements()));
-        imageRequirementsReviewed = true;
+        String requirements = consumeImageRequirements();
+        if (!requirements.isBlank()) {
+            messages.add(Map.of("role", "system", "content", requirements));
+        }
     }
 
     @Override

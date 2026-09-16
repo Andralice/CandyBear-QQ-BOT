@@ -31,6 +31,7 @@ public class BotConfig {
 
     private static String baiLianApiKey;
     private static String baiLianBaseUrl;
+    private static String baiLianProtocol;
     private static String baiLianChatModel;
     private static boolean baiLianMultimodalEnabled;
     private static int baiLianTimeoutMs;
@@ -53,6 +54,8 @@ public class BotConfig {
     private static String groupCognitionReasoningEffort;
     private static String groupCognitionProtocol;
     private static String groupCognitionThinkingType;
+    private static String groupCognitionLlmProtocol;
+    private static boolean groupCognitionUsesMainEndpoint;
 
     private static String visionApiKey;
     private static String visionBaseUrl;
@@ -143,6 +146,7 @@ public class BotConfig {
 
             baiLianApiKey = resolveOrEmpty(props.getProperty("bailian.api-key", props.getProperty("dashscope.api-key", "")));
             baiLianBaseUrl = resolveOrEmpty(props.getProperty("bailian.base-url", "https://api.deepseek.com/v1/chat/completions"));
+            baiLianProtocol = resolveOrEmpty(props.getProperty("bailian.protocol", "${BAILIAN_PROTOCOL:openai}"));
             baiLianChatModel = resolveOrEmpty(props.getProperty("bailian.chat-model", "deepseek-v4-pro"));
             baiLianMultimodalEnabled = Boolean.parseBoolean(
                     resolveOrEmpty(props.getProperty("bailian.multimodal.enabled",
@@ -162,8 +166,14 @@ public class BotConfig {
             groupCognitionGroups = parseLongSet(resolveOrEmpty(props.getProperty("group-cognition.groups", "")));
             groupCognitionApiKey = resolveOrEmpty(props.getProperty("group-cognition.api-key", ""));
             if (groupCognitionApiKey.isBlank()) groupCognitionApiKey = baiLianApiKey;
-            groupCognitionBaseUrl = resolveOrEmpty(props.getProperty("group-cognition.base-url", ""));
-            if (groupCognitionBaseUrl.isBlank()) groupCognitionBaseUrl = baiLianBaseUrl;
+            String configuredGroupCognitionBaseUrl = resolveOrEmpty(
+                    props.getProperty("group-cognition.base-url", ""));
+            groupCognitionUsesMainEndpoint = configuredGroupCognitionBaseUrl.isBlank();
+            groupCognitionBaseUrl = groupCognitionUsesMainEndpoint
+                    ? baiLianBaseUrl : configuredGroupCognitionBaseUrl;
+            // An inherited endpoint is part of the main-model path; an explicitly configured
+            // cognition endpoint keeps its pre-existing OpenAI transport contract.
+            groupCognitionLlmProtocol = groupCognitionUsesMainEndpoint ? baiLianProtocol : "openai";
             groupCognitionModel = resolveOrEmpty(props.getProperty("group-cognition.model", ""));
             if (groupCognitionModel.isBlank()) groupCognitionModel = baiLianChatModel;
             groupCognitionTimeoutMs = parseInt(
@@ -405,6 +415,10 @@ public class BotConfig {
         return baiLianBaseUrl;
     }
 
+    public static String getBaiLianProtocol() {
+        return baiLianProtocol;
+    }
+
     public static String getBaiLianChatModel() {
         return baiLianChatModel;
     }
@@ -458,6 +472,8 @@ public class BotConfig {
     public static String getGroupCognitionReasoningEffort() { return groupCognitionReasoningEffort; }
     public static String getGroupCognitionProtocol() { return groupCognitionProtocol; }
     public static String getGroupCognitionThinkingType() { return groupCognitionThinkingType; }
+    public static String getGroupCognitionLlmProtocol() { return groupCognitionLlmProtocol; }
+    public static boolean isGroupCognitionUsesMainEndpoint() { return groupCognitionUsesMainEndpoint; }
 
     public static int getWorkingMemoryDefaultExpireHours() {
         return workingMemoryDefaultExpireHours;
