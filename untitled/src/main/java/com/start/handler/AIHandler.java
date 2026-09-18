@@ -291,8 +291,7 @@ public class AIHandler implements MessageHandler {
         if (replyId != null) conv.setReplyToMessageId(replyId);
         conv.incrementRevision();
 
-        // Thread 更新：每条群消息都维护群级 Thread 状态
-        // 提交到 groupExecutor，保证与 AI 生成串行、不阻塞 WebSocket 线程
+        // Thread 更新：每条群消息都维护群级 Thread 状态，保持群级顺序且不阻塞 WebSocket 线程。
         groupExecutor.execute(gid, () -> {
             aiService.processThreadMessage(gid, uid, plainText);
         });
@@ -696,7 +695,7 @@ public class AIHandler implements MessageHandler {
     private void runGroupConversation(Main bot, long groupId, String gid, String userId, String nickname,
                                       List<Long> ats, boolean allowSilence, long startMs, ConversationEvent event,
                                       GroupDialoguePlan precomputedPlan, String promptOverride) {
-        groupExecutor.execute(gid, () -> {
+        groupExecutor.executeConversation(gid, userId, () -> {
             ConversationState state = conversationManager.get(gid, userId);
             // 显式 @ 即使没有正文也已经提交给模型；普通空 buffer 仍然直接丢弃。
             if (state == null || (!state.hasContent() && !state.isSubmitted())) return;

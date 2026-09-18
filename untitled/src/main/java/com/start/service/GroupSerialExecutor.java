@@ -61,6 +61,14 @@ public class GroupSerialExecutor {
     }
 
     /**
+     * 提交到同一用户的会话生成队列。同群不同用户使用不同 key，可以并行生成；
+     * 同一用户的生成任务仍保持顺序。
+     */
+    public void executeConversation(String groupId, String userId, Runnable task) {
+        execute("conversation:" + String.valueOf(groupId) + ":" + String.valueOf(userId), task);
+    }
+
+    /**
      * 提交任务到对应群的串行队列。超过排队时间的任务会被丢弃。
      *
      * @param groupId 群号（null 表示私聊，走共享线程池）

@@ -1559,6 +1559,17 @@ public class BaiLianService implements AutoCloseable {
         String replyBeforeSanitizing = reply;
         reply = sanitizePublicReply(userPrompt, reply);
 
+        // <NO_REPLY> is an internal control marker. A model may emit it even when
+        // the current event does not grant silence permission; it must never reach QQ.
+        if (isNoReplyMarker(reply)) {
+            if (allowSilence) {
+                logger.info("🤫 模型选择沉默: sessionId={}", sessionId);
+            } else {
+                logger.warn("模型在禁止沉默的回合返回 <NO_REPLY>，丢弃该标记: sessionId={}", sessionId);
+            }
+            return GenerationResult.silent(toolCalls, 0);
+        }
+
         // 没有文本时标记为失败；上层只发送中性的事实状态，不发送拟人化兜底话术。
         if (reply.trim().isEmpty() || reply.trim().matches("[,\\s]+")) {
             if (containsEmojiOrKaomoji(replyBeforeSanitizing)) {
@@ -1594,12 +1605,6 @@ public class BaiLianService implements AutoCloseable {
                         }
                     }
                 }
-            }
-
-            // NO_REPLY 检测
-            if (allowSilence && reply.trim().equals("<NO_REPLY>")) {
-                logger.info("🤫 模型选择沉默: sessionId={}", sessionId);
-                return GenerationResult.silent(toolCalls, 0);
             }
 
             return GenerationResult.reply(reply, toolCalls, 0);
@@ -1707,6 +1712,10 @@ public class BaiLianService implements AutoCloseable {
             return "刚才说得太像说明书了，当我没说";
         }
         return text;
+    }
+
+    static boolean isNoReplyMarker(String reply) {
+        return reply != null && "<NO_REPLY>".equals(reply.trim());
     }
 
     /** 兼容模型偶尔输出的裸 CQ:at；其他 CQ 类型不做猜测。 */

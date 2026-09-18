@@ -65,6 +65,7 @@ class PromptBuilderGroundingTest {
         assertTrue(prompt.contains("不虚构手疼、接口状态或其他理由"));
         assertTrue(prompt.contains("灵动不等于堆字或只剩空泛确认"));
         assertTrue(prompt.contains("灵动来自即时反应，不是话术清单"));
+        assertTrue(prompt.contains("不要解释触发、排队、判断过程"));
         assertTrue(prompt.contains("不要把聊天机器人、模型、系统、接口或“无需上下班”当成主要理由"));
         assertTrue(prompt.contains("不要写成“你说得对/确实/我收回”的公文式回应"));
         assertTrue(prompt.contains("不把“我不出主意”当口号"));

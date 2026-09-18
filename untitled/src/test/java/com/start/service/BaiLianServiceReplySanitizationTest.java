@@ -3,6 +3,7 @@ package com.start.service;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BaiLianServiceReplySanitizationTest {
@@ -114,6 +115,12 @@ class BaiLianServiceReplySanitizationTest {
         assertEquals("第1题",
                 BaiLianService.sanitizePublicReply("哪一题", "第1️⃣题"));
         assertEquals("", BaiLianService.sanitizePublicReply("在吗", "😂🥺"));
+    }
+
+    @Test
+    void noReplyMarkerIsRecognizedAsInternalControlText() {
+        assertTrue(BaiLianService.isNoReplyMarker("\n<NO_REPLY>\n"));
+        assertFalse(BaiLianService.isNoReplyMarker("<NO_REPLY> 还有一句"));
     }
 
     @Test

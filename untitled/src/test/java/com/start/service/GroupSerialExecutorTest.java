@@ -69,6 +69,51 @@ class GroupSerialExecutorTest {
         }
     }
 
+    @Test
+    void differentUsersInSameGroupCanRunInParallel() throws Exception {
+        GroupSerialExecutor executor = new GroupSerialExecutor(2, 5_000);
+        try {
+            CountDownLatch started = new CountDownLatch(2);
+            CountDownLatch release = new CountDownLatch(1);
+
+            executor.executeConversation("group-1", "user-1", () -> await(started, release));
+            executor.executeConversation("group-1", "user-2", () -> await(started, release));
+
+            assertTrue(started.await(1, TimeUnit.SECONDS));
+            release.countDown();
+        } finally {
+            executor.shutdown();
+        }
+    }
+
+    @Test
+    void sameUserConversationTasksRemainSerial() throws Exception {
+        GroupSerialExecutor executor = new GroupSerialExecutor(2, 5_000);
+        try {
+            CountDownLatch firstStarted = new CountDownLatch(1);
+            CountDownLatch releaseFirst = new CountDownLatch(1);
+            CountDownLatch secondFinished = new CountDownLatch(1);
+
+            executor.executeConversation("group-1", "user-1", () -> {
+                firstStarted.countDown();
+                try {
+                    releaseFirst.await(2, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            assertTrue(firstStarted.await(1, TimeUnit.SECONDS));
+
+            executor.executeConversation("group-1", "user-1", secondFinished::countDown);
+            assertTrue(!secondFinished.await(100, TimeUnit.MILLISECONDS));
+
+            releaseFirst.countDown();
+            assertTrue(secondFinished.await(1, TimeUnit.SECONDS));
+        } finally {
+            executor.shutdown();
+        }
+    }
+
     private static void await(CountDownLatch started, CountDownLatch release) {
         started.countDown();
         try {
