@@ -141,6 +141,26 @@ class AgnesMediaServiceTest {
     }
 
     @Test
+    void videoPollingContinuesAfterTransientProviderUnavailable() throws Exception {
+        AtomicInteger polls = new AtomicInteger();
+        server.createContext("/agnesapi", exchange -> {
+            if (polls.incrementAndGet() == 1) {
+                exchange.sendResponseHeaders(503, -1);
+                exchange.close();
+            } else {
+                sendJson(exchange, "{\"status\":\"completed\",\"video_url\":\"" + baseUrl + "/video.mp4\"}");
+            }
+        });
+        server.createContext("/video.mp4", exchange -> sendBytes(exchange, "mp4-bytes".getBytes(StandardCharsets.UTF_8)));
+
+        AgnesMediaService.GeneratedMedia media = service.pollVideo("task-provider-unavailable");
+
+        assertEquals("video", media.kind());
+        assertEquals(2, polls.get());
+        assertArrayEquals("mp4-bytes".getBytes(StandardCharsets.UTF_8), Files.readAllBytes(media.path()));
+    }
+
+    @Test
     void videoJobsAreSerializedAndQueued() throws Exception {
         CountDownLatch firstSubmissionStarted = new CountDownLatch(1);
         CountDownLatch releaseFirstSubmission = new CountDownLatch(1);

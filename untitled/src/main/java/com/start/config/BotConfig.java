@@ -218,7 +218,7 @@ public class BotConfig {
             agnesVideoTimeoutMs = parseInt(
                     resolveOrEmpty(props.getProperty("agnes.video-timeout-ms", "1800000")), 1800000);
             agnesPollIntervalMs = parseInt(
-                    resolveOrEmpty(props.getProperty("agnes.poll-interval-ms", "60000")), 60000);
+                    resolveOrEmpty(props.getProperty("agnes.poll-interval-ms", "2000")), 2000);
             agnesVerifyFreePricing = Boolean.parseBoolean(
                     resolveOrEmpty(props.getProperty("agnes.verify-free-pricing", "true")));
 
@@ -270,7 +270,9 @@ public class BotConfig {
             }
             logger.info("🧭 群聊并行认知: mode={}, groups={}, model={}",
                     groupCognitionMode, groupCognitionGroups, groupCognitionModel);
-            logger.info("🖼️ 聊天图片模式: 独立 Vision 描述（主聊天不发送原图）");
+            logger.info("🖼️ 聊天图片模式: {}", baiLianMultimodalEnabled
+                    ? "主模型多模态"
+                    : "独立 Vision 描述（主聊天不发送原图）");
             logger.info("🔊 TTS 服务: {} (voice={}, format={})", ttsBaseUrl, ttsDefaultVoice, ttsAudioFormat);
             if (volcTtsEnabled) {
                 logger.info("🔥 豆包语音合成 2.0 TTS: enabled, voiceType={}, resourceId={}, timeout={}ms",

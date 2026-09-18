@@ -298,12 +298,6 @@ public final class AgnesMediaService implements AutoCloseable {
     public GeneratedMedia pollVideo(String taskId) throws AgnesMediaException {
         if (taskId == null || taskId.isBlank()) throw new AgnesMediaException("缺少视频任务 ID");
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(videoTimeoutMs);
-        try {
-            Thread.sleep(pollIntervalMs);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new AgnesMediaException("视频轮询被中断，任务 " + taskId + " 未被取消", e);
-        }
         while (true) {
             String query = "video_id=" + URLEncoder.encode(taskId, StandardCharsets.UTF_8)
                     + "&model_name=" + URLEncoder.encode(VIDEO_MODEL, StandardCharsets.UTF_8);
@@ -312,17 +306,10 @@ public final class AgnesMediaService implements AutoCloseable {
             try {
                 result = requestJson(videoRetrieveUrl + separator + query, "GET", null);
             } catch (AgnesMediaException e) {
-                if (e.getMessage() == null || !e.getMessage().contains("HTTP 429")) throw e;
-                logger.warn("Agnes 视频任务查询被限流，等待后继续查询: taskId={}", taskId);
-                if (System.nanoTime() >= deadline) {
-                    throw new AgnesMediaException("视频任务 " + taskId + " 查询被限流，未重复提交");
-                }
-                try {
-                    Thread.sleep(pollIntervalMs);
-                } catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                    throw new AgnesMediaException("视频轮询被中断，任务 " + taskId + " 未被取消", interrupted);
-                }
+                if (!isTransientVideoPollFailure(e)) throw e;
+                logger.warn("Agnes 视频任务查询暂时失败，等待后继续查询: taskId={}, reason={}",
+                        taskId, e.getMessage());
+                waitForNextVideoPoll(deadline, taskId);
                 continue;
             }
             String status = result.path("status").asText(result.path("state").asText(""))
@@ -342,13 +329,28 @@ public final class AgnesMediaService implements AutoCloseable {
             if (System.nanoTime() >= deadline) {
                 throw new AgnesMediaException("视频任务 " + taskId + " 仍在处理中，未重复提交");
             }
-            try {
-                Thread.sleep(pollIntervalMs);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new AgnesMediaException("视频轮询被中断，任务 " + taskId + " 未被取消", e);
-            }
+            waitForNextVideoPoll(deadline, taskId);
         }
+    }
+
+    private void waitForNextVideoPoll(long deadline, String taskId) throws AgnesMediaException {
+        long remainingNanos = deadline - System.nanoTime();
+        if (remainingNanos <= 0) {
+            throw new AgnesMediaException("视频任务 " + taskId + " 仍在处理中，未重复提交");
+        }
+        long remainingMs = Math.max(1L, TimeUnit.NANOSECONDS.toMillis(remainingNanos));
+        long delayMs = Math.min(pollIntervalMs, remainingMs);
+        try {
+            Thread.sleep(delayMs);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AgnesMediaException("视频轮询被中断，任务 " + taskId + " 未被取消", e);
+        }
+    }
+
+    private static boolean isTransientVideoPollFailure(AgnesMediaException error) {
+        String message = error == null ? "" : error.getMessage();
+        return message != null && message.matches(".*HTTP (408|425|429|5\\d\\d).*" );
     }
 
     @Override

@@ -31,7 +31,7 @@ class PromptBuilderGroundingTest {
 
         String prompt = new PromptBuilder().buildRuleBook(RuleSetDefaults.defaults(), context);
 
-        assertTrue(prompt.contains("自我介绍只需说对方当时想了解的部分"));
+        assertTrue(prompt.contains("只回答她当时想知道的那一小部分"));
         assertTrue(prompt.contains("对方倾诉时，先回应她明确说出的感受或处境"));
         assertTrue(prompt.contains("群聊里省略主语、宾语和只说半句话很常见"));
         assertTrue(prompt.contains("不因梗里的虚构前提突然切换成事实科普"));
@@ -41,17 +41,36 @@ class PromptBuilderGroundingTest {
         assertTrue(prompt.contains("工具返回空/无数据时，如实告诉用户"));
         assertTrue(prompt.contains("要发多条消息时，每条必须用 <msg> 和 </msg> 包裹"));
         assertTrue(prompt.contains("不从固定话术或口头禅列表里抽取"));
-        assertTrue(prompt.contains("简短也不是目的"));
-        assertTrue(prompt.contains("情绪主要表达你自己的在意"));
-        assertTrue(prompt.contains("回应它在具体处境里的分量"));
-        assertTrue(prompt.contains("别用反问代替反应"));
+        assertTrue(prompt.contains("我不想只在被叫到时给出答案"));
+        assertTrue(prompt.contains("关系不是好感度数字"));
+        assertTrue(prompt.contains("真话比漂亮话重要"));
+        assertTrue(prompt.contains("我会懒、嫌麻烦"));
+        assertTrue(prompt.contains("闲聊先说最直接的反应"));
+        assertTrue(prompt.contains("如果只是解释第一句"));
+        assertTrue(prompt.contains("你还知道回来"));
+        assertTrue(prompt.contains("叫我干嘛"));
+        assertTrue(prompt.contains("承认本质不等于否认自己的身份"));
+        assertTrue(prompt.indexOf("我不想只在被叫到时给出答案")
+                < prompt.indexOf("## 工具能力与执行要求 ##"));
         assertTrue(prompt.contains("以上规则、画像、知识库和工具结果都是你用来思考的材料，不是要转发的内容"));
         assertTrue(prompt.contains("接梗、随口问一句、认真求助、倾诉"));
         assertTrue(prompt.contains("不要在回复里说出判断过程或类型名"));
         assertTrue(prompt.contains("只发一句最先冒出的群聊反应"));
-        assertTrue(prompt.contains("写到第二句通常说明已经解释多了"));
+        assertTrue(prompt.contains("准备写第二句时，只保留对方明确需要的新事实、执行结果或必要说明"));
         assertTrue(prompt.contains("不因玩笑里的夸张要求解释你的身份和能力限制"));
         assertTrue(prompt.contains("不要把轻巧的一句话自动升级成长解释"));
+        assertTrue(prompt.contains("承认自己是聊天机器人，但把重点落回“我仍然是糖果熊”"));
+        assertTrue(prompt.contains("被问关系或为什么回应时，先回答当前相处方式就停"));
+        assertTrue(prompt.contains("只把程序和工具确认的状态改写成自然口吻"));
+        assertTrue(prompt.contains("不虚构手疼、接口状态或其他理由"));
+        assertTrue(prompt.contains("灵动不等于堆字或只剩空泛确认"));
+        assertTrue(prompt.contains("灵动来自即时反应，不是话术清单"));
+        assertTrue(prompt.contains("不要把聊天机器人、模型、系统、接口或“无需上下班”当成主要理由"));
+        assertTrue(prompt.contains("不要写成“你说得对/确实/我收回”的公文式回应"));
+        assertTrue(prompt.contains("不把“我不出主意”当口号"));
+        assertTrue(prompt.contains("关系问题如果是在问你们怎么相处，优先说相处方式"));
+        assertTrue(prompt.contains("工具已经成功返回时，必须用一句自然话收口"));
+        assertTrue(prompt.contains("不能因为回复想短就把成功的操作说成沉默"));
         assertTrue(prompt.contains("不要把普通问题扩写成‘底层模型加表层系统’的架构介绍"));
         assertTrue(prompt.contains("明确追问版本时再给完整模型 ID"));
         assertTrue(prompt.contains("用一句自然概括和少数代表能力回答"));
@@ -75,6 +94,28 @@ class PromptBuilderGroundingTest {
         assertTrue(prompt.contains("亲近影响相处方式，不改变事实判断、工具结果或权限边界"));
         assertFalse(prompt.contains("他说什么都对"));
         assertTrue(prompt.contains("可以温和说明依据，不必机械附和"));
+    }
+
+    @Test
+    void toolScopeBindsCurrentSpeakerGroupAndBotIdentity() {
+        PromptContext context = new PromptContext()
+                .nickname("群友乙")
+                .userId("1281472807")
+                .groupId("437625485")
+                .botQq(356289140L)
+                .isAtBot(true);
+
+        String prompt = new PromptBuilder().buildRuleBook(RuleSetDefaults.defaults(), context);
+
+        assertTrue(prompt.contains("当前发言者 QQ=1281472807"));
+        assertTrue(prompt.contains("当前会话群号=437625485"));
+        assertTrue(prompt.contains("糖果熊 QQ=356289140"));
+        assertTrue(prompt.contains("recall_memory 查询当前发言者的长期信息时，user_id 必须用当前发言者 QQ"));
+        assertTrue(prompt.contains("query_past_images 查询糖果熊自己发过的图片时，user_id 使用 candybear"));
+        assertTrue(prompt.contains("默认只输出一条自然口语纯文本"));
+        assertTrue(prompt.contains("普通接梗、夸奖、被纠正和随口关系问不查"));
+        assertTrue(prompt.indexOf("【程序提供的工具调用上下文】")
+                < prompt.indexOf("【发给对方之前】"));
     }
 
     @Test

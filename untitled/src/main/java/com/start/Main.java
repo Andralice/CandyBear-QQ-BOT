@@ -33,6 +33,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 
 /**
@@ -49,6 +51,9 @@ public class Main extends WebSocketClient {
 
     /** JSON 序列化/反序列化工具，用于解析 OneBot 事件和构造 API 请求。 */
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final Pattern CQ_CODE_PATTERN = Pattern.compile("\\[CQ:[^\\]]+]");
+    private static final int IMAGE_RECEIPT_TIMEOUT_SECONDS = 30;
+    private static final int VIDEO_RECEIPT_TIMEOUT_SECONDS = 120;
 
     /** 重连调度器，复用单线程避免每次断连泄漏线程池。 */
     private final ScheduledExecutorService reconnectScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -538,6 +543,8 @@ public class Main extends WebSocketClient {
      * 用户消息和 AI 回复写入同一个 session，getConversationContext 能查到完整对话。
      */
     public boolean sendReply(JsonNode msg, String reply, String sessionId) {
+        reply = sanitizeOutgoingMessage(reply);
+        if (reply.isBlank()) return false;
         String traceId = "send_" + System.currentTimeMillis() + "_" + ThreadLocalRandom.current().nextInt(1000);
         logger.debug("📤 [{}] 发送回复，payload={} chars", traceId, reply != null ? reply.length() : 0);
         try {
@@ -591,6 +598,8 @@ public class Main extends WebSocketClient {
 
     /** 第二阶段 2.2：发私聊并显式指定 sessionId 持久化（带 groupId 用于建立临时会话） */
     public boolean sendPrivateReply(long userId, long groupId, String reply, String sessionId) {
+        reply = sanitizeOutgoingMessage(reply);
+        if (reply.isBlank()) return false;
         String traceId = "send_" + System.currentTimeMillis() + "_" + ThreadLocalRandom.current().nextInt(1000);
         logger.debug("📤 [{}] 发送私聊，payload={} chars", traceId, reply != null ? reply.length() : 0);
         try {
@@ -598,8 +607,7 @@ public class Main extends WebSocketClient {
             params.put("user_id", userId);
             if (groupId > 0) params.put("group_id", groupId);
             params.put("message", reply);
-            JsonNode receipt = sendWithReceipt("send_private_msg", params,
-                    isMediaPayload(reply) ? 30 : 5);
+            JsonNode receipt = sendWithReceipt("send_private_msg", params, receiptTimeoutSeconds(reply));
             if (receipt == null) {
                 return false;
             }
@@ -627,14 +635,15 @@ public class Main extends WebSocketClient {
 
     /** 第二阶段 2.2：发群聊并显式指定 sessionId 持久化 */
     public boolean sendGroupReply(long groupId, String reply, String sessionId) {
+        reply = sanitizeOutgoingMessage(reply);
+        if (reply.isBlank()) return false;
         String traceId = "send_" + System.currentTimeMillis() + "_" + ThreadLocalRandom.current().nextInt(1000);
         logger.debug("📤 [{}] 发送群聊回复，payload={} chars", traceId, reply != null ? reply.length() : 0);
         try {
             ObjectNode params = MAPPER.createObjectNode();
             params.put("group_id", groupId);
             params.put("message", reply);
-            JsonNode receipt = sendWithReceipt("send_group_msg", params,
-                    isMediaPayload(reply) ? 30 : 5);
+            JsonNode receipt = sendWithReceipt("send_group_msg", params, receiptTimeoutSeconds(reply));
             if (receipt == null) {
                 return false;
             }
@@ -671,6 +680,33 @@ public class Main extends WebSocketClient {
 
     private static boolean isMediaPayload(String reply) {
         return reply != null && (reply.contains("[CQ:image") || reply.contains("[CQ:video"));
+    }
+
+    static int receiptTimeoutSeconds(String reply) {
+        if (reply != null && reply.contains("[CQ:video")) return VIDEO_RECEIPT_TIMEOUT_SECONDS;
+        return isMediaPayload(reply) ? IMAGE_RECEIPT_TIMEOUT_SECONDS : 5;
+    }
+
+    static String sanitizeOutgoingMessage(String message) {
+        if (message == null || message.isEmpty()) return "";
+        message = BaiLianService.normalizeBareAtCqCodes(message);
+        Matcher matcher = CQ_CODE_PATTERN.matcher(message);
+        List<String> cqCodes = new java.util.ArrayList<>();
+        StringBuilder masked = new StringBuilder(message.length());
+        int cursor = 0;
+        while (matcher.find()) {
+            masked.append(message, cursor, matcher.start());
+            String marker = "\uE000" + cqCodes.size() + "\uE001";
+            masked.append(marker);
+            cqCodes.add(matcher.group());
+            cursor = matcher.end();
+        }
+        masked.append(message, cursor, message.length());
+        String sanitized = BaiLianService.stripEmojiAndKaomoji(masked.toString());
+        for (int i = 0; i < cqCodes.size(); i++) {
+            sanitized = sanitized.replace("\uE000" + i + "\uE001", cqCodes.get(i));
+        }
+        return sanitized;
     }
 
     private void handleNoticeEvent(JsonNode event) {

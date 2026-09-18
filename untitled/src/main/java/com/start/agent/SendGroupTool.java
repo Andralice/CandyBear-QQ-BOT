@@ -13,10 +13,16 @@ import java.util.*;
 public class SendGroupTool implements Tool {
     private final Main bot;
     private final String realUserId;
+    private final String contextGroupId;
 
     public SendGroupTool(Main bot, String realUserId) {
+        this(bot, realUserId, null);
+    }
+
+    public SendGroupTool(Main bot, String realUserId, String contextGroupId) {
         this.bot = bot;
         this.realUserId = realUserId;
+        this.contextGroupId = contextGroupId;
     }
 
     @Override public String getName() { return "send_group_msg"; }
@@ -24,7 +30,7 @@ public class SendGroupTool implements Tool {
     @Override
     public String getDescription() {
         return "向指定群发送消息。当有人在私聊里说'帮我在群里说XX''帮我@XX一下'时调用。" +
-               "也可以在重要通知、游戏结果等场景主动发到群里。";
+               "只用于跨会话传话，不能用来回复当前群聊；当前群聊直接输出回复。";
     }
 
     @Override
@@ -46,6 +52,9 @@ public class SendGroupTool implements Tool {
         String groupId = (String) args.get("group_id");
         String message = (String) args.get("message");
         if (groupId == null || message == null) return "缺少 group_id 或 message";
+        if (contextGroupId != null && contextGroupId.equals(groupId)) {
+            return "拒绝发送：不能用 send_group_msg 重复回复当前群聊，请直接输出回复";
+        }
 
         // 集中授权检查（白名单 + 黑名单 + 限流）
         ToolAuthorizationService.AuthorizationResult auth =

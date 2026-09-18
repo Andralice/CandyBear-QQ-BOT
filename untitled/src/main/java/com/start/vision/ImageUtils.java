@@ -4,6 +4,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.imageio.ImageIO;
+import javax.imageio.ImageReader;
+import javax.imageio.stream.ImageInputStream;
 import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
@@ -14,7 +16,11 @@ import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
 import java.net.URLConnection;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Locale;
 
 public class ImageUtils {
 
@@ -93,6 +99,115 @@ public class ImageUtils {
         String mime = detectMimeType(bytes, imageUrl);
         String b64 = Base64.getEncoder().encodeToString(bytes);
         return "data:" + mime + ";base64," + b64;
+    }
+
+    /**
+     * 准备发送给主模型的图片：GIF 抽取最多 3 帧并转为 JPEG，其他图片保持原 data URI。
+     * 原始 GIF 不在这里修改，贴图存储和旧 Vision 描述仍使用原图。
+     */
+    public static List<String> prepareMultimodalDataUris(List<String> imageDataUris) {
+        if (imageDataUris == null || imageDataUris.isEmpty()) return List.of();
+
+        List<String> prepared = new ArrayList<>();
+        for (String uri : imageDataUris) {
+            if (uri == null || uri.isBlank()) continue;
+            if (!isGifDataUri(uri)) {
+                prepared.add(uri);
+                continue;
+            }
+
+            List<String> frames = extractGifFrameDataUris(decodeBase64DataUri(uri), 3);
+            if (frames.isEmpty()) {
+                logger.warn("GIF 转 JPEG 帧失败，跳过该图片");
+            } else {
+                prepared.addAll(frames);
+            }
+        }
+        return List.copyOf(prepared);
+    }
+
+    /** 抽 GIF 多帧（均匀分布：首/中/末），转 JPEG base64 data URI 列表。 */
+    public static List<String> extractGifFrameDataUris(byte[] gifBytes, int maxFrames) {
+        List<String> out = new ArrayList<>();
+        if (gifBytes == null || gifBytes.length == 0 || maxFrames <= 0) return out;
+
+        try (ImageInputStream input = ImageIO.createImageInputStream(new ByteArrayInputStream(gifBytes))) {
+            if (input == null) return out;
+            Iterator<ImageReader> readers = ImageIO.getImageReadersByFormatName("gif");
+            if (!readers.hasNext()) return out;
+
+            ImageReader reader = readers.next();
+            try {
+                reader.setInput(input);
+                int frameCount = reader.getNumImages(true);
+                if (frameCount <= 0) return out;
+
+                for (int index : pickFrameIndices(frameCount, maxFrames)) {
+                    try {
+                        BufferedImage frame = reader.read(index);
+                        if (frame == null) continue;
+
+                        BufferedImage rgb = new BufferedImage(
+                                frame.getWidth(), frame.getHeight(), BufferedImage.TYPE_INT_RGB);
+                        Graphics2D graphics = rgb.createGraphics();
+                        try {
+                            graphics.setColor(Color.WHITE);
+                            graphics.fillRect(0, 0, rgb.getWidth(), rgb.getHeight());
+                            graphics.drawImage(frame, 0, 0, null);
+                        } finally {
+                            graphics.dispose();
+                        }
+
+                        ByteArrayOutputStream output = new ByteArrayOutputStream();
+                        if (!ImageIO.write(rgb, "jpg", output)) continue;
+                        out.add("data:image/jpeg;base64," +
+                                Base64.getEncoder().encodeToString(output.toByteArray()));
+                    } catch (Exception ignored) {
+                        // 单帧失败继续抽取其他帧。
+                    }
+                }
+            } finally {
+                reader.dispose();
+            }
+        } catch (Exception e) {
+            logger.debug("GIF 帧抽取失败: {}", e.getMessage());
+            return List.of();
+        }
+        return List.copyOf(out);
+    }
+
+    private static boolean isGifDataUri(String uri) {
+        int semicolon = uri.indexOf(';', 5);
+        return uri.regionMatches(true, 0, "data:", 0, 5)
+                && semicolon > 5
+                && "image/gif".equalsIgnoreCase(uri.substring(5, semicolon));
+    }
+
+    private static byte[] decodeBase64DataUri(String uri) {
+        int comma = uri.indexOf(',');
+        if (comma < 0 || !uri.substring(0, comma).toLowerCase(Locale.ROOT).contains(";base64")) {
+            return null;
+        }
+        try {
+            return Base64.getDecoder().decode(uri.substring(comma + 1));
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private static int[] pickFrameIndices(int total, int max) {
+        if (total <= max) {
+            int[] all = new int[total];
+            for (int i = 0; i < total; i++) all[i] = i;
+            return all;
+        }
+        if (max == 1) return new int[]{0};
+
+        int[] indices = new int[max];
+        for (int i = 0; i < max; i++) {
+            indices[i] = (int) Math.round((double) i * (total - 1) / (max - 1));
+        }
+        return indices;
     }
 
     static String detectMimeType(byte[] bytes, String url) {

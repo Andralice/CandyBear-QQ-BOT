@@ -93,6 +93,23 @@ class LlmProtocolTest {
     }
 
     @Test
+    void preservesOpenAiReasoningContentForToolFollowUp() {
+        var assistant = JSON.createObjectNode();
+        assistant.put("role", "assistant");
+        assistant.putNull("content");
+        assistant.put("reasoning_content", "先查询天气再回复。");
+        var toolCall = assistant.putArray("tool_calls").addObject();
+        toolCall.put("id", "call-reasoning");
+        toolCall.put("type", "function");
+        toolCall.putObject("function").put("name", "get_weather").put("arguments", "{}");
+
+        List<Map<String, Object>> messages = new ArrayList<>();
+        LlmProtocol.appendAssistantToolMessage(JSON, messages, assistant, LlmProtocol.Type.OPENAI);
+
+        assertEquals("先查询天气再回复。", messages.get(0).get("reasoning_content"));
+    }
+
+    @Test
     void supportsAnthropicToolUseAndToolResultAcrossTwoHttpRounds() throws Exception {
         AtomicInteger round = new AtomicInteger();
         List<JsonNode> received = new ArrayList<>();
@@ -191,6 +208,17 @@ class LlmProtocolTest {
         Map<String, Object> body = LlmProtocol.buildRequestBody(
                 LlmProtocol.Type.OPENAI, "openai-model", "", List.of(), List.of(), 128, "");
 
+        assertFalse(body.containsKey("reasoning_effort"));
+    }
+
+    @Test
+    void disablesThinkingForAConfiguredOpenAiRouteWithoutGlobalReasoningSettings() {
+        Map<String, Object> body = LlmProtocol.buildRequestBody(
+                LlmProtocol.Type.OPENAI, "deepseek-flash", "", List.of(), List.of(),
+                8, "high", true);
+
+        JsonNode request = JSON.valueToTree(body);
+        assertEquals("disabled", request.path("thinking").path("type").asText());
         assertFalse(body.containsKey("reasoning_effort"));
     }
 

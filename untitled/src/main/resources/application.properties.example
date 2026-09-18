@@ -12,6 +12,8 @@ ONEBOT_ACCESS_TOKEN=your_access_token
 
 # AI 服务配置 (OpenAI 兼容 API)
 BAILIAN_API_KEY=sk-your-key
+# 官方 DeepSeek Flash 独立密钥；真实值只注入运行环境，不要写入仓库
+DEEPSEEK_FLASH_API_KEY=sk-your-key
 BAILIAN_BASE_URL=https://api.deepseek.com/v1/chat/completions
 # openai（默认）或 anthropic；Anthropic 可填服务的 /v1 根地址，程序会请求 /v1/messages
 BAILIAN_PROTOCOL=openai
@@ -30,7 +32,7 @@ BAILIAN_MAX_RETRIES=2
 BAILIAN_POOL_ENABLED=false
 BAILIAN_POOL_PROBE_INTERVAL_MS=600000
 BAILIAN_POOL_PROBE_TIMEOUT_MS=15000
-BAILIAN_POOL_CANDIDATES=claude-opus-4-6-yetoken|https://yetoken.vip/v1|claude-opus-4-6|anthropic|YETOKEN_CLAUDE_API_KEY;claude-haiku-4-5-20251001-yetoken|https://yetoken.vip/v1|claude-haiku-4-5-20251001|anthropic|YETOKEN_CLAUDE_API_KEY;claude-opus-4-7-yetoken|https://yetoken.vip/v1|claude-opus-4-7|anthropic|YETOKEN_CLAUDE_API_KEY;claude-fable-5-yetoken|https://yetoken.vip/v1|claude-fable-5|anthropic|YETOKEN_CLAUDE_API_KEY;claude-opus-5-yetoken|https://yetoken.vip/v1|claude-opus-5|anthropic|YETOKEN_CLAUDE_API_KEY;gemini-3.1-flash-lite|https://yetoken.vip/v1|gemini-3.1-flash-lite|anthropic|YETOKEN_API_KEY;gemini-3-flash|https://yetoken.vip/v1|gemini-3-flash|anthropic|YETOKEN_API_KEY;gemini-2.5-flash-lite|https://yetoken.vip/v1|gemini-2.5-flash-lite|anthropic|YETOKEN_API_KEY;gpt-5.6-luna-wyy-1|https://www.wyy22.com/v1|gpt-5.6-luna|openai|WYY22_API_KEY_1;gpt-5.6-luna-wyy-2|https://www.wyy22.com/v1|gpt-5.6-luna|openai|WYY22_API_KEY_2
+BAILIAN_POOL_CANDIDATES=claude-opus-4-6-yetoken|https://yetoken.vip/v1|claude-opus-4-6|anthropic|YETOKEN_CLAUDE_API_KEY;claude-haiku-4-5-20251001-yetoken|https://yetoken.vip/v1|claude-haiku-4-5-20251001|anthropic|YETOKEN_CLAUDE_API_KEY;claude-opus-4-7-yetoken|https://yetoken.vip/v1|claude-opus-4-7|anthropic|YETOKEN_CLAUDE_API_KEY;claude-fable-5-yetoken|https://yetoken.vip/v1|claude-fable-5|anthropic|YETOKEN_CLAUDE_API_KEY;claude-opus-5-yetoken|https://yetoken.vip/v1|claude-opus-5|anthropic|YETOKEN_CLAUDE_API_KEY;gemini-3.1-flash-lite|https://yetoken.vip/v1|gemini-3.1-flash-lite|anthropic|YETOKEN_API_KEY;gemini-3-flash|https://yetoken.vip/v1|gemini-3-flash|anthropic|YETOKEN_API_KEY;gemini-2.5-flash-lite|https://yetoken.vip/v1|gemini-2.5-flash-lite|anthropic|YETOKEN_API_KEY;gpt-5.6-luna-wyy-1|https://www.wyy22.com/v1|gpt-5.6-luna|openai|WYY22_API_KEY_1;gpt-5.6-luna-wyy-2|https://www.wyy22.com/v1|gpt-5.6-luna|openai|WYY22_API_KEY_2;deepseek-flash-official|https://api.deepseek.com/v1|deepseek-flash|openai|DEEPSEEK_FLASH_API_KEY|thinking=disabled
 
 # Agnes 免费 Flash 生图/生视频（需要明确设置 AGNES_ENABLED=true）
 # 密钥只通过 AGNES_API_KEY 注入；默认 API 地址与 agnes-free-media skill 一致
@@ -42,7 +44,7 @@ AGNES_PRICING_URL=https://wiki.agnes-ai.com/en/docs/pricing.md
 AGNES_OUTPUT_DIR=/opt/qq-bot/generated-media
 AGNES_REQUEST_TIMEOUT_MS=120000
 AGNES_VIDEO_TIMEOUT_MS=1800000
-AGNES_POLL_INTERVAL_MS=60000
+AGNES_POLL_INTERVAL_MS=2000
 AGNES_VERIFY_FREE_PRICING=true
 
 # Agent 服务配置

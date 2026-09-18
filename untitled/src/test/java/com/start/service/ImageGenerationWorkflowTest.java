@@ -74,6 +74,7 @@ class ImageGenerationWorkflowTest {
                 && rules.contains("商业人像") && rules.contains("产品/场景写实"));
         assertTrue(rules.contains("统一白平衡和色彩分级") && rules.contains("细腻微观纹理")
                 && rules.contains("不能只写“不要彩色”"));
+        assertTrue(rules.contains("由工具统一发送等待提示") && rules.contains("不要再调用 send_status / send_group_msg"));
         JsonNode found = JSON.readTree(query.execute(Map.of("provider_message_id", "qq42")));
         assertEquals("42:1", found.path("items").get(0).path("image_id").asText());
         assertFalse(found.path("items").get(0).path("requires_confirmation").asBoolean());
@@ -183,9 +184,17 @@ class ImageGenerationWorkflowTest {
         tool.injectImageRequirements(new ArrayList<>());
         assertTrue(tool.execute(Map.of("prompt", "画一只熊", "mode", "text")).contains("requirements_summary"));
         assertEquals(0, submissions.get());
-        tool.execute(Map.of("prompt", "画一只熊", "mode", "text", "requirements_summary", "前文要求简笔画，当前画熊"));
+        String result = tool.execute(Map.of("prompt", "画一只熊", "mode", "text", "requirements_summary", "前文要求简笔画，当前画熊"));
         assertEquals(1, submissions.get());
+        assertTrue(result.contains("画好"));
         assertFalse(submitted.path("extra_body").has("image"));
+    }
+
+    @Test void onlyExplicitlyDeliveredMediaEndsTheMainReplyTurn() {
+        assertTrue(GenerateMediaTool.isHandledResult(GenerateMediaTool.MEDIA_HANDLED + "已经画好并发送 1/1 张图"));
+        assertTrue(GenerateMediaTool.isHandledResult(GenerateMediaTool.MEDIA_HANDLED + "视频已开始生成"));
+        assertFalse(GenerateMediaTool.isHandledResult("图画好了，但发送失败"));
+        assertFalse(GenerateMediaTool.isHandledResult(GenerateMediaTool.REQUIREMENTS_REQUIRED));
     }
 
     private Map<String, Object> row(long id, int minutesAgo) {

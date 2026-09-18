@@ -6,12 +6,6 @@ import com.start.vision.ImageUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.imageio.ImageIO;
-import javax.imageio.ImageReader;
-import javax.imageio.stream.ImageInputStream;
-import java.awt.image.BufferedImage;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -23,7 +17,6 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -297,7 +290,7 @@ public final class StickerIngestService {
                     logger.debug("[harvest] vision 未配置，跳过表情包分类");
                 } else if (isGif) {
                     try {
-                        imageDataUris = extractGifFrameDataUris(bytes, 3);
+                        imageDataUris = ImageUtils.extractGifFrameDataUris(bytes, 3);
                         logger.debug("[harvest] GIF 抽 {} 帧，单次请求完成分类", imageDataUris.size());
                     } catch (Exception e) {
                         logger.debug("[harvest] GIF 帧抽取失败: {}", e.getMessage());
@@ -480,59 +473,6 @@ public final class StickerIngestService {
                 && bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F'
                 && bytes[8] == 'W' && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P') return "image/webp";
         return "image/jpeg";
-    }
-
-    /**
-     * 抽 GIF 多帧（均匀分布：首/中/末），转 JPEG base64 data URI 列表。
-     * 给 vision 看到动图过程——比单帧（"白猫坐地板"）信息量大得多，
-     * LLM 才能正确判 isSticker。
-     * 失败返回空列表（调用方降级处理）。
-     */
-    private static List<String> extractGifFrameDataUris(byte[] gifBytes, int maxFrames) {
-        List<String> out = new ArrayList<>();
-        if (gifBytes == null || gifBytes.length == 0 || maxFrames <= 0) return out;
-        try (ImageInputStream iis = ImageIO.createImageInputStream(new ByteArrayInputStream(gifBytes))) {
-            Iterator<ImageReader> readers = ImageIO.getImageReadersByFormatName("gif");
-            if (!readers.hasNext()) return out;
-            ImageReader reader = readers.next();
-            reader.setInput(iis);
-            int numFrames = reader.getNumImages(true);
-            if (numFrames <= 0) {
-                reader.dispose();
-                return out;
-            }
-            int[] indices = pickFrameIndices(numFrames, maxFrames);
-            for (int idx : indices) {
-                try {
-                    BufferedImage frame = reader.read(idx);
-                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                    // 转 JPEG 减少 base64 体积（vision 看到的是静态帧，GIF→JPEG 无损）
-                    ImageIO.write(frame, "jpg", baos);
-                    String base64 = "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(baos.toByteArray());
-                    out.add(base64);
-                } catch (Exception e) {
-                    // 单帧失败继续抽其他帧
-                }
-            }
-            reader.dispose();
-        } catch (Exception e) {
-            logger.debug("GIF 帧抽取失败: {}", e.getMessage());
-            return List.of();
-        }
-        return out;
-    }
-
-    private static int[] pickFrameIndices(int total, int max) {
-        if (total <= max) {
-            int[] all = new int[total];
-            for (int i = 0; i < total; i++) all[i] = i;
-            return all;
-        }
-        int[] idx = new int[max];
-        for (int i = 0; i < max; i++) {
-            idx[i] = (int) Math.round((double) i * (total - 1) / (max - 1));
-        }
-        return idx;
     }
 
     private static String md5(byte[] data) {

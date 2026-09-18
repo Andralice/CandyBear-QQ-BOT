@@ -23,14 +23,16 @@ class MainModelPoolTest {
                         + ";luna-1|https://www.wyy22.com/v1|gpt-5.6-luna|openai|WYY22_API_KEY_1"
                         + ";luna-2|https://www.wyy22.com/v1|gpt-5.6-luna|openai|WYY22_API_KEY_2"
                         + ";claude-opus|https://yetoken.vip/v1|claude-opus-4-6|anthropic|YETOKEN_CLAUDE_API_KEY"
+                        + ";deepseek-flash|https://api.deepseek.com/v1|deepseek-flash|openai|DEEPSEEK_FLASH_API_KEY|thinking=disabled"
                         + ";literal|https://example.invalid/v1|model|openai|literal-key",
                 Map.of(
                         "YETOKEN_API_KEY", "unit-test-secret",
                         "WYY22_API_KEY_1", "unit-test-wyy-1",
                         "WYY22_API_KEY_2", "unit-test-wyy-2",
-                        "YETOKEN_CLAUDE_API_KEY", "unit-test-claude")::get);
+                        "YETOKEN_CLAUDE_API_KEY", "unit-test-claude",
+                        "DEEPSEEK_FLASH_API_KEY", "unit-test-deepseek")::get);
 
-        assertEquals(4, candidates.size());
+        assertEquals(5, candidates.size());
         MainModelPool.Candidate candidate = candidates.get(0);
         assertEquals("gemini-lite", candidate.id());
         assertEquals("https://yetoken.vip/v1/messages", candidate.endpoint());
@@ -45,6 +47,8 @@ class MainModelPoolTest {
         assertEquals("claude-opus", candidates.get(3).id());
         assertEquals("claude-opus-4-6", candidates.get(3).model());
         assertEquals("unit-test-claude", candidates.get(3).apiKey());
+        assertEquals("deepseek-flash", candidates.get(4).model());
+        assertTrue(candidates.get(4).thinkingDisabled());
     }
 
     @Test

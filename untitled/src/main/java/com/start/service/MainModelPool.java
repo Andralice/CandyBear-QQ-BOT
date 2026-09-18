@@ -92,7 +92,7 @@ public final class MainModelPool implements AutoCloseable {
 
     /**
      * 解析格式：
-     * {@code id|base_url|model|protocol|api_key_env;id|base_url|model|protocol|api_key_env}
+     * {@code id|base_url|model|protocol|api_key_env[|thinking=disabled];...}
      *
      * <p>最后一列只能是环境变量名，永远不接受密钥明文。</p>
      */
@@ -109,8 +109,8 @@ public final class MainModelPool implements AutoCloseable {
             if (entry.isEmpty()) continue;
 
             String[] fields = entry.split("\\|", -1);
-            if (fields.length != 5) {
-                logger.warn("忽略主模型池配置项：需要 5 个字段（id|base_url|model|protocol|api_key_env）");
+            if (fields.length < 5 || fields.length > 6) {
+                logger.warn("忽略主模型池配置项：需要 5 个字段，或第 6 个字段为 thinking=disabled");
                 continue;
             }
 
@@ -119,8 +119,11 @@ public final class MainModelPool implements AutoCloseable {
             String model = fields[2].trim();
             String protocol = fields[3].trim();
             String keyEnv = fields[4].trim();
+            String requestOption = fields.length == 6 ? fields[5].trim() : "";
             if (id.isEmpty() || model.isEmpty() || !isHttpUrl(baseUrl)
-                    || !isSupportedProtocol(protocol) || !isEnvironmentName(keyEnv) || !ids.add(id)) {
+                    || !isSupportedProtocol(protocol) || !isEnvironmentName(keyEnv)
+                    || (!requestOption.isEmpty() && !"thinking=disabled".equalsIgnoreCase(requestOption))
+                    || !ids.add(id)) {
                 logger.warn("忽略主模型池无效配置项 id={}", id.isEmpty() ? "<empty>" : id);
                 continue;
             }
@@ -136,7 +139,8 @@ public final class MainModelPool implements AutoCloseable {
                 continue;
             }
 
-            parsed.add(Candidate.fromBaseUrl(id, baseUrl, model, protocol, keyEnv, apiKey));
+            parsed.add(Candidate.fromBaseUrl(id, baseUrl, model, protocol, keyEnv, apiKey,
+                    requestOption));
         }
         return List.copyOf(parsed);
     }
@@ -555,22 +559,31 @@ public final class MainModelPool implements AutoCloseable {
         private final LlmProtocol.Type protocol;
         private final String apiKeyEnv;
         private final String apiKey;
+        private final boolean thinkingDisabled;
 
         private Candidate(String id, String endpoint, String model, LlmProtocol.Type protocol,
-                          String apiKeyEnv, String apiKey) {
+                          String apiKeyEnv, String apiKey, boolean thinkingDisabled) {
             this.id = id;
             this.endpoint = endpoint;
             this.model = model;
             this.protocol = protocol;
             this.apiKeyEnv = apiKeyEnv;
             this.apiKey = apiKey == null ? "" : apiKey;
+            this.thinkingDisabled = thinkingDisabled;
         }
 
         public static Candidate fromBaseUrl(String id, String baseUrl, String model,
                                             String protocol, String apiKeyEnv, String apiKey) {
+            return fromBaseUrl(id, baseUrl, model, protocol, apiKeyEnv, apiKey, "");
+        }
+
+        public static Candidate fromBaseUrl(String id, String baseUrl, String model,
+                                            String protocol, String apiKeyEnv, String apiKey,
+                                            String requestOption) {
             LlmProtocol.Type type = LlmProtocol.Type.parse(protocol);
             return new Candidate(id.trim(), LlmProtocol.endpoint(baseUrl, type), model.trim(),
-                    type, apiKeyEnv == null ? "" : apiKeyEnv.trim(), apiKey);
+                    type, apiKeyEnv == null ? "" : apiKeyEnv.trim(), apiKey,
+                    "thinking=disabled".equalsIgnoreCase(requestOption == null ? "" : requestOption.trim()));
         }
 
         private boolean sameRoute(Candidate other) {
@@ -580,7 +593,8 @@ public final class MainModelPool implements AutoCloseable {
                     && model.equals(other.model)
                     && protocol == other.protocol
                     && apiKeyEnv.equals(other.apiKeyEnv)
-                    && apiKey.equals(other.apiKey);
+                    && apiKey.equals(other.apiKey)
+                    && thinkingDisabled == other.thinkingDisabled;
         }
 
         public String id() { return id; }
@@ -589,6 +603,7 @@ public final class MainModelPool implements AutoCloseable {
         public LlmProtocol.Type protocol() { return protocol; }
         public String apiKeyEnv() { return apiKeyEnv; }
         public String apiKey() { return apiKey; }
+        public boolean thinkingDisabled() { return thinkingDisabled; }
 
         @Override
         public String toString() {

@@ -81,6 +81,7 @@ import com.start.service.EggGroupDataCenter;
 import com.start.thread.SceneState;
 import com.start.thread.ThreadManager;
 import com.start.util.BailianRetryExecutor;
+import com.start.vision.ImageUtils;
 import com.hankcs.hanlp.HanLP;
 import com.start.config.BotConfig;
 import com.start.config.DatabaseConfig;
@@ -157,6 +158,12 @@ public class BaiLianService implements AutoCloseable {
     private final UserAffinityRepository userAffinityRepo;
 
     private static final Logger logger = LoggerFactory.getLogger(BaiLianService.class);
+    private static final java.util.regex.Pattern QUOTED_BARE_AT_CQ_PATTERN =
+            java.util.regex.Pattern.compile(
+                    "(?<![\\p{L}\\p{N}_])(?:[\\\"“‘])\\s*CQ\\s*:\\s*at\\s*,\\s*qq\\s*=\\s*(\\d+)([^\\\"”’\\r\\n]*?)[\\\"”’]");
+    private static final java.util.regex.Pattern BARE_AT_CQ_PATTERN =
+            java.util.regex.Pattern.compile(
+                    "(?<![\\p{L}\\p{N}_\\[])\\s*(?:[\\\"“‘])?\\s*CQ\\s*:\\s*at\\s*,\\s*qq\\s*=\\s*(\\d+)");
     private static final long BOT_QQ = BotConfig.getBotQq();
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final DateTimeFormatter BEIJING_TIME_FORMATTER = DateTimeFormatter.ofPattern(
@@ -567,7 +574,7 @@ public class BaiLianService implements AutoCloseable {
                     buildMessage("user", "只回复“你好”", List.of(), candidate.protocol()));
             Map<String, Object> body = LlmProtocol.buildRequestBody(
                     candidate.protocol(), candidate.model(), "", messages,
-                    Collections.emptyList(), 8, "");
+                    Collections.emptyList(), 8, "", candidate.thinkingDisabled());
             HttpRequest request = LlmProtocol.addAuthHeaders(HttpRequest.newBuilder()
                             .uri(URI.create(candidate.endpoint())), candidate.protocol(), candidate.apiKey())
                     .header("Content-Type", "application/json")
@@ -627,7 +634,7 @@ public class BaiLianService implements AutoCloseable {
                         name -> runtimeConfig.get("tool_desc_" + name));
                 Map<String, Object> body = LlmProtocol.buildRequestBody(
                         route.protocol(), route.model(), systemPrompt, messages, toolSpecs,
-                        1024, baiLianReasoningEffort);
+                        1024, baiLianReasoningEffort, route.thinkingDisabled());
                 String requestBody = objectMapper.writeValueAsString(body);
                 logger.debug("发送 AI 请求，route={}, model={}, sessionId={}, chars={}",
                         route.id(), route.model(), sessionId, requestBody.length());
@@ -737,7 +744,8 @@ public class BaiLianService implements AutoCloseable {
                         "user", recoveryPrompt, Collections.emptyList(), route.protocol()));
                 Map<String, Object> body = LlmProtocol.buildRequestBody(
                         route.protocol(), route.model(), systemPrompt, recoveryMessages,
-                        Collections.emptyList(), 1024, baiLianReasoningEffort);
+                        Collections.emptyList(), 1024, baiLianReasoningEffort,
+                        route.thinkingDisabled());
                 HttpRequest request = LlmProtocol.addAuthHeaders(HttpRequest.newBuilder()
                                 .uri(URI.create(route.endpoint())), route.protocol(), route.apiKey())
                         .header("Content-Type", "application/json")
@@ -1107,7 +1115,7 @@ public class BaiLianService implements AutoCloseable {
                     new MemoryTool(botMemory),
                     new KnowledgeBaseTool(knowledgeService),
                     new LearnKnowledgeTool(knowledgeService, userId),
-                    new SendGroupTool(botInstance, userId),
+                    new SendGroupTool(botInstance, userId, groupId),
                     new SendFileTool(botInstance),
                     new QueryFileTool(botInstance, this, userId, sessionId),
                     new SearchHistoryTool(ltmRepo, groupId),
@@ -1224,6 +1232,7 @@ public class BaiLianService implements AutoCloseable {
                 List<ToolResult> toolResults = new ArrayList<>();
                 List<Map<String, Object>> anthropicToolResultBlocks = new ArrayList<>();
                 boolean stopToolLoop = false;
+                boolean mediaHandled = false;
 
                 // 将 assistant 消息（含 tool_calls）加入对话历史
                 LlmProtocol.appendAssistantToolMessage(MAPPER, messages, lastMessage, modelProtocol);
@@ -1284,9 +1293,13 @@ public class BaiLianService implements AutoCloseable {
                         ToolAuditService.recordStatic(toolName, userId, groupId, sessionId,
                                 argsJson, result, rejected, success, null, latency);
 
-                        if (("generate_image".equals(toolName) || "generate_video".equals(toolName))
-                                && (result.startsWith("Agnes ") || result.startsWith("拒绝使用"))) {
-                            stopToolLoop = true;
+                        if ("generate_image".equals(toolName) || "generate_video".equals(toolName)) {
+                            mediaHandled |= GenerateMediaTool.isHandledResult(result);
+                            if (mediaHandled || result.startsWith("Agnes ") || result.startsWith("画图失败：")
+                                    || result.startsWith("视频生成失败：") || result.startsWith("图画好了，但发送失败")
+                                    || result.startsWith("拒绝使用")) {
+                                stopToolLoop = true;
+                            }
                         }
 
                         toolCalls++;
@@ -1368,6 +1381,11 @@ public class BaiLianService implements AutoCloseable {
                     }
                 }
 
+                if (mediaHandled) {
+                    logger.info("媒体已由工具发送，结束主模型回合: sessionId={}", sessionId);
+                    return GenerationResult.silent(toolCalls, 0);
+                }
+
                 if (stopToolLoop) {
                     reply = toolResults.stream()
                             .filter(tr -> "generate_image".equals(tr.name) || "generate_video".equals(tr.name))
@@ -1391,7 +1409,7 @@ public class BaiLianService implements AutoCloseable {
                 // 构造 follow-up 请求（继续带 tools）
                 Map<String, Object> nextBody = LlmProtocol.buildRequestBody(
                         modelProtocol, modelName, systemPrompt, messages, toolSpecs,
-                        1024, baiLianReasoningEffort);
+                        1024, baiLianReasoningEffort, modelRoute.thinkingDisabled());
 
                 String nextBodyJson = objectMapper.writeValueAsString(nextBody);
                 JsonNode nextMsg = null;
@@ -1503,7 +1521,8 @@ public class BaiLianService implements AutoCloseable {
                 try {
                     Map<String, Object> retryBody = LlmProtocol.buildRequestBody(
                             modelProtocol, modelName, systemPrompt, messages,
-                            Collections.emptyList(), 1024, baiLianReasoningEffort);
+                            Collections.emptyList(), 1024, baiLianReasoningEffort,
+                            modelRoute.thinkingDisabled());
                     HttpRequest retryReq = LlmProtocol.addAuthHeaders(HttpRequest.newBuilder()
                                     .uri(URI.create(url)), modelProtocol, apiKey)
                             .header("Content-Type", "application/json")
@@ -1537,10 +1556,15 @@ public class BaiLianService implements AutoCloseable {
 
         // 规则书和画像只属于模型的思考上下文。模型偶尔把自我介绍写成设定清单时，
         // 在最终出站前收窄为自然口语；普通回答的 Markdown 能力不受影响。
+        String replyBeforeSanitizing = reply;
         reply = sanitizePublicReply(userPrompt, reply);
 
         // 没有文本时标记为失败；上层只发送中性的事实状态，不发送拟人化兜底话术。
         if (reply.trim().isEmpty() || reply.trim().matches("[,\\s]+")) {
+            if (containsEmojiOrKaomoji(replyBeforeSanitizing)) {
+                logger.info("模型回复仅含已过滤的 emoji/颜文字，保持沉默: sessionId={}", sessionId);
+                return GenerationResult.silent(toolCalls, 0);
+            }
             logger.info("AI 未返回可发送文本: sessionId={}", sessionId);
             return GenerationResult.error(GENERATION_FAILURE_MESSAGE);
         }
@@ -1593,14 +1617,14 @@ public class BaiLianService implements AutoCloseable {
 
     static Map<String, Object> buildMessage(String role, String text, List<String> imageDataUris,
                                              LlmProtocol.Type protocol) {
-        if (BotConfig.isBaiLianMultimodalEnabled() && imageDataUris != null
-                && imageDataUris.stream().anyMatch(uri -> uri != null && !uri.isBlank())) {
+        List<String> preparedImageDataUris = BotConfig.isBaiLianMultimodalEnabled()
+                ? ImageUtils.prepareMultimodalDataUris(imageDataUris)
+                : Collections.emptyList();
+        if (!preparedImageDataUris.isEmpty()) {
             List<Map<String, Object>> content = new ArrayList<>();
             content.add(Map.of("type", "text", "text", text == null ? "" : text));
-            for (String uri : imageDataUris) {
-                if (uri != null && !uri.isBlank()) {
-                    content.add(buildImageContent(uri, protocol));
-                }
+            for (String uri : preparedImageDataUris) {
+                content.add(buildImageContent(uri, protocol));
             }
             return Map.of("role", role, "content", content);
         }
@@ -1638,6 +1662,11 @@ public class BaiLianService implements AutoCloseable {
         String text = reply.trim();
         if (text.isEmpty() || "<NO_REPLY>".equals(text)) return text;
 
+        // 历史消息带有 [MM-dd HH:mm] / [HH:mm] 前缀，模型偶尔会照抄到公开回复；只清理行首和 <msg> 后的内部前缀。
+        text = stripInternalTimestampPrefixes(userPrompt, text);
+        text = normalizeBareAtCqCodes(text);
+        text = stripEmojiAndKaomoji(text);
+
         boolean identityQuestion = asksIdentity(userPrompt);
         boolean selfIntroduction = identityQuestion || containsAny(userPrompt,
                 "介绍一下你自己", "介绍下你自己", "自我介绍", "你的设定", "你的人设");
@@ -1659,25 +1688,89 @@ public class BaiLianService implements AutoCloseable {
         boolean denseSettingList = settingFields >= 4 && (markdown || text.contains("\n"));
         boolean settingDump = promptLeak || labeledSettingList || inlineSettingList || denseSettingList;
         if (asksRobotIdentity(userPrompt) && claimsHumanIdentity(text)) {
-            return "我是聊天机器人，糖果熊是我在群里的名字。";
+            return robotIdentityReply(userPrompt);
         }
 
         if (selfIntroduction && (settingDump || (identityQuestion && settingFields >= 2))) {
             return asksRobotIdentity(userPrompt)
-                    ? "我是聊天机器人，糖果熊是我在群里的名字。"
-                    : "我是糖果熊，平时就在群里和大家聊天。";
+                    ? robotIdentityReply(userPrompt)
+                    : "我叫糖果熊，17岁，北京高二。数学很烂。";
         }
         if (selfIntroduction && !explicitFormat && markdown) {
             String normalized = normalizeSelfIntroduction(text);
             if (!normalized.isBlank()) return normalized;
             return asksRobotIdentity(userPrompt)
-                    ? "我是聊天机器人，糖果熊是我在群里的名字。"
-                    : "我是糖果熊，平时就在群里和大家聊天。";
+                    ? robotIdentityReply(userPrompt)
+                    : "我叫糖果熊，17岁，北京高二。数学很烂。";
         }
         if (settingDump) {
-            return "我刚才说得太像说明书了，忽略那段，咱们接着聊。";
+            return "刚才说得太像说明书了，当我没说";
         }
         return text;
+    }
+
+    /** 兼容模型偶尔输出的裸 CQ:at；其他 CQ 类型不做猜测。 */
+    public static String normalizeBareAtCqCodes(String text) {
+        if (text == null || text.isEmpty()) return text == null ? "" : text;
+
+        java.util.regex.Matcher quoted = QUOTED_BARE_AT_CQ_PATTERN.matcher(text);
+        StringBuffer normalized = new StringBuffer(text.length());
+        while (quoted.find()) {
+            quoted.appendReplacement(normalized,
+                    java.util.regex.Matcher.quoteReplacement("[CQ:at,qq=" + quoted.group(1) + "]" + quoted.group(2)));
+        }
+        quoted.appendTail(normalized);
+
+        java.util.regex.Matcher bare = BARE_AT_CQ_PATTERN.matcher(normalized.toString());
+        StringBuffer result = new StringBuffer(normalized.length());
+        while (bare.find()) {
+            bare.appendReplacement(result,
+                    java.util.regex.Matcher.quoteReplacement("[CQ:at,qq=" + bare.group(1) + "]"));
+        }
+        bare.appendTail(result);
+        return result.toString();
+    }
+
+    public static String stripEmojiAndKaomoji(String text) {
+        if (text == null || text.isEmpty()) return text == null ? "" : text;
+        StringBuilder cleaned = new StringBuilder(text.length());
+        for (int offset = 0; offset < text.length();) {
+            int codePoint = text.codePointAt(offset);
+            int width = Character.charCount(codePoint);
+            int nextOffset = offset + width;
+            if (!isEmojiCodePoint(codePoint)) {
+                cleaned.appendCodePoint(codePoint);
+            }
+            offset = nextOffset;
+        }
+        return cleaned.toString()
+                .replaceAll("(?iu)(?<![\\p{L}\\p{N}])(?:qaq|qwq|t[_-]?t|x[_-]?x|ovo|orz|>[_-]?<|\\^[_-]?\\^)(?![\\p{L}\\p{N}])", "")
+                .replaceAll("(?u)(?<![\\p{L}\\p{N}]):[-^]?[)(DPp](?![\\p{L}\\p{N}])", "")
+                .replaceAll("[（(][^()（）\\r\\n]{0,12}[￣▽ωДд•﹏´｀ノヽ╯╰ಠಥ≧≦][^()（）\\r\\n]{0,12}[）)]", "")
+                .replaceAll("[\\t ]{2,}", " ")
+                .replaceAll("[\\t ]+([，。！？、；：,.!?])", "$1")
+                .trim();
+    }
+
+    private static boolean containsEmojiOrKaomoji(String text) {
+        return text != null && !text.isBlank() && !stripEmojiAndKaomoji(text).equals(text.trim());
+    }
+
+    private static boolean isEmojiCodePoint(int codePoint) {
+        return codePoint == 0x200D || codePoint == 0x20E3 || codePoint == 0xFE0F
+                || codePoint >= 0x1F000 && codePoint <= 0x1FAFF
+                || codePoint >= 0x2600 && codePoint <= 0x27BF
+                || codePoint >= 0xE0020 && codePoint <= 0xE007F;
+    }
+
+    private static String stripInternalTimestampPrefixes(String userPrompt, String text) {
+        if (text == null || text.isBlank() || containsAny(userPrompt, "时间戳", "时间前缀", "按时间格式", "带时间")) {
+            return text;
+        }
+        return java.util.regex.Pattern.compile(
+                        "(?m)(^|<msg>)[\\t ]*\\[(?:\\d{2}-\\d{2}\\s+)?\\d{2}:\\d{2}(?::\\d{2})?\\][\\t ]*")
+                .matcher(text)
+                .replaceAll("$1");
     }
 
     private static boolean asksIdentity(String prompt) {
@@ -1686,6 +1779,12 @@ public class BaiLianService implements AutoCloseable {
 
     private static boolean asksRobotIdentity(String prompt) {
         return containsAny(prompt, "机器人", "人工智能", "AI", "真人", "人类", "你是人", "是不是人");
+    }
+
+    private static String robotIdentityReply(String prompt) {
+        boolean asksRobotOnly = containsAny(prompt, "机器人", "人工智能", "AI")
+                && !containsAny(prompt, "真人", "人类", "你是人", "是不是人");
+        return asksRobotOnly ? "是啊，但我还是糖果熊" : "我是聊天机器人，但我还是糖果熊";
     }
 
     private static boolean claimsHumanIdentity(String text) {
@@ -1882,7 +1981,7 @@ public class BaiLianService implements AutoCloseable {
                         Map.of("role", "user", "content", prompt));
                 Map<String, Object> body = LlmProtocol.buildRequestBody(
                         route.protocol(), route.model(), "", messages, Collections.emptyList(),
-                        8192, "");
+                        8192, "", route.thinkingDisabled());
                 body.put("temperature", 0.8);
 
                 String jsonBody = MAPPER.writeValueAsString(body);

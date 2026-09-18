@@ -111,6 +111,15 @@ final class LlmProtocol {
                                                   List<Map<String, Object>> messages,
                                                   List<Map<String, Object>> toolSpecs,
                                                   int maxTokens, String reasoningEffort) {
+        return buildRequestBody(type, model, systemPrompt, messages, toolSpecs,
+                maxTokens, reasoningEffort, false);
+    }
+
+    static Map<String, Object> buildRequestBody(Type type, String model, String systemPrompt,
+                                                  List<Map<String, Object>> messages,
+                                                  List<Map<String, Object>> toolSpecs,
+                                                  int maxTokens, String reasoningEffort,
+                                                  boolean disableThinking) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", model);
         if (type == Type.ANTHROPIC) {
@@ -126,7 +135,9 @@ final class LlmProtocol {
 
         body.put("messages", messages);
         body.put("max_tokens", maxTokens);
-        if (reasoningEffort != null && !reasoningEffort.isBlank()) {
+        if (disableThinking) {
+            body.put("thinking", Map.of("type", "disabled"));
+        } else if (reasoningEffort != null && !reasoningEffort.isBlank()) {
             body.put("reasoning_effort", reasoningEffort.trim());
         }
         if (toolSpecs != null && !toolSpecs.isEmpty()) {
@@ -253,6 +264,10 @@ final class LlmProtocol {
         JsonNode content = message.get("content");
         if (content == null || content.isNull()) assistant.putNull("content");
         else assistant.set("content", content.deepCopy());
+        JsonNode reasoningContent = message.get("reasoning_content");
+        if (reasoningContent != null && !reasoningContent.isNull()) {
+            assistant.set("reasoning_content", reasoningContent.deepCopy());
+        }
         assistant.set("tool_calls", message.get("tool_calls").deepCopy());
         messages.add(mapper.convertValue(assistant, Map.class));
     }

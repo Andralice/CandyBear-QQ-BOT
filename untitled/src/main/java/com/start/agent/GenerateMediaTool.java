@@ -28,6 +28,7 @@ public final class GenerateMediaTool implements Tool {
     private final QueryImagesTool imageQuery;
     private boolean imageRequirementsReviewed;
     public static final String REQUIREMENTS_REQUIRED = "IMAGE_REQUIREMENTS_REQUIRED";
+    public static final String MEDIA_HANDLED = "MEDIA_HANDLED:";
 
     public GenerateMediaTool(Main bot, AgnesMediaService mediaService, String groupId,
                              String userId, String sessionId, Kind kind) {
@@ -132,13 +133,15 @@ public final class GenerateMediaTool implements Tool {
         try {
             return kind == Kind.IMAGE ? generateImage(args) : generateVideo(args);
         } catch (IllegalArgumentException e) {
-            return "生图准备未完成：" + e.getMessage() + "。请继续查证或询问用户，尚未生成。";
+            return kind == Kind.IMAGE
+                    ? "画图前还缺信息：" + e.getMessage() + "。尚未开始画。"
+                    : "视频生成前还缺信息：" + e.getMessage() + "。尚未开始生成。";
         } catch (AgnesMediaService.AgnesMediaException e) {
             logger.warn("Agnes {} 失败: {}", kind.name().toLowerCase(Locale.ROOT), e.getMessage());
-            return "Agnes " + (kind == Kind.IMAGE ? "生图" : "生视频") + "失败：" + e.getMessage();
+            return (kind == Kind.IMAGE ? "画图" : "视频生成") + "失败：" + e.getMessage();
         } catch (Exception e) {
             logger.warn("Agnes {} 失败", kind.name().toLowerCase(Locale.ROOT), e);
-            return "Agnes " + (kind == Kind.IMAGE ? "生图" : "生视频") + "失败：" + e.getClass().getSimpleName();
+            return (kind == Kind.IMAGE ? "画图" : "视频生成") + "失败：" + e.getClass().getSimpleName();
         }
     }
 
@@ -175,9 +178,10 @@ public final class GenerateMediaTool implements Tool {
         for (AgnesMediaService.GeneratedMedia media : results) {
             if (sendMedia(media)) sent++;
         }
-        return sent == results.size()
-                ? "已生成并发送 " + sent + " 张图片"
-                : "图片已生成，但仅发送成功 " + sent + "/" + results.size() + " 张";
+        if (sent > 0) {
+            return MEDIA_HANDLED + "已经画好并发送 " + sent + "/" + results.size() + " 张图";
+        }
+        return "图画好了，但发送失败";
     }
 
     private String generateVideo(Map<String, Object> args) throws AgnesMediaService.AgnesMediaException {
@@ -203,9 +207,13 @@ public final class GenerateMediaTool implements Tool {
                 logger.warn("Agnes 视频已下载但发送失败: path={}", media.path());
             }
         });
-        return ticket.queuedAhead() == 0
+        return MEDIA_HANDLED + (ticket.queuedAhead() == 0
                 ? "视频已开始生成，完成后会自动发送。"
-                : "视频已加入队列，前面还有 " + ticket.queuedAhead() + " 个视频正在生成，完成后会自动发送。";
+                : "视频已加入队列，前面还有 " + ticket.queuedAhead() + " 个视频正在生成，完成后会自动发送。");
+    }
+
+    public static boolean isHandledResult(String result) {
+        return result != null && result.startsWith(MEDIA_HANDLED);
     }
 
     private String checkAccess() {
@@ -237,11 +245,11 @@ public final class GenerateMediaTool implements Tool {
         if (SendStatusTool.consumeRecent(groupId, userId)) return;
         String message;
         if (video && queuedAhead > 0) {
-            message = "前边还有 " + queuedAhead + " 个视频正在生成，我先排队等一下。";
+            message = "前面还有 " + queuedAhead + " 个视频，我排会儿队。";
         } else {
             message = video
-                    ? "好呀，我开始生成视频啦，可能要等一两分钟，先等等。"
-                    : "好呀，我开始生成图片啦，可能要等一会儿。";
+                    ? "我开始做视频了，得等一两分钟。"
+                    : "我开始画了，等我一会儿。";
         }
         if (!sendText(message)) {
             logger.warn("Agnes 生成状态消息发送失败");
