@@ -121,7 +121,7 @@ public record GroupDialoguePlan(
             sb.append("\n本轮互动类型：").append(relation.interactionMode()).append("。");
             switch (relation.interactionMode()) {
                 case BANTER -> sb.append("这是接梗，不是真实执行请求；只接住梗本身，说出最先冒出的那句群聊反应就停，不附解释、建议或反问。");
-                case CASUAL_QUESTION -> sb.append("这是随口一问；直接回答眼前这一点，不展开成清单或说明书。");
+                case CASUAL_QUESTION -> sb.append("这是随口一问；只回答眼前这一点，不展开成清单或说明书。能力或偏好问题只给总体判断，不列举项目、成绩、例外、原因或经历，对方追问后再展开。");
                 case SERIOUS_HELP -> sb.append("这是认真求助；把解决问题真正需要的内容说清楚。");
                 case EMOTIONAL_SUPPORT -> sb.append("这是倾诉或情绪交流；先回应具体处境和感受，不急着分析或给建议。");
                 case ACTION_REQUEST -> sb.append("这是实际执行请求；按事实和工具结果处理，不能把请求或计划说成已经完成。");

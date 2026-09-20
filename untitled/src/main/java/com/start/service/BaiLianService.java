@@ -108,7 +108,9 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -581,7 +583,22 @@ public class BaiLianService implements AutoCloseable {
                     .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))
                     .timeout(Duration.ofMillis(timeoutMs))
                     .build();
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            // The request timeout does not cap a provider that keeps a response body open.
+            // Bound the whole probe and cancel the underlying exchange so one route cannot
+            // hold the model-pool scheduler indefinitely.
+            CompletableFuture<HttpResponse<String>> pending =
+                    httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response;
+            try {
+                response = pending.get(Math.max(1, timeoutMs), TimeUnit.MILLISECONDS);
+            } catch (TimeoutException e) {
+                pending.cancel(true);
+                throw e;
+            } catch (InterruptedException e) {
+                pending.cancel(true);
+                Thread.currentThread().interrupt();
+                throw e;
+            }
             long latencyMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
                 return MainModelPool.ProbeResult.failed(candidate, latencyMs,
@@ -1561,11 +1578,13 @@ public class BaiLianService implements AutoCloseable {
 
         // <NO_REPLY> is an internal control marker. A model may emit it even when
         // the current event does not grant silence permission; it must never reach QQ.
-        if (isNoReplyMarker(reply)) {
-            if (allowSilence) {
+        if (containsNoReplyMarker(reply)) {
+            if (isNoReplyMarker(reply) && allowSilence) {
                 logger.info("🤫 模型选择沉默: sessionId={}", sessionId);
-            } else {
+            } else if (isNoReplyMarker(reply)) {
                 logger.warn("模型在禁止沉默的回合返回 <NO_REPLY>，丢弃该标记: sessionId={}", sessionId);
+            } else {
+                logger.warn("模型回复包含内部 <NO_REPLY> 标记，整条丢弃: sessionId={}", sessionId);
             }
             return GenerationResult.silent(toolCalls, 0);
         }
@@ -1716,6 +1735,11 @@ public class BaiLianService implements AutoCloseable {
 
     static boolean isNoReplyMarker(String reply) {
         return reply != null && "<NO_REPLY>".equals(reply.trim());
+    }
+
+    /** Internal control text must never be sent to a public chat, even if surrounded by other text. */
+    static boolean containsNoReplyMarker(String reply) {
+        return reply != null && reply.contains("<NO_REPLY>");
     }
 
     /** 兼容模型偶尔输出的裸 CQ:at；其他 CQ 类型不做猜测。 */
@@ -2137,12 +2161,22 @@ public class BaiLianService implements AutoCloseable {
         }
     }
 
-    // ===== 消息分段：尊重模型显式协议，仅对超长回复机械切分 =====
+    // ===== 消息分段：尊重模型显式协议，并在长回复已有自然句界时分拍 =====
+    private static final int AUTO_SPLIT_MIN_CHARS = 56;
+    private static final int SHORT_BEAT_MIN_CHARS = 20;
+    private static final int MIN_AUTO_SPLIT_PART_CHARS = 12;
+    private static final int MIN_SHORT_SPLIT_PART_CHARS = 8;
+
     public static List<String> splitIntoShortMessages(String reply) {
         if (reply == null || reply.trim().isEmpty()) {
             return Collections.emptyList();
         }
         reply = reply.trim();
+
+        // Internal control text is never a public message, including malformed marker-plus-text output.
+        if (containsNoReplyMarker(reply)) {
+            return Collections.emptyList();
+        }
 
         // XML 标签分隔（推荐，GPT 系列模型稳定性远高于 |---|）
         java.util.regex.Matcher msgMatcher = java.util.regex.Pattern.compile("<msg>(.*?)</msg>", java.util.regex.Pattern.DOTALL).matcher(reply);
@@ -2165,10 +2199,6 @@ public class BaiLianService implements AutoCloseable {
                     .collect(java.util.stream.Collectors.toList());
         }
 
-        if (reply.length() <= 600) {
-            return List.of(reply);
-        }
-
         // 提取开头的 CQ 码，避免切分时截断
         String cqPrefix = "";
         java.util.regex.Matcher cqMatcher = java.util.regex.Pattern.compile("^(\\[CQ:[^\\]]+\\]\\s*)+").matcher(reply);
@@ -2177,10 +2207,15 @@ public class BaiLianService implements AutoCloseable {
             reply = reply.substring(cqMatcher.end());
         }
 
+        // 代码、表格和项目列表保持整体，避免切成无法阅读的碎片。
+        if (isStructuredReply(reply)) {
+            return Arrays.asList(cqPrefix + reply);
+        }
 
-        // 包含代码块标记 → 不按标点拆分，避免代码被切碎刷屏
-        if (reply.contains("│") || reply.startsWith("📄")) {
-            return Arrays.asList(reply);
+        // 普通回复只在确实偏长且存在完整句界时自动分成最多两拍。
+        if (reply.length() <= 600) {
+            List<String> naturalParts = splitNaturalBeats(cqPrefix, reply);
+            return naturalParts.isEmpty() ? List.of(cqPrefix + reply) : naturalParts;
         }
 
         // 只按句末标点拆分（不再按 \n 拆分，避免排行榜等结构化内容逐行切分刷屏）
@@ -2212,6 +2247,93 @@ public class BaiLianService implements AutoCloseable {
             return new ArrayList<>(parts.subList(0, MAX_PARTS));
         }
         return parts.isEmpty() ? Arrays.asList(cqPrefix + reply) : parts;
+    }
+
+    private static boolean isStructuredReply(String text) {
+        return text.contains("```") || text.contains("│") || text.startsWith("📄")
+                || text.matches("(?s).*\\n\\s*[-*]\\s+.*")
+                || text.matches("(?s).*\\n\\s*\\d+[.)]\\s+.*");
+    }
+
+    private static List<String> splitNaturalBeats(String cqPrefix, String text) {
+        if (text.length() < SHORT_BEAT_MIN_CHARS) return Collections.emptyList();
+
+        List<Integer> sentenceBoundaries = findBoundaries(
+                text, "(?<=[。！？；~?!…])(?![。！？；~?!…])");
+        List<String> parts = Collections.emptyList();
+        if (text.length() >= AUTO_SPLIT_MIN_CHARS) {
+            parts = chooseClosestSplit(cqPrefix, text, sentenceBoundaries);
+            if (!parts.isEmpty()) return parts;
+        }
+
+        // Short replies are split only when the second sentence clearly starts a
+        // new beat ("不过...", "然后..."), rather than cutting every two-sentence reply.
+        if (text.length() >= SHORT_BEAT_MIN_CHARS) {
+            for (int boundary : sentenceBoundaries) {
+                String right = text.substring(boundary).trim();
+                if (startsNaturalSecondBeat(right)) {
+                    parts = chooseClosestSplit(cqPrefix, text, List.of(boundary), MIN_SHORT_SPLIT_PART_CHARS);
+                    if (!parts.isEmpty()) return parts;
+                }
+            }
+        }
+
+        // A long single sentence can still have two readable clauses; only use a comma
+        // when both sides are substantial enough to stand on their own.
+        if (text.length() >= 84) {
+            parts = chooseClosestSplit(cqPrefix, text, findBoundaries(text, "(?<=[，,])"));
+        }
+        return parts;
+    }
+
+    private static boolean startsNaturalSecondBeat(String text) {
+        return text.startsWith("不过") || text.startsWith("但是") || text.startsWith("只是")
+                || text.startsWith("其实") || text.startsWith("然后") || text.startsWith("后来")
+                || text.startsWith("另外") || text.startsWith("反正") || text.startsWith("所以")
+                || text.startsWith("再说") || text.startsWith("这下") || text.startsWith("没事")
+                || text.startsWith("好吧") || text.startsWith("行吧") || text.startsWith("剩下");
+    }
+
+    private static List<Integer> findBoundaries(String text, String regex) {
+        List<Integer> boundaries = new ArrayList<>();
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile(regex).matcher(text);
+        while (matcher.find()) {
+            if (matcher.end() > 0 && matcher.end() < text.length()) boundaries.add(matcher.end());
+        }
+        return boundaries;
+    }
+
+    private static List<String> chooseClosestSplit(String cqPrefix, String text, List<Integer> boundaries) {
+        return chooseClosestSplit(cqPrefix, text, boundaries, MIN_AUTO_SPLIT_PART_CHARS);
+    }
+
+    private static List<String> chooseClosestSplit(String cqPrefix, String text, List<Integer> boundaries,
+                                                   int minPartChars) {
+        if (boundaries.isEmpty()) return Collections.emptyList();
+
+        int bestBoundary = -1;
+        int bestDistance = Integer.MAX_VALUE;
+        int midpoint = text.length() / 2;
+        for (int boundary : boundaries) {
+            String left = text.substring(0, boundary).trim();
+            String right = text.substring(boundary).trim();
+            if (left.length() < minPartChars || right.length() < minPartChars) {
+                continue;
+            }
+            int distance = Math.abs(boundary - midpoint);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestBoundary = boundary;
+            }
+        }
+        if (bestBoundary < 0) return Collections.emptyList();
+
+        String left = text.substring(0, bestBoundary).trim();
+        String right = text.substring(bestBoundary).trim();
+        List<String> parts = new ArrayList<>(2);
+        parts.add((cqPrefix + left).trim());
+        parts.add(right);
+        return parts;
     }
 
     /** 将时间戳转为相对时间标签，如 "今天 14:30"、"昨天 09:15" */

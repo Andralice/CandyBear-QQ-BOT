@@ -121,6 +121,7 @@ class BaiLianServiceReplySanitizationTest {
     void noReplyMarkerIsRecognizedAsInternalControlText() {
         assertTrue(BaiLianService.isNoReplyMarker("\n<NO_REPLY>\n"));
         assertFalse(BaiLianService.isNoReplyMarker("<NO_REPLY> 还有一句"));
+        assertTrue(BaiLianService.containsNoReplyMarker("<NO_REPLY> 还有一句"));
     }
 
     @Test

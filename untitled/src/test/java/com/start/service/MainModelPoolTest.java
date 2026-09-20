@@ -52,7 +52,7 @@ class MainModelPoolTest {
     }
 
     @Test
-    void keepsConfiguredPriorityAndKeepsCurrentWhenAllFail() {
+    void selectsFastestHealthyRouteAndKeepsCurrentWhenAllFail() {
         MainModelPool.Candidate first = MainModelPool.Candidate.fromBaseUrl(
                 "first", "https://one.example/v1", "first-model", "openai", "KEY", "key");
         MainModelPool.Candidate second = MainModelPool.Candidate.fromBaseUrl(
@@ -62,12 +62,12 @@ class MainModelPoolTest {
         MainModelPool pool = new MainModelPool(List.of(first, second, third), true, 10_000, 1_000);
         try {
             assertSame(first, pool.snapshot());
-            assertSame(first, pool.selectPreferred(List.of(
+            assertSame(second, pool.selectFastest(List.of(
                     MainModelPool.ProbeResult.healthy(first, 80, 12, 3),
                     MainModelPool.ProbeResult.healthy(second, 20, 14, 4),
                     MainModelPool.ProbeResult.healthy(third, 40, 16, 5))));
             assertEquals(new MainModelPool.ProbeUsage(3, 42, 12), pool.probeUsage());
-            assertSame(first, pool.selectPreferred(List.of(
+            assertSame(second, pool.selectFastest(List.of(
                     MainModelPool.ProbeResult.failed(first, 10, "HTTP 500"),
                     MainModelPool.ProbeResult.failed(second, 10, "timeout"),
                     MainModelPool.ProbeResult.failed(third, 10, "HTTP 429"))));
@@ -157,14 +157,14 @@ class MainModelPoolTest {
     }
 
     @Test
-    void doesNotReplaceConfiguredPrimaryWithFasterFallback() {
+    void requiresMateriallyFasterRouteBeforeSwitching() {
         MainModelPool.Candidate first = MainModelPool.Candidate.fromBaseUrl(
                 "first", "https://one.example/v1", "first-model", "openai", "KEY", "key");
         MainModelPool.Candidate second = MainModelPool.Candidate.fromBaseUrl(
                 "second", "https://two.example/v1", "second-model", "openai", "KEY", "key");
         MainModelPool pool = new MainModelPool(List.of(first, second), true, 10_000, 1_000);
         try {
-            assertSame(first, pool.selectPreferred(List.of(
+            assertSame(first, pool.selectFastest(List.of(
                     MainModelPool.ProbeResult.healthy(first, 100),
                     MainModelPool.ProbeResult.healthy(second, 91))));
         } finally {
@@ -173,7 +173,7 @@ class MainModelPoolTest {
 
         MainModelPool exactPool = new MainModelPool(List.of(first, second), true, 10_000, 1_000);
         try {
-            assertSame(first, exactPool.selectPreferred(List.of(
+            assertSame(second, exactPool.selectFastest(List.of(
                     MainModelPool.ProbeResult.healthy(first, 100),
                     MainModelPool.ProbeResult.healthy(second, 90))));
         } finally {
@@ -182,7 +182,7 @@ class MainModelPoolTest {
     }
 
     @Test
-    void returnsToFirstConfiguredRouteWhenItRecovers() {
+    void keepsFasterFallbackWhenFirstConfiguredRouteRecovers() {
         MainModelPool.Candidate first = MainModelPool.Candidate.fromBaseUrl(
                 "first", "https://one.example/v1", "first-model", "openai", "KEY", "key");
         MainModelPool.Candidate second = MainModelPool.Candidate.fromBaseUrl(
@@ -190,7 +190,7 @@ class MainModelPoolTest {
         MainModelPool pool = new MainModelPool(List.of(first, second), true, 10_000, 1_000);
         try {
             assertSame(second, pool.reportFailure(first, "HTTP 500"));
-            assertSame(first, pool.selectPreferred(List.of(
+            assertSame(second, pool.selectFastest(List.of(
                     MainModelPool.ProbeResult.healthy(first, 100),
                     MainModelPool.ProbeResult.healthy(second, 20))));
         } finally {

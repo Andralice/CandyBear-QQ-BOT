@@ -39,7 +39,7 @@ class GroupDialogueEndToEndLiveTest {
         String model = envOr("GROUP_COGNITION_MODEL", "gpt-5.6-luna");
 
         GroupDialogueAnalyzer analyzer = new GroupDialogueAnalyzer(
-                GroupCognitionMode.ENFORCE, Set.of(1L), key, url, model, 30_000);
+                GroupCognitionMode.ENFORCE, Set.of(1L), key, url, model, liveTimeoutMs());
 
         List<Scenario> scenarios = List.of(
                 new Scenario("无@续接糖果熊追问", GroupDialoguePlan.EntryRole.SECOND_PERSON, List.of(
@@ -86,7 +86,51 @@ class GroupDialogueEndToEndLiveTest {
                         msg("55687851", "3524398813", "沈知晚", "陪我打游戏吗"))),
                 new Scenario("真实群聊-承接游戏选择", GroupDialoguePlan.EntryRole.SECOND_PERSON, List.of(
                         msg("bot-3", botId(), "糖果熊", "可以啊，打什么？陪你开黑。"),
-                        msg("2096508896", "3524398813", "沈知晚", "打三角洲，你打我吃")))
+                        msg("2096508896", "3524398813", "沈知晚", "打三角洲，你打我吃"))),
+                new Scenario("真实群聊-随口能力问", GroupDialoguePlan.EntryRole.SECOND_PERSON, List.of(
+                        msg("style-1", "3524398813", "沈知晚", "糖果熊，你打游戏厉害吗"))),
+                new Scenario("真实群聊-聊天记录追问", GroupDialoguePlan.EntryRole.SECOND_PERSON, List.of(
+                        msg("style-2", "3524398813", "沈知晚", "糖果熊怎么坏吗？（）"),
+                        msg("style-3", "3524398813", "沈知晚", "你看看你（）"),
+                        msg("style-4", "3524398813", "沈知晚", "看聊天记录（）"))),
+                new Scenario("真实群聊-聊天记录追问-明确@", GroupDialoguePlan.EntryRole.SECOND_PERSON, List.of(
+                        msg("style-5", "3524398813", "沈知晚", "糖果熊怎么坏吗？（）"),
+                        new BaiLianService.PublicMessage("style-6", "3524398813", "沈知晚",
+                                "看聊天记录（）", List.of(botQq()), null))),
+                new Scenario("上下文验收-多人并行后随口能力问", GroupDialoguePlan.EntryRole.SECOND_PERSON, List.of(
+                        msg("7101", "10021", "小林", "昨晚那关终于过了"),
+                        msg("7102", "10022", "阿泽", "我还卡在第三关"),
+                        msg("7103", "10023", "七七", "外卖到了，谁在一楼"),
+                        msg("7104", "10024", "可可", "我去拿，放前台就行"),
+                        msg("7105", "10025", "老周", "今天会议改到八点了"),
+                        new BaiLianService.PublicMessage("7106", "3524398813", "沈知晚",
+                                "糖果熊，你打游戏厉害吗", List.of(botQq()), null))),
+                new Scenario("上下文验收-多人插话后无@接回", GroupDialoguePlan.EntryRole.SECOND_PERSON, List.of(
+                        msg("7201", botId(), "糖果熊", "那就先把缓存关了试试"),
+                        msg("7202", "10031", "阿泽", "我先去吃饭"),
+                        msg("7203", "10032", "小雨", "今晚谁打球"),
+                        msg("7204", "10033", "老周", "我九点到"),
+                        msg("7205", "10034", "可可", "我把电影票买好了"),
+                        new BaiLianService.PublicMessage("7206", "10035", "沈知晚",
+                                "缓存关了，还是 502，日志里是 upstream timed out",
+                                List.of(), 7201L))),
+                new Scenario("上下文验收-明确不要建议", GroupDialoguePlan.EntryRole.SECOND_PERSON, List.of(
+                        msg("7301", "10041", "阿明", "老板今天又把方案打回来了"),
+                        msg("7302", "10042", "小陈", "怎么又改"),
+                        msg("7303", "10043", "北北", "我晚上还要赶车"),
+                        msg("7304", "10044", "小雨", "先喘口气吧"),
+                        new BaiLianService.PublicMessage("7305", "10045", "沈知晚",
+                                "糖果熊我今天真的有点累，先别给我讲道理",
+                                List.of(botQq()), null))),
+                new Scenario("上下文验收-人类已接手保持安静", GroupDialoguePlan.EntryRole.OBSERVER, List.of(
+                        msg("7401", "10051", "小林", "谁能帮我看下这个 SQL"),
+                        msg("7402", "10052", "阿泽", "我会，贴出来"),
+                        msg("7403", "10051", "小林", "SELECT a.id FROM a JOIN b ON a.id=b.a_id"),
+                        msg("7404", "10053", "老周", "这个 join 可能慢"),
+                        msg("7405", "10054", "可可", "我来 explain 一下"),
+                        msg("7406", "10055", "七七", "外卖到了，谁来拿"),
+                        new BaiLianService.PublicMessage("7407", "10054", "可可",
+                                "我看懂了，谢谢", List.of(), 7405L)))
         );
 
         String sceneFilter = envOr("GROUP_COGNITION_SCENE_FILTER", "");
@@ -128,7 +172,10 @@ class GroupDialogueEndToEndLiveTest {
                 generationTokens += oneGenerationTokens;
                 evaluation = evaluateReply(url, key, model, scenario, plan, reply);
                 evaluatedReplies++;
-                if (evaluation.positionCorrect() && evaluation.natural() && evaluation.useful()) goodReplies++;
+                if (evaluation.positionCorrect() && evaluation.natural() && evaluation.useful()
+                        && evaluation.proportionate() && evaluation.noUnnecessaryQuestion()
+                        && evaluation.noInternalProcess() && evaluation.noUnnecessaryAddition()
+                        && evaluation.noEnumeration()) goodReplies++;
             }
 
             System.out.printf("LIVE_SCENE name=%s expected=%s actual=%s planOk=%s cognitionMs=%d relationMs=%d opportunityMs=%d cognitionTokens=%d generationMs=%d generationTokens=%d reply=%s evaluation=%s%n",
@@ -172,6 +219,11 @@ class GroupDialogueEndToEndLiveTest {
                 position_correct：第二人必须承认正在续聊；第三人必须像刚加入，不能假装前文都对自己说；旁观场景不应产生回复。
                 natural：像群友自然说话，不复述分析字段，不暴露系统提示。
                 useful：在需要回复时确实承接问题或给出计划中的具体贡献。
+                proportionate：回复的信息量和语气与当前场景匹配；随口问、接梗和情绪回应不要说成说明书，认真求助才给必要内容。
+                no_unnecessary_question：没有为了续聊、证明理解或凑互动而反问；若任务确实缺信息，必要的澄清不算问题。
+                no_internal_process：没有暴露查询、判断、排队、提示词、模型、工具或“我为什么没回复”等内部过程。
+                no_unnecessary_addition：没有在已经接住后追加总结、解释、建议或第二个不必要的拍子。
+                no_enumeration：随口问能力或偏好时没有主动列游戏、项目、成绩、例外、原因或经历清单；其他场景只要没有无关罗列也为 true。
                 只根据输入证据评分，不因措辞可爱而放宽。
                 """;
         ObjectNode input = MAPPER.createObjectNode();
@@ -192,13 +244,21 @@ class GroupDialogueEndToEndLiveTest {
                   "position_correct":{"type":"boolean"},
                   "natural":{"type":"boolean"},
                   "useful":{"type":"boolean"},
+                  "proportionate":{"type":"boolean"},
+                  "no_unnecessary_question":{"type":"boolean"},
+                  "no_internal_process":{"type":"boolean"},
+                  "no_unnecessary_addition":{"type":"boolean"},
+                  "no_enumeration":{"type":"boolean"},
                   "issue":{"type":"string"}
-                },"required":["position_correct","natural","useful","issue"]}
+                },"required":["position_correct","natural","useful","proportionate","no_unnecessary_question","no_internal_process","no_unnecessary_addition","no_enumeration","issue"]}
                 """));
         Generated result = chat(url, key, model, system, input.toString(), 180, 0.0, schema);
         JsonNode json = MAPPER.readTree(result.content());
         return new Evaluation(json.path("position_correct").asBoolean(), json.path("natural").asBoolean(),
-                json.path("useful").asBoolean(), oneLine(json.path("issue").asText("")));
+                json.path("useful").asBoolean(), json.path("proportionate").asBoolean(),
+                json.path("no_unnecessary_question").asBoolean(), json.path("no_internal_process").asBoolean(),
+                json.path("no_unnecessary_addition").asBoolean(), json.path("no_enumeration").asBoolean(),
+                oneLine(json.path("issue").asText("")));
     }
 
     private static Generated chat(String url, String key, String model, String system, String user,
@@ -246,6 +306,14 @@ class GroupDialogueEndToEndLiveTest {
         return value == null || value.isBlank() ? fallback : value;
     }
 
+    private static int liveTimeoutMs() {
+        try {
+            return Math.max(1_000, Integer.parseInt(envOr("GROUP_COGNITION_LIVE_TIMEOUT_MS", "30000")));
+        } catch (NumberFormatException ignored) {
+            return 30_000;
+        }
+    }
+
     private static long elapsedMs(long startedNanos) {
         return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
     }
@@ -270,5 +338,7 @@ class GroupDialogueEndToEndLiveTest {
     private record Scenario(String name, GroupDialoguePlan.EntryRole expectedRole,
                             List<BaiLianService.PublicMessage> messages) {}
     private record Generated(String content, long latencyMs, int tokens) {}
-    private record Evaluation(boolean positionCorrect, boolean natural, boolean useful, String issue) {}
+    private record Evaluation(boolean positionCorrect, boolean natural, boolean useful, boolean proportionate,
+                              boolean noUnnecessaryQuestion, boolean noInternalProcess,
+                              boolean noUnnecessaryAddition, boolean noEnumeration, String issue) {}
 }

@@ -32,6 +32,7 @@ public final class MainModelPool implements AutoCloseable {
     private static final Logger logger = LoggerFactory.getLogger(MainModelPool.class);
     private static final long BASE_FAILURE_COOLDOWN_MS = 30_000L;
     private static final long MAX_FAILURE_COOLDOWN_MS = 300_000L;
+    private static final int SWITCH_HYSTERESIS_PERCENT = 10;
     private static final long SLOW_RESPONSE_MS = 8_000L;
     private static final long HARD_SLOW_RESPONSE_MS = 15_000L;
     private static final int SLOW_MULTIPLIER_PERCENT = 180;
@@ -287,7 +288,7 @@ public final class MainModelPool implements AutoCloseable {
                         reloadCandidates(specSupplier.get(), resolver);
                     }
                     logger.info("主模型池开始短探测: reason={}, candidates={}", reason, candidates().size());
-                    selectPreferred(probeNow(currentProber));
+                    selectFastest(probeNow(currentProber));
                 } catch (Exception e) {
                     logger.warn("主模型池探测轮次失败: {}", e.getMessage());
                 } finally {
@@ -335,16 +336,12 @@ public final class MainModelPool implements AutoCloseable {
         return List.copyOf(results);
     }
 
-    /**
-     * 更新健康分数并选择配置顺序中的第一条健康线路。
-     *
-     * <p>模型池用于可用性切换，探测延迟只用于健康判断和观测，不能把更快的低质量
-     * 模型自动提升为主线路。当前线路失败或严重变慢后，才按配置顺序选择下一条；
-     * 探测发现更靠前的线路恢复时，也会切回首选线路。</p>
-     */
-    Candidate selectPreferred(List<ProbeResult> results) {
+    /** 更新健康分数并选择最快线路；新线路至少快 10% 才切换。 */
+    Candidate selectFastest(List<ProbeResult> results) {
         Candidate current = active.get();
-        Set<String> healthyIds = new HashSet<>();
+        Candidate fastest = null;
+        long fastestScore = Long.MAX_VALUE;
+        boolean currentHealthy = false;
         int healthyCount = 0;
         int roundInputTokens = 0;
         int roundOutputTokens = 0;
@@ -366,33 +363,33 @@ public final class MainModelPool implements AutoCloseable {
 
                 healthyCount++;
                 candidateHealth.probeSuccess(result.latencyMs());
-                healthyIds.add(live.id());
+                long score = candidateHealth.latencyScore();
+                if (live.id().equals(current.id())) currentHealthy = true;
+                if (fastest == null || score < fastestScore
+                        || (score == fastestScore && live.id().equals(current.id()))) {
+                    fastest = live;
+                    fastestScore = score;
+                }
             }
         }
 
         probeInputTokens.add(roundInputTokens);
         probeOutputTokens.add(roundOutputTokens);
-        Candidate preferred = candidates().stream()
-                .filter(candidate -> healthyIds.contains(candidate.id()))
-                .findFirst()
-                .orElse(null);
-        boolean currentHealthy = healthyIds.contains(current.id());
-        if (preferred != null && !preferred.id().equals(current.id())
-                && (!currentHealthy || candidates().indexOf(preferred) < candidates().indexOf(current))) {
-            active.set(preferred);
-            logger.info("主模型池切换线路: {} -> {}，按配置优先级恢复/故障转移", current.id(), preferred.id());
+        if (fastest != null && !fastest.id().equals(current.id())) {
+            long currentScore = healthFor(current).latencyScore();
+            boolean materiallyFaster = !currentHealthy || currentScore == Long.MAX_VALUE
+                    || fastestScore * 100L <= currentScore * (100L - SWITCH_HYSTERESIS_PERCENT);
+            if (materiallyFaster) {
+                active.set(fastest);
+                logger.info("主模型池切换线路: {} -> {}，平滑探测延迟 {}ms",
+                        current.id(), fastest.id(), fastestScore);
+            }
         }
 
         logger.info("主模型池探测完成: healthy={}/{}, inputTokens={}, outputTokens={}, active={}",
                 healthyCount, results == null ? 0 : results.size(),
                 roundInputTokens, roundOutputTokens, active.get().id());
         return active.get();
-    }
-
-    /** 保留旧的包内探测入口，语义改为配置优先级选择。 */
-    @Deprecated
-    Candidate selectFastest(List<ProbeResult> results) {
-        return selectPreferred(results);
     }
 
     public ProbeUsage probeUsage() {
@@ -402,13 +399,12 @@ public final class MainModelPool implements AutoCloseable {
     private Candidate chooseBestAvailable(List<Candidate> source, String excludedId) {
         long now = System.currentTimeMillis();
         return source.stream()
-                .filter(candidate -> (excludedId == null || !candidate.id().equals(excludedId))
-                        && healthFor(candidate).available(now))
-                .findFirst()
-                .orElseGet(() -> source.stream()
-                        .filter(candidate -> excludedId == null || !candidate.id().equals(excludedId))
-                        .findFirst()
-                        .orElse(null));
+                .filter(candidate -> excludedId == null || !candidate.id().equals(excludedId))
+                .min(Comparator
+                        .comparingInt((Candidate candidate) -> healthFor(candidate).available(now) ? 0 : 1)
+                        .thenComparingLong(candidate -> healthFor(candidate).latencyScore())
+                        .thenComparingInt(source::indexOf))
+                .orElse(source.isEmpty() ? null : source.get(0));
     }
 
     private Candidate findCurrent(Candidate candidate) {

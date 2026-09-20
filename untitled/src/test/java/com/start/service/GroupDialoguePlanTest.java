@@ -61,6 +61,19 @@ class GroupDialoguePlanTest {
     }
 
     @Test
+    void casualQuestionDoesNotInviteSupplementalLists() {
+        GroupDialoguePlan.Relation relation = new GroupDialoguePlan.Relation(
+                "u3", List.of("bot"), "游戏能力", "u3询问糖果熊",
+                GroupDialoguePlan.BotRole.ACTIVE_SECOND_PERSON, true, "u3", "m4",
+                "直接回答随口问题", GroupDialoguePlan.InteractionMode.CASUAL_QUESTION, List.of());
+
+        GroupDialoguePlan plan = GroupDialoguePlan.merge(relation, opportunity(false, ""), 0, 0, 0);
+
+        assertTrue(plan.toPromptNarrative().contains("能力或偏好问题只给总体判断"));
+        assertTrue(plan.toPromptNarrative().contains("不列举项目、成绩、例外、原因或经历"));
+    }
+
+    @Test
     void modeParsingIsFailClosed() {
         assertEquals(GroupCognitionMode.SHADOW, GroupCognitionMode.parse("shadow"));
         assertEquals(GroupCognitionMode.ENFORCE, GroupCognitionMode.parse(" ENFORCE "));
