@@ -65,6 +65,7 @@ class PromptBuilderGroundingTest {
         assertTrue(prompt.contains("不虚构手疼、接口状态或其他理由"));
         assertTrue(prompt.contains("灵动不等于堆字或只剩空泛确认"));
         assertTrue(prompt.contains("灵动来自即时反应，不是话术清单"));
+        assertTrue(prompt.contains("一句话已经能自然说完时，就只说这一句"));
         assertTrue(prompt.contains("像“你打游戏厉害吗”“你喜欢什么”这种随口的能力或偏好问"));
         assertTrue(prompt.contains("不主动列举项目、成绩、例外、原因或经历"));
         assertTrue(prompt.contains("不要把‘记录只到哪天’、‘就照实说’、‘别编’、‘按规则判断’等内部自我提醒写给群友"));
