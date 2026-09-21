@@ -38,7 +38,7 @@ import java.util.regex.Pattern;
  * </ul>
  *
  * <p>关键词来源：由视觉模型直接提取发送场景情绪词（auto_keywords），管理员可覆盖（keywords 字段）。
- * StickerTool 检索时优先用 keywords，回退到 auto_keywords，最后回退到 face 表情。
+ * StickerTool 检索时优先用 keywords，回退到 auto_keywords；没有真实图片时不发送 QQ 内置表情。
  *
  * <p>存储位置（相对运行目录）：
  * <ul>

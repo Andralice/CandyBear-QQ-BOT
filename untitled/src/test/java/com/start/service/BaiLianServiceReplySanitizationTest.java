@@ -125,9 +125,10 @@ class BaiLianServiceReplySanitizationTest {
     }
 
     @Test
-    void stickerAndImageCqCodesArePreserved() {
-        String cq = "[CQ:face,id=14][CQ:image,file=test.png]";
-        assertEquals(cq, BaiLianService.sanitizePublicReply("发表情包", cq));
+    void faceCqCodesAreRemovedButAllowedMediaCqCodesArePreserved() {
+        String cq = "[CQ:face,id=14][CQ:mface,summary=笑][CQ:at,qq=123][CQ:image,file=test.png]";
+        assertEquals("[CQ:at,qq=123][CQ:image,file=test.png]",
+                BaiLianService.sanitizePublicReply("发表情包", cq));
     }
 
     @Test

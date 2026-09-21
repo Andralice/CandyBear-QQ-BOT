@@ -244,6 +244,7 @@ public final class GroupDialogueAnalyzer {
         if (messages == null || messages.isEmpty()) return root.toString();
 
         int start = Math.max(0, messages.size() - MAX_CONTEXT_MESSAGES);
+        boolean hasImageEvidence = false;
         for (int i = start; i < messages.size(); i++) {
             BaiLianService.PublicMessage message = messages.get(i);
             ObjectNode item = array.addObject();
@@ -252,11 +253,29 @@ public final class GroupDialogueAnalyzer {
             item.put("sender_name", message.nickname);
             item.put("is_bot", String.valueOf(BotConfig.getBotQq()).equals(message.userId));
             item.put("text", truncate(message.content, MAX_MESSAGE_CHARS));
+            String segmentSummary = message.segmentSummary == null
+                    ? "" : message.segmentSummary.trim();
+            if (segmentSummary.isBlank()) {
+                segmentSummary = message.content == null || message.content.isBlank()
+                        ? "未记录消息段类型" : "文字";
+            }
+            boolean hasImage = segmentSummary.contains("图片");
+            hasImageEvidence |= hasImage;
+            item.put("message_parts", segmentSummary);
+            item.put("has_image", hasImage);
+            if (hasImage) {
+                // Image identity is evidence for turn attribution only. The actual
+                // pixels stay behind the main-model/Vision path until needed.
+                item.put("image_content", "图片存在但未读取画面，不能据此猜测");
+            }
             ArrayNode mentions = item.putArray("mentions");
             for (Long at : message.atUserIds) mentions.add(String.valueOf(at));
             item.put("mentions_bot", message.atUserIds.contains(BotConfig.getBotQq()));
             item.put("reply_to", message.replyToMessageId == null ? "" : String.valueOf(message.replyToMessageId));
             item.put("reply_to_sender_id", resolveReplySender(messages, message.replyToMessageId));
+        }
+        if (hasImageEvidence) {
+            root.put("image_evidence_note", "证据链中有图片，但这里只确认图片所在消息和身份，不包含画面内容；只有图片会改变语境时才主动查看对应原图。");
         }
         return root.toString();
     }
@@ -325,12 +344,7 @@ public final class GroupDialogueAnalyzer {
                         int tokens;
                         if (llmProtocol.isAnthropic()) {
                             JsonNode message = LlmProtocol.normalizeAssistantResponse(MAPPER, root, llmProtocol);
-                            JsonNode toolCalls = message.path("tool_calls");
-                            if (!toolCalls.isArray() || toolCalls.isEmpty()) {
-                                content = LlmProtocol.extractText(message);
-                            } else {
-                                content = toolCalls.get(0).path("function").path("arguments").asText("");
-                            }
+                            content = structuredResponseText(message, taskName);
                             tokens = root.path("usage").path("input_tokens").asInt(0)
                                     + root.path("usage").path("output_tokens").asInt(0);
                         } else {
@@ -339,24 +353,56 @@ public final class GroupDialogueAnalyzer {
                                 throw new IllegalStateException(taskName + " response has no choices");
                             }
                             JsonNode message = choices.get(0).path("message");
-                            if ("tools".equals(protocol)) {
-                                JsonNode toolCalls = message.path("tool_calls");
-                                if (!toolCalls.isArray() || toolCalls.isEmpty()) {
-                                    throw new IllegalStateException(taskName + " response has no tool call");
-                                }
-                                content = toolCalls.get(0).path("function").path("arguments").asText("");
-                            } else {
-                                content = message.path("content").asText("");
-                            }
+                            // Some OpenAI-compatible providers honor tools, while others return the
+                            // requested object in message.content. Both forms are valid for analysis.
+                            content = structuredResponseText(message, taskName);
                             tokens = root.path("usage").path("prompt_tokens").asInt(0)
                                     + root.path("usage").path("completion_tokens").asInt(0);
                         }
-                        if (content.isBlank()) throw new IllegalStateException(taskName + " response is empty");
-                        return new Part(MAPPER.readTree(content), latencyMs, tokens);
+                        return new Part(parseStructuredJson(content), latencyMs, tokens);
                     } catch (Exception e) {
                         throw new IllegalStateException(taskName + " response parse failed", e);
                     }
                 });
+    }
+
+    private static String structuredResponseText(JsonNode message, String taskName) {
+        JsonNode toolCalls = message == null ? null : message.path("tool_calls");
+        if (toolCalls != null && toolCalls.isArray() && !toolCalls.isEmpty()) {
+            String arguments = toolCalls.get(0).path("function").path("arguments").asText("").trim();
+            if (!arguments.isEmpty()) return arguments;
+        }
+        String text = LlmProtocol.extractText(message);
+        if (text == null || text.isBlank()) {
+            JsonNode rawContent = message == null ? null : message.get("content");
+            if (rawContent != null && rawContent.isObject()) text = rawContent.toString();
+        }
+        if (text == null || text.isBlank()) {
+            throw new IllegalStateException(taskName + " response is empty");
+        }
+        return text.trim();
+    }
+
+    /** 兼容纯 JSON、Markdown JSON 围栏和带少量前后说明的兼容线路返回。 */
+    static JsonNode parseStructuredJson(String content) throws Exception {
+        if (content == null || content.isBlank()) throw new IllegalArgumentException("structured response is empty");
+        String candidate = content.trim();
+        if (candidate.startsWith("```") && candidate.endsWith("```")) {
+            int firstLine = candidate.indexOf('\n');
+            candidate = firstLine >= 0
+                    ? candidate.substring(firstLine + 1, candidate.length() - 3).trim()
+                    : candidate.substring(3, candidate.length() - 3).trim();
+        }
+        int objectStart = candidate.indexOf('{');
+        int objectEnd = candidate.lastIndexOf('}');
+        if (objectStart >= 0 && objectEnd > objectStart) {
+            candidate = candidate.substring(objectStart, objectEnd + 1);
+        }
+        JsonNode parsed = MAPPER.readTree(candidate);
+        if (parsed == null || !parsed.isObject()) {
+            throw new IllegalArgumentException("structured response is not an object");
+        }
+        return parsed;
     }
 
     private static ObjectNode buildTool(String name, JsonNode responseFormat) {

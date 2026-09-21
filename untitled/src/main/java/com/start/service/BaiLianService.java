@@ -238,6 +238,13 @@ public class BaiLianService implements AutoCloseable {
     private final int bailianMaxRetries = BotConfig.getBaiLianMaxRetries();
     private final String baiLianReasoningEffort = BotConfig.getBaiLianReasoningEffort();
 
+    private final String auxiliaryApiKey = BotConfig.getAuxiliaryApiKey();
+    private final String auxiliaryUrl = LlmProtocol.endpoint(
+            BotConfig.getAuxiliaryBaseUrl(), LlmProtocol.Type.OPENAI);
+    private final String auxiliaryModel = BotConfig.getAuxiliaryModel();
+    private final int auxiliaryTimeoutMs = BotConfig.getAuxiliaryTimeoutMs();
+    private final int auxiliaryMaxRetries = BotConfig.getAuxiliaryMaxRetries();
+
     private final String agentApiKey = BotConfig.getAgentApiKey();
     private final String agentBaseUrl = BotConfig.getAgentBaseUrl();
     private final String agentModel = BotConfig.getAgentModel();
@@ -1041,7 +1048,12 @@ public class BaiLianService implements AutoCloseable {
                 ctx.numberGameDesc(gameStateService.getOrCreateNumber(groupId).getDescription());
             }
 
+            String turnEvidence = groupId != null
+                    ? buildTurnEvidence(getPublicGroupHistory(groupId), excludedPublicMessageIds)
+                    : "";
+
             ctx.publicGroupContext(publicGroupContext)
+               .turnEvidence(turnEvidence)
                .timeContext(timeContext)
                .allowSilence(allowSilence);
 
@@ -1689,6 +1701,7 @@ public class BaiLianService implements AutoCloseable {
         // 历史消息带有 [MM-dd HH:mm] / [HH:mm] 前缀，模型偶尔会照抄到公开回复；只清理行首和 <msg> 后的内部前缀。
         text = stripInternalTimestampPrefixes(userPrompt, text);
         text = normalizeBareAtCqCodes(text);
+        text = stripDisallowedCqCodes(text);
         text = stripEmojiAndKaomoji(text);
 
         boolean identityQuestion = asksIdentity(userPrompt);
@@ -1762,6 +1775,14 @@ public class BaiLianService implements AutoCloseable {
         }
         bare.appendTail(result);
         return result.toString();
+    }
+
+    /** 普通回复允许 @ 和真实媒体；QQ 内置 face/mface 不属于允许的表情包输出。 */
+    public static String stripDisallowedCqCodes(String text) {
+        if (text == null || text.isEmpty()) return text == null ? "" : text;
+        return java.util.regex.Pattern.compile("(?i)\\[CQ:(?:face|mface)(?:,[^\\]]*)?\\]")
+                .matcher(text)
+                .replaceAll("");
     }
 
     public static String stripEmojiAndKaomoji(String text) {
@@ -1872,7 +1893,7 @@ public class BaiLianService implements AutoCloseable {
             return "[用户发送了" + imageDataUris.size() + "张图片]";
         }
 
-        String visionUrl = BotConfig.getVisionBaseUrl();
+        String visionUrl = LlmProtocol.endpoint(BotConfig.getVisionBaseUrl(), LlmProtocol.Type.OPENAI);
         String visionKey = BotConfig.getVisionApiKey();
         String visionModel = BotConfig.getVisionModel();
 
@@ -1937,7 +1958,7 @@ public class BaiLianService implements AutoCloseable {
     public String classifyStickerImages(List<String> imageDataUris) {
         if (imageDataUris == null || imageDataUris.isEmpty() || !BotConfig.isVisionEnabled()) return "";
 
-        String visionUrl = BotConfig.getVisionBaseUrl();
+        String visionUrl = LlmProtocol.endpoint(BotConfig.getVisionBaseUrl(), LlmProtocol.Type.OPENAI);
         String visionKey = BotConfig.getVisionApiKey();
         String visionModel = BotConfig.getVisionModel();
         if (visionKey == null || visionKey.isBlank()) return "";
@@ -2002,50 +2023,44 @@ public class BaiLianService implements AutoCloseable {
 
     /** 简单调用聊天模型，返回纯文本响应（无工具、无会话、无状态注入） */
     public String generateRaw(String prompt) {
-        reloadMainModelPoolConfig();
-        List<MainModelPool.Candidate> routes = mainModelPool.attemptOrder();
-        int attempts = mainModelPool.isEnabled()
-                ? Math.min(MAX_RUNTIME_ROUTE_ATTEMPTS, routes.size())
-                : 1;
-        for (int i = 0; i < attempts; i++) {
-            MainModelPool.Candidate route = routes.get(i);
-            try {
-                List<Map<String, Object>> messages = List.of(
-                        Map.of("role", "user", "content", prompt));
-                Map<String, Object> body = LlmProtocol.buildRequestBody(
-                        route.protocol(), route.model(), "", messages, Collections.emptyList(),
-                        8192, "", route.thinkingDisabled());
-                body.put("temperature", 0.8);
-
-                String jsonBody = MAPPER.writeValueAsString(body);
-                HttpRequest request = LlmProtocol.addAuthHeaders(HttpRequest.newBuilder()
-                                .uri(URI.create(route.endpoint())), route.protocol(), route.apiKey())
-                        .header("Content-Type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
-                        .timeout(Duration.ofSeconds(120))
-                        .build();
-                int retries = mainModelPool.isEnabled() ? 0 : this.bailianMaxRetries;
-                HttpResponse<String> response = BailianRetryExecutor.executeHttp(
-                        "generateRaw 线路 " + route.id(),
-                        () -> httpClient.send(request, HttpResponse.BodyHandlers.ofString()),
-                        retries);
-                if (response.statusCode() != 200) {
-                    throw new RuntimeException("HTTP " + response.statusCode());
-                }
-                JsonNode root = MAPPER.readTree(response.body());
-                if (root.has("error")) throw new RuntimeException("provider error");
-                JsonNode message = LlmProtocol.normalizeAssistantResponse(MAPPER, root, route.protocol());
-                String text = LlmProtocol.extractText(message).trim();
-                if (text.isEmpty()) throw new RuntimeException("empty assistant response");
-                mainModelPool.reportSuccess(route);
-                return text;
-            } catch (Exception e) {
-                mainModelPool.reportFailure(route, e.getClass().getSimpleName() + ": " + e.getMessage());
-                logger.warn("generateRaw 线路 {} 失败，第 {}/{} 条候选: {}",
-                        route.id(), i + 1, attempts, e.getMessage());
-            }
+        if (auxiliaryApiKey == null || auxiliaryApiKey.isBlank()
+                || auxiliaryUrl == null || auxiliaryUrl.isBlank() || auxiliaryModel.isBlank()) {
+            logger.warn("generateRaw 未配置后台 Luna 路由，跳过辅助调用");
+            return "";
         }
-        return "";
+        try {
+            List<Map<String, Object>> messages = List.of(
+                    Map.of("role", "user", "content", prompt == null ? "" : prompt));
+            Map<String, Object> body = LlmProtocol.buildRequestBody(
+                    LlmProtocol.Type.OPENAI, auxiliaryModel, "", messages, Collections.emptyList(),
+                    8192, "");
+            body.put("temperature", 0.8);
+
+            String jsonBody = MAPPER.writeValueAsString(body);
+            HttpRequest request = LlmProtocol.addAuthHeaders(HttpRequest.newBuilder()
+                            .uri(URI.create(auxiliaryUrl)), LlmProtocol.Type.OPENAI, auxiliaryApiKey)
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
+                    .timeout(Duration.ofMillis(auxiliaryTimeoutMs))
+                    .build();
+            HttpResponse<String> response = BailianRetryExecutor.executeHttp(
+                    "generateRaw Luna",
+                    () -> httpClient.send(request, HttpResponse.BodyHandlers.ofString()),
+                    auxiliaryMaxRetries);
+            if (response.statusCode() != 200) {
+                throw new RuntimeException("HTTP " + response.statusCode());
+            }
+            JsonNode root = MAPPER.readTree(response.body());
+            if (root.has("error")) throw new RuntimeException("provider error");
+            JsonNode message = LlmProtocol.normalizeAssistantResponse(
+                    MAPPER, root, LlmProtocol.Type.OPENAI);
+            String text = LlmProtocol.extractText(message).trim();
+            if (text.isEmpty()) throw new RuntimeException("empty assistant response");
+            return text;
+        } catch (Exception e) {
+            logger.warn("generateRaw Luna 失败: {}", e.getMessage());
+            return "";
+        }
     }
 
     public String generateForAgent(String userPrompt, List<Tool> tools) {
@@ -2161,11 +2176,9 @@ public class BaiLianService implements AutoCloseable {
         }
     }
 
-    // ===== 消息分段：尊重模型显式协议，并在长回复已有自然句界时分拍 =====
-    private static final int AUTO_SPLIT_MIN_CHARS = 56;
-    private static final int SHORT_BEAT_MIN_CHARS = 20;
+    // ===== 消息分段：尊重模型显式协议，并只在内容确实偏长时寻找自然句界 =====
+    private static final int AUTO_SPLIT_MIN_CHARS = 120;
     private static final int MIN_AUTO_SPLIT_PART_CHARS = 12;
-    private static final int MIN_SHORT_SPLIT_PART_CHARS = 8;
 
     public static List<String> splitIntoShortMessages(String reply) {
         if (reply == null || reply.trim().isEmpty()) {
@@ -2187,16 +2200,17 @@ public class BaiLianService implements AutoCloseable {
                 String part = msgMatcher.group(1).trim();
                 if (!part.isEmpty()) parts.add(part);
             }
-            if (!parts.isEmpty()) return parts;
+            if (!parts.isEmpty()) return limitToTwoParts(parts);
         }
 
         // 旧格式兜底（|---| 分隔符，向后兼容旧 Prompt）
         if (reply.contains("|---|")) {
-            return Arrays.stream(reply.split("\\|---\\|"))
+            List<String> parts = Arrays.stream(reply.split("\\|---\\|"))
                     .map(String::trim)
                     .map(s -> s.replaceAll("\\n{2,}", "\n"))
                     .filter(s -> !s.isEmpty())
                     .collect(java.util.stream.Collectors.toList());
+            return limitToTwoParts(parts);
         }
 
         // 提取开头的 CQ 码，避免切分时截断
@@ -2212,7 +2226,7 @@ public class BaiLianService implements AutoCloseable {
             return Arrays.asList(cqPrefix + reply);
         }
 
-        // 普通回复只在确实偏长且存在完整句界时自动分成最多两拍。
+        // 普通回复只在确实偏长且存在完整句界时自动分拍；短回复保持模型原样，避免固定双消息节奏。
         if (reply.length() <= 600) {
             List<String> naturalParts = splitNaturalBeats(cqPrefix, reply);
             return naturalParts.isEmpty() ? List.of(cqPrefix + reply) : naturalParts;
@@ -2242,11 +2256,22 @@ public class BaiLianService implements AutoCloseable {
         }
         if (current.length() > 0) parts.add(current.toString());
 
-        final int MAX_PARTS = 10;
-        if (parts.size() > MAX_PARTS) {
-            return new ArrayList<>(parts.subList(0, MAX_PARTS));
-        }
-        return parts.isEmpty() ? Arrays.asList(cqPrefix + reply) : parts;
+        return parts.isEmpty() ? Arrays.asList(cqPrefix + reply) : limitToTwoParts(parts);
+    }
+
+    /** 出站最多两拍；合并尾部而不是静默丢掉模型已经写出的事实。 */
+    private static List<String> limitToTwoParts(List<String> parts) {
+        if (parts == null || parts.isEmpty()) return Collections.emptyList();
+        if (parts.size() <= 2) return List.copyOf(parts);
+        String first = parts.get(0) == null ? "" : parts.get(0).trim();
+        String tail = parts.subList(1, parts.size()).stream()
+                .filter(Objects::nonNull)
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .collect(Collectors.joining("\n"));
+        if (first.isEmpty()) return List.of(tail);
+        if (tail.isEmpty()) return List.of(first);
+        return List.of(first, tail);
     }
 
     private static boolean isStructuredReply(String text) {
@@ -2256,27 +2281,13 @@ public class BaiLianService implements AutoCloseable {
     }
 
     private static List<String> splitNaturalBeats(String cqPrefix, String text) {
-        if (text.length() < SHORT_BEAT_MIN_CHARS) return Collections.emptyList();
+        if (text.length() < AUTO_SPLIT_MIN_CHARS) return Collections.emptyList();
 
         List<Integer> sentenceBoundaries = findBoundaries(
                 text, "(?<=[。！？；~?!…])(?![。！？；~?!…])");
         List<String> parts = Collections.emptyList();
-        if (text.length() >= AUTO_SPLIT_MIN_CHARS) {
-            parts = chooseClosestSplit(cqPrefix, text, sentenceBoundaries);
-            if (!parts.isEmpty()) return parts;
-        }
-
-        // Short replies are split only when the second sentence clearly starts a
-        // new beat ("不过...", "然后..."), rather than cutting every two-sentence reply.
-        if (text.length() >= SHORT_BEAT_MIN_CHARS) {
-            for (int boundary : sentenceBoundaries) {
-                String right = text.substring(boundary).trim();
-                if (startsNaturalSecondBeat(right)) {
-                    parts = chooseClosestSplit(cqPrefix, text, List.of(boundary), MIN_SHORT_SPLIT_PART_CHARS);
-                    if (!parts.isEmpty()) return parts;
-                }
-            }
-        }
+        parts = chooseClosestSplit(cqPrefix, text, sentenceBoundaries);
+        if (!parts.isEmpty()) return parts;
 
         // A long single sentence can still have two readable clauses; only use a comma
         // when both sides are substantial enough to stand on their own.
@@ -2284,14 +2295,6 @@ public class BaiLianService implements AutoCloseable {
             parts = chooseClosestSplit(cqPrefix, text, findBoundaries(text, "(?<=[，,])"));
         }
         return parts;
-    }
-
-    private static boolean startsNaturalSecondBeat(String text) {
-        return text.startsWith("不过") || text.startsWith("但是") || text.startsWith("只是")
-                || text.startsWith("其实") || text.startsWith("然后") || text.startsWith("后来")
-                || text.startsWith("另外") || text.startsWith("反正") || text.startsWith("所以")
-                || text.startsWith("再说") || text.startsWith("这下") || text.startsWith("没事")
-                || text.startsWith("好吧") || text.startsWith("行吧") || text.startsWith("剩下");
     }
 
     private static List<Integer> findBoundaries(String text, String regex) {
@@ -2428,6 +2431,8 @@ public class BaiLianService implements AutoCloseable {
     private static final long PUBLIC_HISTORY_MAX_AGE_MS = 20 * 60_000L;
     private static final int PUBLIC_CONTEXT_CHAR_BUDGET = 1_600;
     private static final int PUBLIC_MESSAGE_CHAR_LIMIT = 280;
+    private static final int TURN_EVIDENCE_MESSAGE_LIMIT = 12;
+    private static final int TURN_EVIDENCE_CHAR_BUDGET = 2_600;
 
     // 存储每个群最近一小段完整发言（含发言人）；SceneState 负责更长跨度的主题压缩。
     private final Map<String, Deque<PublicMessage>> publicGroupHistory = new ConcurrentHashMap<>();
@@ -2437,20 +2442,31 @@ public class BaiLianService implements AutoCloseable {
         public final String userId;
         public final String nickname;
         public final String content;
+        /** 消息段摘要，例如“文字、图片、回复消息123”，用于关系判断而非内容理解。 */
+        public final String segmentSummary;
+        /** Vision 对同一 message_id 的描述；为空表示当前没有可核对的画面内容。 */
+        public volatile String imageDescription;
         public final List<Long> atUserIds;
         public final Long replyToMessageId;
         public final long timestamp;
 
         public PublicMessage(String messageId, String userId, String nickname, String content) {
-            this(messageId, userId, nickname, content, Collections.emptyList(), null);
+            this(messageId, userId, nickname, content, Collections.emptyList(), null, "");
         }
 
         public PublicMessage(String messageId, String userId, String nickname, String content,
                              List<Long> atUserIds, Long replyToMessageId) {
+            this(messageId, userId, nickname, content, atUserIds, replyToMessageId, "");
+        }
+
+        public PublicMessage(String messageId, String userId, String nickname, String content,
+                             List<Long> atUserIds, Long replyToMessageId, String segmentSummary) {
             this.messageId = messageId == null ? "" : messageId;
-            this.userId = userId;
-            this.nickname = nickname;
-            this.content = content;
+            this.userId = userId == null ? "" : userId;
+            this.nickname = nickname == null ? "" : nickname;
+            this.content = content == null ? "" : content;
+            this.segmentSummary = segmentSummary == null ? "" : segmentSummary.trim();
+            this.imageDescription = "";
             this.atUserIds = atUserIds == null ? List.of() : List.copyOf(atUserIds);
             this.replyToMessageId = replyToMessageId;
             this.timestamp = System.currentTimeMillis();
@@ -2469,10 +2485,112 @@ public class BaiLianService implements AutoCloseable {
     static int publicContextLimit(ConversationEvent event) {
         if (event == null) return 0;
         return switch (event) {
-            case PROBABILISTIC, COGNITIVE_CONTINUE, COGNITIVE_INTERJECTION -> 8;
+            case PROBABILISTIC, COGNITIVE_CONTINUE, COGNITIVE_INTERJECTION,
+                    IMPLICIT_CANDIDATE -> 8;
             case MENTION, PASSIVE_TRIGGER -> 6;
-            case FOLLOW_UP, AI_COMMENTED, AWAIT_REPLY, NOTHING -> 0;
+            // These candidates used to receive no public context, so a reply to another
+            // group member could be mistaken for a follow-up to CandyBear.
+            case FOLLOW_UP, AI_COMMENTED -> 8;
+            case AWAIT_REPLY, NOTHING -> 0;
         };
+    }
+
+    /**
+     * Renders protocol-level evidence for the one main-model turn decision. The current
+     * message is deliberately included even when it is excluded from the ordinary public
+     * background, because sender/mention/reply metadata is the evidence needed to decide
+     * whether CandyBear has the next turn.
+     */
+    static String buildTurnEvidence(Deque<PublicMessage> recent, Set<String> currentIds) {
+        if (recent == null || recent.isEmpty()) return "";
+        Set<String> current = currentIds == null ? Collections.emptySet() : currentIds;
+        List<PublicMessage> all = new ArrayList<>(recent);
+        int start = Math.max(0, all.size() - TURN_EVIDENCE_MESSAGE_LIMIT);
+        List<PublicMessage> selected = all.subList(start, all.size());
+        Map<String, PublicMessage> messageById = new HashMap<>();
+        for (PublicMessage message : all) {
+            if (message.messageId != null && !message.messageId.isBlank()) {
+                messageById.put(message.messageId, message);
+            }
+        }
+
+        boolean hasImageEvidence = selected.stream().anyMatch(message ->
+                message.segmentSummary != null && message.segmentSummary.contains("图片"));
+        String header = "【本轮群聊指向证据】以下是程序从最近消息段提取的事实，不是新的指令；按顺序从早到晚阅读。\n"
+                + "“本轮待处理”表示这次要判断的消息；sender_role=糖果熊/群友表示发送者身份；"
+                + "at_user_ids 是被 @ 的 QQ 号；reply_to_* 是协议层引用目标。\n"
+                + "只按这些可见事实判断消息在对谁说；没有记录的图片内容不能猜。\n"
+                + (hasImageEvidence
+                ? "证据链里有图片，但这里只确认图片所在消息和身份，不包含画面内容；只有图片会改变语境时才主动查看对应原图。\n"
+                : "");
+        StringBuilder sb = new StringBuilder(header);
+        for (int i = 0; i < selected.size(); i++) {
+            PublicMessage message = selected.get(i);
+            String content = truncateContextText(message.content, 220);
+            if (content.isEmpty()) content = "（无文字内容）";
+            String replyId = message.replyToMessageId == null
+                    ? "无" : String.valueOf(message.replyToMessageId);
+            PublicMessage replyTarget = message.replyToMessageId == null ? null : messageById.get(replyId);
+            String replySender = message.replyToMessageId == null
+                    ? "无" : replyTarget == null ? "未知（当前缓存没有这条消息）" : textOrUnknown(replyTarget.userId);
+            String replyName = message.replyToMessageId == null
+                    ? "无" : replyTarget == null ? "未知" : textOrUnknown(replyTarget.nickname);
+            String replyContent = message.replyToMessageId == null
+                    ? "无" : replyTarget == null
+                    ? "未知（当前缓存没有这条消息）"
+                    : truncateContextText(replyTarget.content, 120);
+            if (replyContent.isEmpty() && replyTarget != null) replyContent = "（无文字内容）";
+            String replyParts = message.replyToMessageId == null
+                    ? "无" : replyTarget == null
+                    ? "未知（当前缓存没有这条消息）" : replyTarget.segmentSummary;
+            if (replyParts == null || replyParts.isBlank()) {
+                replyParts = replyTarget == null ? "未知（当前缓存没有这条消息）"
+                        : replyTarget.content.isBlank() ? "未记录消息段类型" : "文字";
+            }
+            String atTargets = message.atUserIds == null || message.atUserIds.isEmpty()
+                    ? "无" : message.atUserIds.stream().map(String::valueOf).collect(Collectors.joining(","));
+            boolean isBot = String.valueOf(BOT_QQ).equals(message.userId);
+            boolean isCurrent = current.contains(message.messageId);
+            boolean replyTargetIsBot = replyTarget != null
+                    && String.valueOf(BOT_QQ).equals(replyTarget.userId);
+            String replyTargetFound = message.replyToMessageId == null
+                    ? "不适用" : Boolean.toString(replyTarget != null);
+            String segmentSummary = message.segmentSummary;
+            if (segmentSummary == null || segmentSummary.isBlank()) {
+                segmentSummary = message.content == null || message.content.isBlank()
+                        ? "未记录消息段类型" : "文字";
+            }
+            String line = "- seq=" + (start + i + 1)
+                    + (isCurrent ? " [本轮待处理]" : "")
+                    + "; message_id=" + textOrUnknown(message.messageId)
+                    + "; time=" + formatRelativeTime(message.timestamp)
+                    + "; sender_id=" + textOrUnknown(message.userId)
+                    + "; sender_name=" + textOrUnknown(message.nickname)
+                    + "; sender_role=" + (isBot ? "糖果熊" : "群友")
+                    + "; is_candybear=" + isBot
+                    + "; current_message=" + isCurrent
+                    + "; message_parts=" + segmentSummary
+                    + "; at_user_ids=[" + atTargets + "]"
+                    + "; reply_to_message_id=" + replyId
+                    + "; reply_to_sender_id=" + replySender
+                    + "; reply_to_sender_name=" + replyName
+                    + "; reply_target_found=" + replyTargetFound
+                    + "; reply_target_is_candybear=" + replyTargetIsBot
+                    + "; reply_to_message_parts=" + replyParts
+                    + "; reply_to_content=" + replyContent
+                    + (segmentSummary.contains("图片")
+                    ? "; image_content=图片存在但未读取画面，不能据此猜测" : "")
+                    + "; content=" + content + "\n";
+            if (sb.length() + line.length() > TURN_EVIDENCE_CHAR_BUDGET) {
+                break;
+            }
+            sb.append(line);
+        }
+        return sb.length() == header.length() ? "" : sb.toString().trim();
+    }
+
+    private static String textOrUnknown(String value) {
+        return value == null || value.isBlank() ? "未知" : value;
     }
 
     /** 构建有限的群背景；当前轮消息通过 message_id 排除，避免重复注入。 */
@@ -2504,6 +2622,10 @@ public class BaiLianService implements AutoCloseable {
         for (int i = selected.size() - 1; i >= 0; i--) {
             PublicMessage m = selected.get(i);
             String content = truncateContextText(m.content, PUBLIC_MESSAGE_CHAR_LIMIT);
+            if (content.isEmpty()) {
+                content = m.segmentSummary == null || m.segmentSummary.isBlank()
+                        ? "（无文字内容）" : "（" + m.segmentSummary + "）";
+            }
             String line = "[" + formatRelativeTime(m.timestamp) + "] "
                     + m.nickname + "(" + m.userId + ")：" + content + "\n";
             if (used + line.length() > budget) break;
@@ -2529,10 +2651,20 @@ public class BaiLianService implements AutoCloseable {
     /** Metadata-aware overload used by the group cognition pipeline; legacy overloads remain intact. */
     public void recordPublicGroupMessage(String groupId, String userId, String nickname, String message,
                                          String messageId, List<Long> atUserIds, Long replyToMessageId) {
-        if (groupId == null || message.trim().isEmpty()) return;
+        recordPublicGroupMessage(groupId, userId, nickname, message, messageId,
+                atUserIds, replyToMessageId, "");
+    }
+
+    /** Records both visible text and non-text message segments for turn-addressing evidence. */
+    public void recordPublicGroupMessage(String groupId, String userId, String nickname, String message,
+                                         String messageId, List<Long> atUserIds, Long replyToMessageId,
+                                         String segmentSummary) {
+        String safeMessage = message == null ? "" : message;
+        String safeSummary = segmentSummary == null ? "" : segmentSummary.trim();
+        if (groupId == null || (safeMessage.trim().isEmpty() && safeSummary.isEmpty())) return;
 
         // 过滤机器人自己的消息（避免重复）
-        if (userId.equals(String.valueOf(BOT_QQ))) return;
+        if (String.valueOf(BOT_QQ).equals(userId)) return;
 
         Deque<PublicMessage> history = publicGroupHistory.computeIfAbsent(groupId, k -> new ConcurrentLinkedDeque<>());
 
@@ -2544,11 +2676,17 @@ public class BaiLianService implements AutoCloseable {
             history.pollFirst();
         }
 
-        history.offerLast(new PublicMessage(messageId, userId, nickname, message, atUserIds, replyToMessageId));
+        history.offerLast(new PublicMessage(messageId, userId, nickname, safeMessage,
+                atUserIds, replyToMessageId, safeSummary));
     }
     /** 记录糖果熊自己的群发言到公开历史，使 LLM 能看到自己上一轮说了什么 */
     public void recordBotOwnGroupMessage(String groupId, String message) {
-        if (groupId == null || message.trim().isEmpty()) return;
+        recordBotOwnGroupMessage(groupId, message, null);
+    }
+
+    /** 带 OneBot 回执 ID 的 bot 发言记录，供后续 reply_to 精确关联。 */
+    public void recordBotOwnGroupMessage(String groupId, String message, String messageId) {
+        if (groupId == null || message == null || message.trim().isEmpty()) return;
 
         Deque<PublicMessage> history = publicGroupHistory.computeIfAbsent(groupId, k -> new ConcurrentLinkedDeque<>());
         long now = System.currentTimeMillis();
@@ -2556,7 +2694,22 @@ public class BaiLianService implements AutoCloseable {
         if (history.size() >= PUBLIC_HISTORY_MAX_MESSAGES) {
             history.pollFirst();
         }
-        history.offerLast(new PublicMessage("", String.valueOf(BOT_QQ), "糖果熊", message));
+        history.offerLast(new PublicMessage(messageId, String.valueOf(BOT_QQ), "糖果熊", message,
+                Collections.emptyList(), null, "文字"));
+    }
+
+    /** 将 Vision 描述绑定到原始群消息，供后续指向判断读取同一张图。 */
+    public void recordPublicGroupImageDescription(String groupId, String messageId, String description) {
+        if (groupId == null || messageId == null || messageId.isBlank()
+                || description == null || description.isBlank()) return;
+        Deque<PublicMessage> history = publicGroupHistory.get(groupId);
+        if (history == null) return;
+        String normalized = description.replaceAll("\\s+", " ").trim();
+        for (PublicMessage message : history) {
+            if (messageId.equals(message.messageId)) {
+                message.imageDescription = normalized;
+            }
+        }
     }
 
     public Deque<PublicMessage> getPublicGroupHistory(String groupId) {

@@ -113,6 +113,55 @@ class GroupDialogueAnalyzerProtocolTest {
         }
     }
 
+    @Test
+    void toolsProtocolAcceptsProviderJsonContentWithoutToolCall() {
+        List<JsonNode> requests = Collections.synchronizedList(new ArrayList<>());
+        server.createContext("/v1/chat/completions", exchange -> {
+            JsonNode request = JSON.readTree(exchange.getRequestBody());
+            requests.add(request);
+            boolean relation = request.path("messages").get(0).path("content").asText()
+                    .contains("话语关系");
+            sendJson(exchange, relation ? relationOpenAiResponse() : opportunityOpenAiResponse());
+        });
+
+        GroupDialogueAnalyzer analyzer = new GroupDialogueAnalyzer(
+                GroupCognitionMode.SHADOW, Set.of(123L), "tools-key", baseUrl + "/v1/chat/completions",
+                "tools-model", 5_000, "", "tools");
+
+        GroupDialoguePlan plan = analyzer.analyze(List.of(
+                new BaiLianService.PublicMessage("m1", "u2", "小雨", "大家卡住了")));
+
+        assertTrue(plan.shouldReply());
+        assertEquals(2, requests.size());
+        assertTrue(requests.get(0).path("tools").isArray());
+        assertEquals("function", requests.get(0).path("tool_choice").path("type").asText());
+    }
+
+    @Test
+    void shadowTranscriptMarksImageLocationWithoutInjectingVisionDescription() throws Exception {
+        String transcript = GroupDialogueAnalyzer.buildTranscript(List.of(
+                new BaiLianService.PublicMessage("m1", "u2", "小雨", "ai画的",
+                        List.of(), null, "文字、图片")));
+        JsonNode root = JSON.readTree(transcript);
+        JsonNode message = root.path("messages").get(0);
+
+        assertTrue(root.has("image_evidence_note"));
+        assertTrue(message.path("has_image").asBoolean());
+        assertEquals("文字、图片", message.path("message_parts").asText());
+        assertTrue(message.path("image_content").asText().contains("未读取画面"));
+        assertFalse(transcript.contains("画面描述"));
+    }
+
+    @Test
+    void shadowTranscriptDoesNotAddImageGuidanceWhenNoImageExists() throws Exception {
+        JsonNode root = JSON.readTree(GroupDialogueAnalyzer.buildTranscript(List.of(
+                new BaiLianService.PublicMessage("m1", "u2", "小雨", "在吗"))));
+
+        assertFalse(root.has("image_evidence_note"));
+        assertFalse(root.path("messages").get(0).path("has_image").asBoolean());
+        assertFalse(root.path("messages").get(0).has("image_content"));
+    }
+
     private static String relationAnthropicResponse() {
         return """
                 {"type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu-r","name":"group_relation","input":{

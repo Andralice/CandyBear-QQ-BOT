@@ -51,8 +51,8 @@ public class ConversationInterpreter {
             if (isFollowUpMessage(text)) {
                 stateStore.removePendingAwait(fullUserId); // cancel await
                 String cleanReply = normalizeReplyForContext(thread.lastBotReply());
-                String prompt = "你之前说：" + cleanReply + "\n对方现在说：" + text
-                        + "\n结合上下文接住这次补充；闲聊可以简短，认真问题或明确求助时把需要说清楚，不必机械追问。";
+                String prompt = "候选对话上下文——你之前说：" + cleanReply + "\n当前群友消息：" + text
+                        + "\n先根据本轮群聊指向证据判断这句话是不是在接你；确实接你时再自然接住，闲聊可以简短，认真问题或明确求助时把需要说清楚，不必机械追问。";
                 return InterpretResult.of(ConversationEvent.FOLLOW_UP, prompt);
             }
         }
@@ -96,8 +96,8 @@ public class ConversationInterpreter {
             if (lastAi.isPresent() && now - lastAi.get().timestamp() < 180_000) {
                 if (isResponseToAIMessage(text, lastAi.get().content())) {
                     String cleanReply = normalizeReplyForContext(lastAi.get().content());
-                    String prompt = "你之前说：" + cleanReply + "\n另一个群友评论：" + text
-                            + "\n结合上下文回应这句评论；需要时解释或修正，不必为了友好而机械附和。";
+                    String prompt = "候选对话上下文——你之前说：" + cleanReply + "\n另一个群友消息：" + text
+                            + "\n先根据本轮群聊指向证据判断这句是不是在评论你；确实评论你时再自然回应，需要时解释或修正，不必为了友好而机械附和。";
                     return InterpretResult.of(ConversationEvent.AI_COMMENTED, prompt);
                 }
             }

@@ -772,7 +772,7 @@ public class WebDashboardListener implements RuntimeListener {
                 grid.innerHTML = stickers.map(s => {
                     const image = s.hasImage
                         ? `<img loading="lazy" src="${esc(auth('/api/stickers/image?id=' + encodeURIComponent(s.id)))}" alt="${esc(s.id)}">`
-                        : '<span class="sticker-empty">无本地图片（内置 face 兜底）</span>';
+                        : '<span class="sticker-empty">无本地图片（暂不可发送）</span>';
                     const kws = (s.keywords || []).join(', ');
                     const auto = (s.autoKeywords || []).join('、');
                     return `<article class="sticker-card" data-sticker-id="${esc(s.id)}">

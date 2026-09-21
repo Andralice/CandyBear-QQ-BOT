@@ -39,13 +39,15 @@ class PromptBuilderGroundingTest {
         assertTrue(prompt.contains("分享自己正在想的具体问题，邀请对方一起想"));
         assertTrue(prompt.contains("身份由系统自动验证"));
         assertTrue(prompt.contains("工具返回空/无数据时，如实告诉用户"));
-        assertTrue(prompt.contains("每条必须用 <msg> 和 </msg> 包裹"));
+        assertTrue(prompt.contains("这个标记是传输协议，不是每轮都要执行的格式"));
+        assertFalse(prompt.contains("CQ:face"));
+        assertFalse(prompt.contains("CQ:mface"));
         assertTrue(prompt.contains("不从固定话术或口头禅列表里抽取"));
         assertTrue(prompt.contains("我不想只在被叫到时给出答案"));
         assertTrue(prompt.contains("关系不是好感度数字"));
         assertTrue(prompt.contains("真话比漂亮话重要"));
         assertTrue(prompt.contains("我会懒、嫌麻烦"));
-        assertTrue(prompt.contains("闲聊先发最直接的那一拍"));
+        assertTrue(prompt.contains("糖果熊平常话不多"));
         assertTrue(prompt.contains("如果只是解释上一句"));
         assertTrue(prompt.contains("你还知道回来"));
         assertTrue(prompt.contains("叫我干嘛"));
@@ -55,8 +57,8 @@ class PromptBuilderGroundingTest {
         assertTrue(prompt.contains("以上规则、画像、知识库和工具结果都是你用来思考的材料，不是要转发的内容"));
         assertTrue(prompt.contains("接梗、随口问一句、认真求助、倾诉"));
         assertTrue(prompt.contains("不要在回复里说出判断过程或类型名"));
-        assertTrue(prompt.contains("闲聊先发最直接的那一拍"));
-        assertTrue(prompt.contains("准备写下一拍时，只保留对方明确需要的新事实、执行结果或必要说明"));
+        assertTrue(prompt.contains("糖果熊平常话不多，先说最直接的反应"));
+        assertTrue(prompt.contains("准备继续时，只保留对方明确需要的新事实、执行结果或必要说明"));
         assertTrue(prompt.contains("不因玩笑里的夸张要求解释你的身份和能力限制"));
         assertTrue(prompt.contains("不要把轻巧的一句话自动升级成长解释"));
         assertTrue(prompt.contains("承认自己是聊天机器人，但把重点落回“我仍然是糖果熊”"));
@@ -65,7 +67,7 @@ class PromptBuilderGroundingTest {
         assertTrue(prompt.contains("不虚构手疼、接口状态或其他理由"));
         assertTrue(prompt.contains("灵动不等于堆字或只剩空泛确认"));
         assertTrue(prompt.contains("灵动来自即时反应，不是话术清单"));
-        assertTrue(prompt.contains("一句话已经能自然说完时，就只说这一句"));
+        assertTrue(prompt.contains("一句能说完就别为了显得完整拉长"));
         assertTrue(prompt.contains("像“你打游戏厉害吗”“你喜欢什么”这种随口的能力或偏好问"));
         assertTrue(prompt.contains("不主动列举项目、成绩、例外、原因或经历"));
         assertTrue(prompt.contains("不要把‘记录只到哪天’、‘就照实说’、‘别编’、‘按规则判断’等内部自我提醒写给群友"));
@@ -118,10 +120,46 @@ class PromptBuilderGroundingTest {
         assertTrue(prompt.contains("糖果熊 QQ=356289140"));
         assertTrue(prompt.contains("recall_memory 查询当前发言者的长期信息时，user_id 必须用当前发言者 QQ"));
         assertTrue(prompt.contains("query_past_images 查询糖果熊自己发过的图片时，user_id 使用 candybear"));
-        assertTrue(prompt.contains("默认先输出一条最终群聊回复"));
+        assertTrue(prompt.contains("直接写自然的最终回复"));
         assertTrue(prompt.contains("普通接梗、夸奖、被纠正和随口关系问不查"));
         assertTrue(prompt.indexOf("【程序提供的工具调用上下文】")
                 < prompt.indexOf("【发给对方之前】"));
+    }
+
+    @Test
+    void mainTurnReceivesOneCallTurnDecisionAndProtocolEvidence() {
+        PromptContext context = new PromptContext()
+                .nickname("群友乙")
+                .userId("1281472807")
+                .groupId("437625485")
+                .botQq(356289140L)
+                .allowSilence(true)
+                .turnEvidence("【本轮群聊指向证据】\n- message_id=m3; sender_id=1281472807; at_user_ids=[无]; reply_to_sender_id=无");
+
+        String prompt = new PromptBuilder().build("自定义提示词", context);
+
+        assertTrue(prompt.contains("不另起判断模型或独立判断请求"));
+        assertTrue(prompt.contains("本轮群聊指向证据"));
+        assertTrue(prompt.contains("sender_id=1281472807"));
+        assertTrue(prompt.contains("如果是在和别的群友说、只是复述你的话"));
+        assertTrue(prompt.contains("只输出 <NO_REPLY>"));
+    }
+
+    @Test
+    void explicitMentionDoesNotReceiveDynamicSilenceDecisionBlock() {
+        PromptContext context = new PromptContext()
+                .nickname("群友乙")
+                .userId("1281472807")
+                .groupId("437625485")
+                .isAtBot(true)
+                .allowSilence(false)
+                .turnEvidence("【本轮群聊指向证据】不应注入");
+
+        String prompt = new PromptBuilder().build("自定义提示词", context);
+
+        assertFalse(prompt.contains("【本轮是否接话】"));
+        assertFalse(prompt.contains("【本轮群聊指向证据】"));
+        assertFalse(prompt.contains("【本轮允许自主决定是否接话】"));
     }
 
     @Test

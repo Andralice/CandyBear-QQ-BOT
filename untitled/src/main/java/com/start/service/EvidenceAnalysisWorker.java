@@ -6,11 +6,14 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.start.Main;
 import com.start.config.BotConfig;
+import com.start.config.MacroReviewMode;
 import com.start.model.AnalysisTask;
 import com.start.model.MediaPartInput;
+import com.start.model.ProfileFactSummary;
 import com.start.model.ProfileFactCandidateInput;
 import com.start.repository.AnalysisTaskRepository;
 import com.start.repository.ConversationEventRepository;
+import com.start.repository.MacroReviewRepository;
 import com.start.repository.MediaArtifactRepository;
 import com.start.repository.MessageRepository;
 import com.start.repository.ProfileFactRepository;
@@ -69,7 +72,9 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
     private final MessageRepository messageRepository;
     private final ProfileFactRepository factRepository;
     private final ConversationEventRepository eventRepository;
+    private final MacroReviewRepository macroReviewRepository;
     private final BaiLianService aiService;
+    private final MacroReviewService macroReviewService;
     private final BiFunction<String, JsonNode, CompletableFuture<JsonNode>> oneBotApi;
     private final String owner;
     private final HttpClient httpClient;
@@ -117,7 +122,10 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
         this.messageRepository = messageRepository;
         this.factRepository = factRepository;
         this.eventRepository = new ConversationEventRepository();
+        this.macroReviewRepository = new MacroReviewRepository(
+                factRepository == null ? null : factRepository.getDataSource());
         this.aiService = aiService;
+        this.macroReviewService = MacroReviewService.fromConfig(messageRepository, factRepository);
         this.oneBotApi = oneBotApi;
         this.owner = owner;
         this.httpClient = httpClient;
@@ -151,21 +159,31 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
 
     /** Runs at most one task, keeping model and media cost bounded per tick. */
     public boolean runOnce() throws Exception {
+        return runOnce(BotConfig.getMacroReviewMode(), BotConfig.getMacroReviewGroups());
+    }
+
+    boolean runOnce(MacroReviewMode macroReviewMode, Set<Long> macroReviewGroups) throws Exception {
         Optional<AnalysisTask> claimed = taskRepository.claimNext(owner, 180);
         if (claimed.isEmpty()) return false;
         AnalysisTask task = claimed.get();
         try {
             ObjectNode result = MAPPER.createObjectNode();
-            switch (task.taskType()) {
-                case "PARSE_IMAGE" -> parseImage(task, result);
-                case "FETCH_LINK", "EXTRACT_LINKS" -> parseLink(task, result);
-                case "TRANSCRIBE_AUDIO" -> markUnavailable(task, result, "AUDIO_TRANSCRIBER_NOT_CONFIGURED");
-                case "PARSE_VIDEO" -> markUnavailable(task, result, "VIDEO_PARSER_NOT_CONFIGURED");
-                case "PARSE_FILE" -> parseFile(task, result);
-                case "EXPAND_FORWARD" -> expandForward(task, result);
-                case "EXTRACT_PROFILE_FACTS" -> extractProfileFacts(task, result);
-                case "ANALYZE_GROUP_ATMOSPHERE" -> analyzeGroupAtmosphere(task, result);
-                default -> throw new PermanentAnalysisException("UNKNOWN_TASK_TYPE", "不支持的任务类型: " + task.taskType());
+            if (shouldSkipLegacyProfileExtraction(task, macroReviewMode, macroReviewGroups)) {
+                result.put("status", "SKIPPED")
+                        .put("reason", "MACRO_REVIEW_OWNS_PROFILE_EXTRACTION");
+            } else {
+                switch (task.taskType()) {
+                    case "PARSE_IMAGE" -> parseImage(task, result);
+                    case "FETCH_LINK", "EXTRACT_LINKS" -> parseLink(task, result);
+                    case "TRANSCRIBE_AUDIO" -> markUnavailable(task, result, "AUDIO_TRANSCRIBER_NOT_CONFIGURED");
+                    case "PARSE_VIDEO" -> markUnavailable(task, result, "VIDEO_PARSER_NOT_CONFIGURED");
+                    case "PARSE_FILE" -> parseFile(task, result);
+                    case "EXPAND_FORWARD" -> expandForward(task, result);
+                    case "EXTRACT_PROFILE_FACTS" -> extractProfileFacts(task, result);
+                    case "MACRO_REVIEW_BATCH" -> reviewMacroBatch(task, result);
+                    case "ANALYZE_GROUP_ATMOSPHERE" -> analyzeGroupAtmosphere(task, result);
+                    default -> throw new PermanentAnalysisException("UNKNOWN_TASK_TYPE", "不支持的任务类型: " + task.taskType());
+                }
             }
             taskRepository.complete(task, result.toString(),
                     task.taskType().startsWith("PARSE_") ? BotConfig.getVisionModel() : null,
@@ -183,6 +201,26 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
             taskRepository.fail(task, errorCode(e), e.toString());
         }
         return true;
+    }
+
+    static boolean shouldSkipLegacyProfileExtraction(AnalysisTask task) {
+        return shouldSkipLegacyProfileExtraction(task, BotConfig.getMacroReviewMode(),
+                BotConfig.getMacroReviewGroups());
+    }
+
+    static boolean shouldSkipLegacyProfileExtraction(AnalysisTask task,
+                                                      MacroReviewMode mode,
+                                                      Set<Long> groups) {
+        if (task == null || !"EXTRACT_PROFILE_FACTS".equals(task.taskType())
+                || mode != MacroReviewMode.LIVE_SHADOW
+                || task.scopeGroupId() == null || task.scopeGroupId().isBlank()) {
+            return false;
+        }
+        try {
+            return groups != null && groups.contains(Long.parseLong(task.scopeGroupId().trim()));
+        } catch (NumberFormatException ignored) {
+            return false;
+        }
     }
 
     private void parseImage(AnalysisTask task, ObjectNode result) throws Exception {
@@ -468,7 +506,7 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
             ProfileFactCandidateInput input = new ProfileFactCandidateInput(subjectUserId, groupId, kind, epistemic,
                     claimKey, claim, polarity, "ONE_OFF", confidence, scope, observedAt, validUntil,
                     limit(fact.path("reasoning").asText("仅保留可回溯证据"), 1000), task.id(),
-                    BotConfig.getBaiLianChatModel(), evidence, "text",
+                    BotConfig.getAuxiliaryModel(), evidence, "text",
                     json("message_id", messageId, "quote", claim).toString(), "AVAILABLE");
             long candidateId = factRepository.upsertCandidate(input);
             boolean hasUsableEvidence = false;
@@ -482,6 +520,148 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
             accepted++;
         }
         result.put("status", "SUCCEEDED").put("accepted", accepted).put("rejected", rejected);
+    }
+
+    private void reviewMacroBatch(AnalysisTask task, ObjectNode result) throws Exception {
+        String groupId = task.scopeGroupId();
+        if (!BotConfig.isMacroReviewShadowFor(groupId)) {
+            result.put("status", "SKIPPED").put("reason", "MACRO_REVIEW_DISABLED_FOR_GROUP");
+            return;
+        }
+        long anchorMessageId = inputRefs(task).path("message_id").asLong(0);
+        if (anchorMessageId <= 0) throw new PermanentAnalysisException("MACRO_NO_ANCHOR", "宏观审查任务缺少消息锚点");
+
+        long cursor = macroReviewRepository.findCursor(groupId);
+        int windowLimit = BotConfig.getMacroReviewWindowMessages();
+        int overlapLimit = BotConfig.getMacroReviewOverlapMessages();
+        boolean bootstrapWindow = cursor <= 0;
+        var contextResult = bootstrapWindow
+                ? messageRepository.findRecentMacroReviewMessages(groupId, anchorMessageId, windowLimit)
+                : messageRepository.findMacroReviewMessages(
+                groupId, cursor, anchorMessageId, overlapLimit, windowLimit);
+        if (!contextResult.isSuccess() || contextResult.getData() == null) {
+            throw new IllegalStateException(contextResult.getError());
+        }
+        List<Map<String, Object>> window = contextResult.getData();
+        List<Map<String, Object>> fresh = bootstrapWindow
+                ? window
+                : window.stream().filter(row -> rowId(row) > cursor).toList();
+        if (fresh.isEmpty()) {
+            result.put("status", "NOOP").put("cursor", cursor).put("anchor_message_id", anchorMessageId);
+            return;
+        }
+
+        long processedThrough = fresh.stream().mapToLong(EvidenceAnalysisWorker::rowId).max().orElse(cursor);
+        boolean truncated = processedThrough < anchorMessageId;
+        Map<String, List<ProfileFactSummary>> previousFacts = loadPreviousFacts(window);
+        MacroReviewService.ReviewResult review = macroReviewService.review(groupId, window, previousFacts);
+        ObjectNode validated = validateMacroResult(review.result(), window);
+        macroReviewRepository.saveRun(new MacroReviewRepository.RunInput(
+                task.id(), groupId, cursor, anchorMessageId, processedThrough,
+                bootstrapWindow ? 0 : (int) window.stream().filter(row -> rowId(row) <= cursor).count(),
+                fresh.size(), truncated,
+                "SUCCEEDED", validated.toString(), review.modelName(), review.promptVersion(),
+                review.inputTokens(), review.outputTokens()));
+        macroReviewRepository.advanceCursor(groupId, processedThrough);
+
+        result.put("status", "SUCCEEDED")
+                .put("mode", "LIVE_SHADOW")
+                .put("from_message_id", cursor)
+                .put("to_message_id", anchorMessageId)
+                .put("processed_through_message_id", processedThrough)
+                .put("window_message_count", window.size())
+                .put("fresh_message_count", fresh.size())
+                .put("window_truncated", truncated)
+                .set("validation", validated.path("validation").deepCopy());
+
+        var latestResult = messageRepository.findLatestGroupMessageId(groupId);
+        if (latestResult.isSuccess() && latestResult.getData() != null && latestResult.getData() > processedThrough) {
+            messageRepository.enqueueMacroReviewTask(groupId, latestResult.getData(),
+                    "group:" + groupId + ":MACRO_REVIEW:followup:" + processedThrough);
+        }
+    }
+
+    private Map<String, List<ProfileFactSummary>> loadPreviousFacts(List<Map<String, Object>> window) throws Exception {
+        Map<String, List<ProfileFactSummary>> result = new HashMap<>();
+        Set<String> users = new HashSet<>();
+        for (Map<String, Object> row : window) {
+            if (rowBoolean(row.get("is_robot_reply"))) continue;
+            String userId = string(row.get("user_id"));
+            if (!userId.isBlank()) users.add(userId);
+        }
+        for (String userId : users) {
+            result.put(userId, factRepository.findActiveByUserId(userId, false, 8));
+        }
+        return result;
+    }
+
+    static ObjectNode validateMacroResult(JsonNode raw, List<Map<String, Object>> window) {
+        ObjectNode result = raw != null && raw.isObject() ? (ObjectNode) raw.deepCopy() : MAPPER.createObjectNode();
+        Set<Long> messageIds = new HashSet<>();
+        Set<String> participantIds = new HashSet<>();
+        Map<Long, Map<String, Object>> byMessageId = new HashMap<>();
+        for (Map<String, Object> row : window) {
+            long messageId = rowId(row);
+            if (messageId <= 0) continue;
+            messageIds.add(messageId);
+            byMessageId.put(messageId, row);
+            String userId = string(row.get("user_id"));
+            if (!rowBoolean(row.get("is_private")) && !rowBoolean(row.get("is_robot_reply"))
+                    && "USER".equalsIgnoreCase(string(row.get("sender_type"))) && !userId.isBlank()) {
+                participantIds.add(userId);
+            }
+        }
+
+        int validObservations = 0;
+        int invalidObservations = 0;
+        ArrayNode validationErrors = MAPPER.createArrayNode();
+        JsonNode observations = result.path("observations");
+        if (observations.isArray()) {
+            for (JsonNode observation : observations) {
+                if (!observation.isObject()) continue;
+                ObjectNode item = (ObjectNode) observation;
+                String subject = item.path("subject_user_id").asText("");
+                ArrayNode errors = item.putArray("validation_errors");
+                if (subject.isBlank() || !participantIds.contains(subject)) errors.add("SUBJECT_NOT_IN_WINDOW");
+                JsonNode evidence = item.path("evidence_message_ids");
+                if (!evidence.isArray() || evidence.isEmpty()) errors.add("NO_EVIDENCE_IDS");
+                else {
+                    for (JsonNode evidenceId : evidence) {
+                        long id = evidenceId.asLong(0);
+                        Map<String, Object> source = byMessageId.get(id);
+                        if (!messageIds.contains(id) || source == null) {
+                            errors.add("EVIDENCE_OUTSIDE_WINDOW:" + id);
+                            continue;
+                        }
+                        if (rowBoolean(source.get("is_robot_reply"))
+                                || !"USER".equalsIgnoreCase(string(source.get("sender_type")))) {
+                            errors.add("ROBOT_OR_NON_USER_EVIDENCE:" + id);
+                        }
+                        if (rowBoolean(source.get("is_private"))) errors.add("PRIVATE_EVIDENCE:" + id);
+                        if (!subject.isBlank() && !subject.equals(string(source.get("user_id")))) {
+                            errors.add("EVIDENCE_SENDER_MISMATCH:" + id);
+                        }
+                        if (!"AVAILABLE".equalsIgnoreCase(string(source.get("availability_status")))) {
+                            errors.add("EVIDENCE_UNAVAILABLE:" + id);
+                        }
+                    }
+                }
+                boolean valid = errors.isEmpty();
+                item.put("write_action", "NONE");
+                if (valid) validObservations++;
+                else {
+                    invalidObservations++;
+                    validationErrors.add("observation:" + subject);
+                }
+            }
+        }
+        ObjectNode validation = result.putObject("validation");
+        validation.put("valid_observations", validObservations);
+        validation.put("invalid_observations", invalidObservations);
+        validation.set("errors", validationErrors);
+        validation.put("private_messages_excluded", true);
+        validation.put("production_write", false);
+        return result;
     }
 
     private void expandForward(AnalysisTask task, ObjectNode result) throws Exception {
@@ -548,6 +728,10 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
         long messageId = inputRefs(task).path("message_id").asLong(0);
         if (groupId == null || groupId.isBlank() || messageId <= 0) {
             throw new PermanentAnalysisException("NO_GROUP_SCOPE", "群氛围任务缺少当前群或消息");
+        }
+        if (!BotConfig.isGroupCognitionEnabledFor(groupId)) {
+            result.put("status", "SKIPPED").put("reason", "GROUP_COGNITION_DISABLED");
+            return;
         }
         var context = messageRepository.findMessagesForAnalysis(messageId, groupId, null, 20);
         if (!context.isSuccess() || context.getData() == null || context.getData().isEmpty()) {
@@ -882,6 +1066,14 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
     }
 
     private static String string(Object value) { return value == null ? "" : String.valueOf(value); }
+    private static long rowId(Map<String, Object> row) {
+        Object value = row == null ? null : row.get("id");
+        return value instanceof Number number ? number.longValue() : 0;
+    }
+    private static boolean rowBoolean(Object value) {
+        if (value instanceof Boolean b) return b;
+        return Boolean.parseBoolean(string(value));
+    }
     private static String limit(String value, int max) { if (value == null) return ""; return value.length() <= max ? value : value.substring(0, max); }
     private static double clamp(double value) { return Math.max(0.0, Math.min(1.0, value)); }
     private static String enumOr(String value, Set<String> allowed, String fallback) { return allowed.contains(value) ? value : fallback; }

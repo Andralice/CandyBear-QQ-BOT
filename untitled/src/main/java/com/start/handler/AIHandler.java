@@ -226,6 +226,7 @@ public class AIHandler implements MessageHandler {
         }
 
         Long replyId = MessageUtil.extractReplyId(msg.path("message"));
+        String segmentSummary = MessageUtil.summarizeSegments(msg.path("message"));
 
         // 群聊：先记录原始消息及协议层指向信息到上下文（WebSocket 线程，无竞争）
         aiService.recordPublicGroupMessage(
@@ -235,7 +236,8 @@ public class AIHandler implements MessageHandler {
                 plainText,
                 messageId,
                 ats,
-                replyId
+                replyId,
+                segmentSummary
         );
 
         String gid = String.valueOf(groupId);
@@ -324,13 +326,25 @@ public class AIHandler implements MessageHandler {
         boolean imageFollowUp = !imageInfos.isEmpty() && result.isNothing()
                 && aiService.isWithinFollowUpWindow(gid, uid);
 
+        // 程序只筛出有协议或语言指向迹象的模糊候选；是否真的该接话交给同一次主模型调用。
+        // 普通群聊仍在这里直接结束，不为每条消息额外调用模型。
+        boolean mentionsAnotherUser = ats != null
+                && ats.stream().anyMatch(q -> q != null && q != BotConfig.getBotQq());
+        if (result.isNothing() && !imageFollowUp && !mentionsAnotherUser
+                && isImplicitGroupCandidate(plainText, messageId, replyId,
+                !imageInfos.isEmpty(), conv, aiService.getPublicGroupHistorySnapshot(gid, 12))) {
+            result = ConversationInterpreter.InterpretResult.of(
+                    ConversationEvent.IMPLICIT_CANDIDATE, plainText);
+        }
+
         // Keep protocol/direct and explicit await behavior intact. ENFORCE only replaces
         // the heuristic path for ordinary text continuations and proactive candidates.
         if (cognitionMode.controlsOrdinaryTriggers()
                 && !plainText.isBlank()
                 && !imageFollowUp
                 && !result.isDirect()
-                && result.event() != ConversationEvent.AWAIT_REPLY) {
+                && result.event() != ConversationEvent.AWAIT_REPLY
+                && result.event() != ConversationEvent.IMPLICIT_CANDIDATE) {
             scheduleCognitionDecision(bot, groupId, gid, uid, nickname, ats, plainText,
                     conv, result);
             return;
@@ -426,7 +440,7 @@ public class AIHandler implements MessageHandler {
             return;
         }
 
-        // 需要 AI 生成：只有 PROBABILISTIC 允许沉默
+        // 需要 AI 生成：模糊候选由同一次主模型调用决定是否沉默；明确 @/待回复仍必须回应
         conv.markSubmitted();
         boolean allowSilence = result.event().allowsSilence();
         long startMs = System.currentTimeMillis();
@@ -444,7 +458,9 @@ public class AIHandler implements MessageHandler {
     }
 
     static boolean bypassesReplyCooldown(ConversationEvent event) {
-        return event == ConversationEvent.COGNITIVE_CONTINUE;
+        // 明确 @ 是用户主动点名，不能被群级/用户级主动插话冷却吞掉。
+        return event == ConversationEvent.MENTION
+                || event == ConversationEvent.COGNITIVE_CONTINUE;
     }
 
     private void scheduleProactiveReply(Main bot, long groupId, String gid, String uid, String nickname,
@@ -611,6 +627,99 @@ public class AIHandler implements MessageHandler {
         return "";
     }
 
+    /**
+     * Cheap gate for messages that may be an implicit continuation of CandyBear.
+     * It deliberately does not decide whether to reply; the main model receives
+     * the complete turn evidence and may return {@code <NO_REPLY>}.
+     */
+    static boolean isImplicitGroupCandidate(String text, String messageId, Long replyToMessageId,
+                                            boolean hasMedia, ConversationState pendingState,
+                                            List<BaiLianService.PublicMessage> recent) {
+        String compact = text == null ? "" : text.replaceAll("\\s+", "").trim();
+        int currentIndex = currentMessageIndex(messageId, recent);
+
+        // Any explicit reply is a bounded candidate. The evidence block tells
+        // the model whether the target is CandyBear, another member, or missing
+        // from the local cache; Java should not guess from the reply text alone.
+        if (replyToMessageId != null) {
+            return true;
+        }
+
+        boolean immediateBotTurn = hasImmediateRecentBotTurn(currentIndex, recent);
+        if (immediateBotTurn && !compact.isEmpty() && compact.length() <= 40) {
+            return true;
+        }
+
+        // A user's caption after their own image is a useful ambiguous candidate;
+        // a bare image remains on the existing image-follow-up path.
+        if ((hasMedia || hasRecentMedia(currentIndex, recent))
+                && !compact.isEmpty() && isDirectionalShortText(compact)) {
+            return true;
+        }
+
+        // Preserve a short same-user continuation that arrived before a trigger
+        // was recognized, without opening a model call for arbitrary prose.
+        return pendingState != null
+                && pendingState.getPendingMessages().size() > 1
+                && !compact.isEmpty()
+                && compact.length() <= 32
+                && isDirectionalShortText(compact);
+    }
+
+    private static boolean hasRecentMedia(int currentIndex,
+                                          List<BaiLianService.PublicMessage> recent) {
+        if (recent == null || recent.isEmpty()) return false;
+        int before = currentIndex < 0 ? recent.size() - 1 : currentIndex - 1;
+        long now = System.currentTimeMillis();
+        for (int i = before, inspected = 0; i >= 0 && inspected < 3; i--, inspected++) {
+            BaiLianService.PublicMessage message = recent.get(i);
+            if (now - message.timestamp > TimeUnit.MINUTES.toMillis(3)) return false;
+            if (message.segmentSummary != null && message.segmentSummary.contains("图片")) return true;
+        }
+        return false;
+    }
+
+    private static int currentMessageIndex(String messageId, List<BaiLianService.PublicMessage> recent) {
+        if (recent == null || recent.isEmpty()) return -1;
+        if (messageId != null && !messageId.isBlank()) {
+            for (int i = recent.size() - 1; i >= 0; i--) {
+                if (messageId.equals(recent.get(i).messageId)) return i;
+            }
+        }
+        return recent.size() - 1;
+    }
+
+    private static boolean hasImmediateRecentBotTurn(int currentIndex,
+                                                      List<BaiLianService.PublicMessage> recent) {
+        if (recent == null || recent.isEmpty()) return false;
+        int before = currentIndex < 0 ? recent.size() - 1 : currentIndex - 1;
+        if (before < 0) return false;
+        long now = System.currentTimeMillis();
+        String bot = String.valueOf(BotConfig.getBotQq());
+        int inspected = 0;
+        for (int i = before; i >= 0 && inspected < 3; i--, inspected++) {
+            BaiLianService.PublicMessage message = recent.get(i);
+            if (bot.equals(message.userId)) {
+                return now - message.timestamp <= TimeUnit.MINUTES.toMillis(3);
+            }
+            // Another human message breaks the immediate continuation chain.
+            return false;
+        }
+        return false;
+    }
+
+    private static boolean isDirectionalShortText(String text) {
+        if (text == null || text.isBlank() || text.length() > 48) return false;
+        String botName = BotConfig.getBotName();
+        return text.contains("这个") || text.contains("那个") || text.contains("这张")
+                || text.contains("那张") || text.contains("刚才") || text.contains("刚刚")
+                || text.contains("之前") || text.contains("然后") || text.contains("接着")
+                || text.contains("图") || text.contains("画") || text.contains("AI")
+                || text.contains("ai") || text.contains("机器人")
+                || (botName != null && !botName.isBlank() && text.contains(botName))
+                || text.contains("？") || text.contains("?");
+    }
+
     private boolean canStartReaction(String gid, String uid) {
         if (!aiService.canReact(gid)) return false;
         long now = System.currentTimeMillis();
@@ -733,21 +842,18 @@ public class AIHandler implements MessageHandler {
                         ? userId : img.senderId());
                 imageInfoMaps.add(m);
             }
-            List<String> imageDataUris = downloadImages(imageInfoMaps);
-            String imageDesc = describeImagesWithCache(imageInfoMaps, imageDataUris);
+            // Keep only the image message that is unambiguously attached to the
+            // current turn in the main multimodal request. Older images remain
+            // available as evidence, but sending all of them together makes a
+            // short follow-up such as "ai画的" easy to bind to the wrong image.
+            List<Map<String, String>> promptImageInfos = selectPromptImages(state, imageInfoMaps);
+            // 当前图片只有在主模型启用多模态时才下载并作为本轮输入；历史图片不随会话反复下载/携带原图。
+            List<String> promptImageDataUris = BotConfig.isBaiLianMultimodalEnabled()
+                    ? downloadImages(promptImageInfos) : Collections.emptyList();
+            // 证据链只确认图片的位置和身份，不在每轮对话前默认调用 Vision 或注入描述。
+            String imageEvidence = buildImageEvidence(imageInfoMaps);
+            String promptImageContext = buildImagePromptContext(state, imageInfoMaps, imageEvidence);
             String linkContext = buildLinkContext(state.getLinksToFetch());
-
-            if (!imageDesc.isEmpty()) {
-                String latestMessageId = state.getPendingMessageIds().stream()
-                        .filter(id -> id != null && !id.isBlank())
-                        .reduce((first, second) -> second)
-                        .orElse(null);
-                attachImageDescriptions(bot, "group", gid, userId, imageInfoMaps, latestMessageId);
-            }
-
-            // Vision 描述完成 → 触发 ImageDescribed 事件，让 StickerHarvesterListener 异步入库
-            // 最多 3 张图，URL 与 imageInfoMaps 对应
-            fireImageDescribed(gid, userId, imageInfoMaps, imageDesc);
 
             for (int attempt = 0; attempt <= config.maxRegenerate(); attempt++) {
                 if (attempt > 0) {
@@ -766,7 +872,7 @@ public class AIHandler implements MessageHandler {
                 if (prompt.isEmpty()) {
                     prompt = state.getImageInfos().isEmpty() ? EMPTY_MENTION_PROMPT : "看一下这张图片";
                 }
-                if (!imageDesc.isEmpty()) prompt = prompt + "\n\n" + imageDesc;
+                if (!promptImageContext.isEmpty()) prompt = prompt + "\n\n" + promptImageContext;
                 if (!linkContext.isEmpty()) prompt = prompt + "\n\n" + linkContext;
 
                 // 冻结决策上下文（Replay 用）
@@ -791,7 +897,7 @@ public class AIHandler implements MessageHandler {
                                 .collect(java.util.stream.Collectors.toSet()))
                         .dialoguePlan(dialoguePlan)
                         .imageDataUris(BotConfig.isBaiLianMultimodalEnabled()
-                                ? imageDataUris : Collections.emptyList())
+                                ? promptImageDataUris : Collections.emptyList())
                         .startMs(startMs)
                         .build();
 
@@ -1019,20 +1125,15 @@ public class AIHandler implements MessageHandler {
 
     private void replyWithAI(Main bot, JsonNode originalMsg, String sessionId, String userId, String prompt, String groupId, String nickname, List<Long> atUserIds, List<Map<String, String>> imageInfos, List<String> linksToFetch, String currentText) {
         groupExecutor.execute(sessionId, () -> {
-            List<String> imageDataUris = downloadImages(imageInfos);
-            String imageDesc = describeImagesWithCache(imageInfos, imageDataUris);
+            List<String> imageDataUris = BotConfig.isBaiLianMultimodalEnabled()
+                    ? downloadImages(imageInfos) : Collections.emptyList();
+            String imageEvidence = buildImageEvidence(imageInfos);
             String linkContext = buildLinkContext(linksToFetch);
-            // 私聊图片也入库：groupId 传 null 表示"private"
-            fireImageDescribed(null, userId, imageInfos, imageDesc);
             String fullPrompt = prompt;
-            if (!imageDesc.isEmpty()) fullPrompt = fullPrompt + "\n\n" + imageDesc;
+            if (!imageEvidence.isEmpty()) fullPrompt = fullPrompt + "\n\n" + imageEvidence;
             if (!linkContext.isEmpty()) fullPrompt = fullPrompt + "\n\n" + linkContext;
 
             // 回填到 Main 在入站时创建的同一条记录，不在 generate() 里插入重复用户消息。
-            if (!imageDesc.isEmpty()) {
-                attachImageDescriptions(bot, "private", null, userId, imageInfos,
-                        originalMsg.path("message_id").asText());
-            }
             String reply = aiService.generate(sessionId, userId, fullPrompt, groupId, nickname, atUserIds,
                     BotConfig.isBaiLianMultimodalEnabled() ? imageDataUris : Collections.emptyList(),
                     currentText, !imageInfos.isEmpty());
@@ -1119,71 +1220,132 @@ public class AIHandler implements MessageHandler {
     }
 
     /**
-     * Vision 描述（带 sticker-ingest 缓存复用）。每张图片单独命中/生成描述，并把结果写回
-     * 同一个图片 map。这样下载失败、重复 URL、单条多图和多条缓冲消息都不会串图。
+     * 构建图片证据占位，不在每次聊天前默认调用 Vision。
+     * 证据只保留消息 ID、发送者和消息内序号，避免描述过期或串到另一张图。
      */
-    private String describeImagesWithCache(List<Map<String, String>> imageInfoMaps, List<String> imageDataUris) {
+    static String buildImageEvidence(List<Map<String, String>> imageInfoMaps) {
         if (imageInfoMaps == null || imageInfoMaps.isEmpty()) return "";
         int limit = Math.min(imageInfoMaps.size(), 3);
-        StringBuilder result = new StringBuilder("[用户发送了").append(limit).append("张图片]");
+        StringBuilder result = new StringBuilder("【本轮图片证据】证据链只确认以下消息位置有图片，未自动读取画面内容：");
         for (int i = 0; i < limit; i++) {
             Map<String, String> image = imageInfoMaps.get(i);
-            image.remove("description");
-            String url = imageSource(image);
-            String description = null;
-
-            try {
-                if (url != null && !url.isBlank()) {
-                    String cached = StickerIngestService.getInstance().tryGetVisionDescription(url);
-                    if (isSingleImageDescription(cached)) {
-                        description = extractSingleImageDescription(cached);
-                        logger.debug("vision 描述命中 sticker-ingest 缓存: url={}", url);
-                    }
-                }
-            } catch (Exception ignored) {
-                // sticker-ingest 未初始化就降级到主视觉路径
-            }
-
-            String dataUri = imageDataUris != null && i < imageDataUris.size() ? imageDataUris.get(i) : "";
-            if ((description == null || description.isBlank()) && dataUri != null && !dataUri.isBlank()) {
-                String raw = aiService.describeImages(List.of(dataUri));
-                description = extractSingleImageDescription(raw);
-                if (description != null && !description.isBlank() && url != null && !url.isBlank()) {
-                    try {
-                        StickerIngestService.getInstance().cacheVisionDescription(url, description);
-                    } catch (Exception ignored) {}
-                }
-            }
-
-            if (description != null && !description.isBlank()) {
-                description = description.trim();
-                image.put("description", description);
-                result.append("\n图片").append(i + 1);
-                String messageId = image.get("message_id");
-                if (messageId != null && !messageId.isBlank()) {
-                    result.append("（消息ID=").append(messageId)
-                            .append("，消息内第").append(parseImageIndex(image.get("image_index"), i + 1)).append("张");
-                    String senderId = image.get("sender_id");
-                    if (senderId != null && !senderId.isBlank()) result.append("，发送者=").append(senderId);
-                    result.append("）");
-                }
-                result.append("内容：").append(description);
-            } else {
-                // Keep the image's identity in the prompt even when download/Vision failed;
-                // otherwise a later image can be mistaken for this one.
-                result.append("\n图片").append(i + 1);
-                String messageId = image.get("message_id");
-                if (messageId != null && !messageId.isBlank()) {
-                    result.append("（消息ID=").append(messageId)
-                            .append("，消息内第").append(parseImageIndex(image.get("image_index"), i + 1)).append("张");
-                    String senderId = image.get("sender_id");
-                    if (senderId != null && !senderId.isBlank()) result.append("，发送者=").append(senderId);
-                    result.append("）");
-                }
-                result.append("内容：暂时无法读取原图，不能据此猜测内容");
+            result.append("\n- 图片").append(i + 1);
+            String messageId = image.get("message_id");
+            if (messageId != null && !messageId.isBlank()) {
+                result.append("（消息ID=").append(messageId)
+                        .append("，消息内第").append(parseImageIndex(image.get("image_index"), i + 1)).append("张");
+                String senderId = image.get("sender_id");
+                if (senderId != null && !senderId.isBlank()) result.append("，发送者=").append(senderId);
+                result.append("）");
             }
         }
+        result.append("\n如果没有这张图就无法判断当前语境，再查看当前随消息提供的原图；历史图片用 query_past_images 按消息 ID 主动查找。"
+                + "图片与当前话题无关时忽略；没有实际看到画面就不要猜图片内容。");
         return result.toString();
+    }
+
+    /**
+     * Chooses the image message that is unambiguously part of the current turn.
+     * A text message may follow an image-only message in the same buffer; in
+     * that case the immediately preceding image message is the only safe main
+     * multimodal input. Older images stay in the evidence block and tools.
+     */
+    static List<Map<String, String>> selectPromptImages(ConversationState state,
+                                                         List<Map<String, String>> imageInfoMaps) {
+        if (imageInfoMaps == null || imageInfoMaps.isEmpty()) return Collections.emptyList();
+        String messageId = currentImageMessageId(state, imageInfoMaps);
+        if (messageId == null || messageId.isBlank()) {
+            boolean hasMessageIds = imageInfoMaps.stream()
+                    .anyMatch(image -> image.get("message_id") != null && !image.get("message_id").isBlank());
+            // Legacy callers may not have message IDs. Preserve their same-turn
+            // behaviour rather than silently dropping their only image input.
+            return hasMessageIds ? Collections.emptyList() : List.copyOf(imageInfoMaps);
+        }
+        List<Map<String, String>> selected = new ArrayList<>();
+        for (Map<String, String> image : imageInfoMaps) {
+            if (messageId.equals(image.get("message_id"))) selected.add(image);
+        }
+        return selected;
+    }
+
+    static List<String> selectPromptImageDataUris(List<Map<String, String>> allImages,
+                                                  List<String> allDataUris,
+                                                  List<Map<String, String>> selectedImages) {
+        if (allImages == null || allDataUris == null || selectedImages == null || selectedImages.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<String> selected = new ArrayList<>();
+        for (Map<String, String> wanted : selectedImages) {
+            for (int i = 0; i < allImages.size() && i < allDataUris.size(); i++) {
+                if (allImages.get(i) == wanted || allImages.get(i).equals(wanted)) {
+                    String uri = allDataUris.get(i);
+                    if (uri != null && !uri.isBlank()) selected.add(uri);
+                    break;
+                }
+            }
+        }
+        return selected;
+    }
+
+    /** Adds an explicit primary/older distinction to the text evidence block. */
+    static String buildImagePromptContext(ConversationState state,
+                                           List<Map<String, String>> imageInfoMaps,
+                                           String imageEvidence) {
+        if (imageInfoMaps == null || imageInfoMaps.isEmpty()
+                || imageEvidence == null || imageEvidence.isBlank()) {
+            return "";
+        }
+        String primaryMessageId = currentImageMessageId(state, imageInfoMaps);
+        StringBuilder context = new StringBuilder(imageEvidence)
+                .append("\n【本轮图片与当前文字的绑定】");
+        for (Map<String, String> image : imageInfoMaps) {
+            String messageId = image.getOrDefault("message_id", "");
+            boolean primary = primaryMessageId != null && primaryMessageId.equals(messageId);
+            context.append("\n").append(primary ? "当前主图" : "较早图片");
+            if (!messageId.isBlank()) context.append("（消息ID=").append(messageId).append("）");
+            String senderId = image.getOrDefault("sender_id", "");
+            if (!senderId.isBlank()) context.append("，发送者=").append(senderId);
+            context.append("：这里只确认这条消息的位置有图片，没有画面描述。");
+        }
+        if (primaryMessageId != null && !primaryMessageId.isBlank()) {
+            context.append("\n当前待处理消息与当前主图同一条，或紧接当前主图之后由同一发送者发出。若文字是在说明图片，只对应当前主图，不要拿较早图片代替。"
+                    + "需要画面才能理解时再查看当前主图；不需要就不要展开图片描述。");
+        } else {
+            context.append("\n当前待处理文字没有可确认的紧邻图片，不要自行指定某一张；无法确认时不要描述画面，可以简短询问或保持沉默。");
+        }
+        return context.toString();
+    }
+
+    private static String currentImageMessageId(ConversationState state,
+                                                List<Map<String, String>> imageInfoMaps) {
+        if (state == null || imageInfoMaps == null || imageInfoMaps.isEmpty()) return null;
+        ConversationState.PendingSnapshot snapshot = state.getPendingSnapshot();
+        List<ConversationState.MessageEntry> pending = snapshot.messages();
+        List<String> pendingIds = snapshot.messageIds();
+        if (pending.size() == pendingIds.size() && !pending.isEmpty()
+                && pendingIds.stream().anyMatch(id -> id != null && !id.isBlank())) {
+            int last = pending.size() - 1;
+            String currentId = pendingIds.get(last);
+            if (hasImageMessage(imageInfoMaps, currentId)) return currentId;
+            if (!pending.get(last).text().isBlank() && last > 0) {
+                String previousId = pendingIds.get(last - 1);
+                if (hasImageMessage(imageInfoMaps, previousId)) return previousId;
+            }
+            // There is a complete message-ID sequence, but no adjacent image.
+            // Do not guess an older image as the subject of the new text.
+            return null;
+        }
+        // Compatibility path for legacy callers that did not preserve IDs.
+        for (int i = imageInfoMaps.size() - 1; i >= 0; i--) {
+            String messageId = imageInfoMaps.get(i).get("message_id");
+            if (messageId != null && !messageId.isBlank()) return messageId;
+        }
+        return null;
+    }
+
+    private static boolean hasImageMessage(List<Map<String, String>> imageInfoMaps, String messageId) {
+        if (messageId == null || messageId.isBlank()) return false;
+        return imageInfoMaps.stream().anyMatch(image -> messageId.equals(image.get("message_id")));
     }
 
     /** 旧缓存可能保存过整段多图描述；这种值无法证明属于当前这张图，必须重新识别。 */

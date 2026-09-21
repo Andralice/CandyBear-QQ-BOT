@@ -42,6 +42,12 @@ public class BotConfig {
     private static int baiLianPoolProbeIntervalMs;
     private static int baiLianPoolProbeTimeoutMs;
 
+    private static String auxiliaryApiKey;
+    private static String auxiliaryBaseUrl;
+    private static String auxiliaryModel;
+    private static int auxiliaryTimeoutMs;
+    private static int auxiliaryMaxRetries;
+
     private static String agentApiKey;
     private static String agentBaseUrl;
     private static String agentModel;
@@ -60,6 +66,15 @@ public class BotConfig {
     private static String groupCognitionThinkingType;
     private static String groupCognitionLlmProtocol;
     private static boolean groupCognitionUsesMainEndpoint;
+
+    private static MacroReviewMode macroReviewMode = MacroReviewMode.OFF;
+    private static Set<Long> macroReviewGroups = Collections.emptySet();
+    private static String macroReviewApiKey;
+    private static String macroReviewBaseUrl;
+    private static String macroReviewModel;
+    private static int macroReviewTimeoutMs;
+    private static int macroReviewWindowMessages;
+    private static int macroReviewOverlapMessages;
 
     private static String visionApiKey;
     private static String visionBaseUrl;
@@ -169,9 +184,21 @@ public class BotConfig {
                     props.getProperty("bailian.pool.probe-timeout-ms", "${BAILIAN_POOL_PROBE_TIMEOUT_MS:15000}")),
                     15000);
 
+            auxiliaryApiKey = resolveOrEmpty(props.getProperty("auxiliary.api-key", ""));
+            if (auxiliaryApiKey.isBlank()) auxiliaryApiKey = resolveOrEmpty("${WYY22_API_KEY_1}");
+            auxiliaryBaseUrl = resolveOrEmpty(
+                    props.getProperty("auxiliary.base-url", "https://www.wyy22.com/v1"));
+            auxiliaryModel = resolveOrEmpty(
+                    props.getProperty("auxiliary.model", "gpt-5.6-luna"));
+            auxiliaryTimeoutMs = parseInt(
+                    resolveOrEmpty(props.getProperty("auxiliary.timeout-ms", "120000")), 120000);
+            auxiliaryMaxRetries = parseInt(
+                    resolveOrEmpty(props.getProperty("auxiliary.max-retries", "2")), 2);
+
             agentApiKey = resolveOrEmpty(props.getProperty("agent.api-key", ""));
-            agentBaseUrl = resolveOrEmpty(props.getProperty("agent.base-url", "https://api.deepseek.com/v1/chat/completions"));
-            agentModel = resolveOrEmpty(props.getProperty("agent.model", "deepseek-v4-pro"));
+            if (agentApiKey.isBlank()) agentApiKey = auxiliaryApiKey;
+            agentBaseUrl = resolveOrEmpty(props.getProperty("agent.base-url", "https://www.wyy22.com/v1/chat/completions"));
+            agentModel = resolveOrEmpty(props.getProperty("agent.model", "gpt-5.6-luna"));
             agentTimeoutMs = parseInt(resolveOrEmpty(props.getProperty("agent.timeout-ms", "90000")), 90000);
             agentMaxRetries = parseInt(resolveOrEmpty(props.getProperty("agent.max-retries", "2")), 2);
             agentReasoningEffort = resolveOrEmpty(props.getProperty("agent.reasoning-effort", ""));
@@ -179,17 +206,15 @@ public class BotConfig {
             groupCognitionMode = resolveOrEmpty(props.getProperty("group-cognition.mode", "off"));
             groupCognitionGroups = parseLongSet(resolveOrEmpty(props.getProperty("group-cognition.groups", "")));
             groupCognitionApiKey = resolveOrEmpty(props.getProperty("group-cognition.api-key", ""));
-            if (groupCognitionApiKey.isBlank()) groupCognitionApiKey = baiLianApiKey;
+            if (groupCognitionApiKey.isBlank()) groupCognitionApiKey = auxiliaryApiKey;
             String configuredGroupCognitionBaseUrl = resolveOrEmpty(
                     props.getProperty("group-cognition.base-url", ""));
-            groupCognitionUsesMainEndpoint = configuredGroupCognitionBaseUrl.isBlank();
-            groupCognitionBaseUrl = groupCognitionUsesMainEndpoint
-                    ? baiLianBaseUrl : configuredGroupCognitionBaseUrl;
-            // An inherited endpoint is part of the main-model path; an explicitly configured
-            // cognition endpoint keeps its pre-existing OpenAI transport contract.
-            groupCognitionLlmProtocol = groupCognitionUsesMainEndpoint ? baiLianProtocol : "openai";
+            groupCognitionUsesMainEndpoint = false;
+            groupCognitionBaseUrl = configuredGroupCognitionBaseUrl.isBlank()
+                    ? auxiliaryBaseUrl : configuredGroupCognitionBaseUrl;
+            groupCognitionLlmProtocol = "openai";
             groupCognitionModel = resolveOrEmpty(props.getProperty("group-cognition.model", ""));
-            if (groupCognitionModel.isBlank()) groupCognitionModel = baiLianChatModel;
+            if (groupCognitionModel.isBlank()) groupCognitionModel = auxiliaryModel;
             groupCognitionTimeoutMs = parseInt(
                     resolveOrEmpty(props.getProperty("group-cognition.timeout-ms", "20000")), 20000);
             groupCognitionReasoningEffort = resolveOrEmpty(
@@ -199,10 +224,31 @@ public class BotConfig {
             groupCognitionThinkingType = resolveOrEmpty(
                     props.getProperty("group-cognition.thinking-type", ""));
 
+            macroReviewMode = MacroReviewMode.parse(resolveOrEmpty(
+                    props.getProperty("macro-review.mode", "off")));
+            macroReviewGroups = parseLongSet(resolveOrEmpty(props.getProperty("macro-review.groups", "")));
+            macroReviewApiKey = resolveOrEmpty(props.getProperty("macro-review.api-key", ""));
+            if (macroReviewApiKey.isBlank()) macroReviewApiKey = auxiliaryApiKey;
+            macroReviewBaseUrl = resolveOrEmpty(
+                    props.getProperty("macro-review.base-url", "https://www.wyy22.com/v1"));
+            macroReviewModel = resolveOrEmpty(
+                    props.getProperty("macro-review.model", "gpt-5.6-luna"));
+            macroReviewTimeoutMs = parseInt(
+                    resolveOrEmpty(props.getProperty("macro-review.timeout-ms", "120000")), 120000);
+            macroReviewWindowMessages = parseInt(
+                    resolveOrEmpty(props.getProperty("macro-review.window-messages", "32")), 32);
+            macroReviewOverlapMessages = parseInt(
+                    resolveOrEmpty(props.getProperty("macro-review.overlap-messages", "8")), 8);
+
             visionEnabled = Boolean.parseBoolean(resolveOrEmpty(props.getProperty("vision.enabled", "true")));
-            visionApiKey = resolveOrEmpty(props.getProperty("vision.api-key", baiLianApiKey));
-            visionBaseUrl = resolveOrEmpty(props.getProperty("vision.base-url", baiLianBaseUrl));
-            visionModel = resolveOrEmpty(props.getProperty("vision.model", "qwen-vl-max"));
+            // Vision 与主聊天解耦：默认走已配置的辅助 Luna 线路，避免旧的独立余额线路耗尽。
+            // 仍允许通过 vision.* 显式覆盖到专用视觉模型或主模型兼容端点。
+            visionApiKey = resolveOrEmpty(props.getProperty("vision.api-key", ""));
+            if (visionApiKey.isBlank()) visionApiKey = auxiliaryApiKey;
+            visionBaseUrl = resolveOrEmpty(props.getProperty("vision.base-url", ""));
+            if (visionBaseUrl.isBlank()) visionBaseUrl = auxiliaryBaseUrl;
+            visionModel = resolveOrEmpty(props.getProperty("vision.model", ""));
+            if (visionModel.isBlank()) visionModel = auxiliaryModel;
             visionTimeoutMs = parseInt(resolveOrEmpty(props.getProperty("vision.timeout-ms", "60000")), 60000);
 
             agnesEnabled = Boolean.parseBoolean(resolveOrEmpty(props.getProperty("agnes.enabled", "false")));
@@ -250,8 +296,9 @@ public class BotConfig {
             webSearchBackend = resolveOrEmpty(props.getProperty("web.search.backend", "bing"));
 
             auditApiKey = resolveOrEmpty(props.getProperty("audit.api-key", ""));
-            auditBaseUrl = resolveOrEmpty(props.getProperty("audit.base-url", "https://api.mytokenland.com/v1/chat/completions"));
-            auditModel = resolveOrEmpty(props.getProperty("audit.model", "claude-sonnet-4-6"));
+            if (auditApiKey.isBlank()) auditApiKey = auxiliaryApiKey;
+            auditBaseUrl = resolveOrEmpty(props.getProperty("audit.base-url", "https://www.wyy22.com/v1/chat/completions"));
+            auditModel = resolveOrEmpty(props.getProperty("audit.model", "gpt-5.6-luna"));
             // 审计模型允许较长推理时间，默认等待 120 秒；可由 AUDIT_TIMEOUT_MS 覆盖。
             auditTimeoutMs = parseInt(resolveOrEmpty(props.getProperty("audit.timeout-ms", "120000")), 120000);
 
@@ -270,6 +317,8 @@ public class BotConfig {
             }
             logger.info("🧭 群聊并行认知: mode={}, groups={}, model={}",
                     groupCognitionMode, groupCognitionGroups, groupCognitionModel);
+            logger.info("🔎 宏观审查: mode={}, groups={}, model={}",
+                    macroReviewMode, macroReviewGroups, macroReviewModel);
             logger.info("🖼️ 聊天图片模式: {}", baiLianMultimodalEnabled
                     ? "主模型多模态"
                     : "独立 Vision 描述（主聊天不发送原图）");
@@ -463,6 +512,12 @@ public class BotConfig {
 
     public static int getBaiLianPoolProbeTimeoutMs() { return baiLianPoolProbeTimeoutMs; }
 
+    public static String getAuxiliaryApiKey() { return auxiliaryApiKey; }
+    public static String getAuxiliaryBaseUrl() { return auxiliaryBaseUrl; }
+    public static String getAuxiliaryModel() { return auxiliaryModel; }
+    public static int getAuxiliaryTimeoutMs() { return auxiliaryTimeoutMs; }
+    public static int getAuxiliaryMaxRetries() { return auxiliaryMaxRetries; }
+
     public static String getAgentApiKey() {
         return agentApiKey;
     }
@@ -498,6 +553,36 @@ public class BotConfig {
     public static String getGroupCognitionThinkingType() { return groupCognitionThinkingType; }
     public static String getGroupCognitionLlmProtocol() { return groupCognitionLlmProtocol; }
     public static boolean isGroupCognitionUsesMainEndpoint() { return groupCognitionUsesMainEndpoint; }
+    public static boolean isGroupCognitionEnabledFor(String groupId) {
+        if (!com.start.service.GroupCognitionMode.parse(groupCognitionMode).analyzesMessages()
+                || groupId == null || groupId.isBlank()) return false;
+        try {
+            return groupCognitionGroups.contains(Long.parseLong(groupId.trim()));
+        } catch (NumberFormatException ignored) {
+            return false;
+        }
+    }
+
+    public static MacroReviewMode getMacroReviewMode() { return macroReviewMode; }
+    public static Set<Long> getMacroReviewGroups() { return macroReviewGroups; }
+    public static String getMacroReviewApiKey() { return macroReviewApiKey; }
+    public static String getMacroReviewBaseUrl() { return macroReviewBaseUrl; }
+    public static String getMacroReviewModel() { return macroReviewModel; }
+    public static int getMacroReviewTimeoutMs() { return macroReviewTimeoutMs; }
+    public static int getMacroReviewWindowMessages() {
+        return Math.max(8, Math.min(96, macroReviewWindowMessages));
+    }
+    public static int getMacroReviewOverlapMessages() {
+        return Math.max(0, Math.min(getMacroReviewWindowMessages() - 1, macroReviewOverlapMessages));
+    }
+    public static boolean isMacroReviewShadowFor(String groupId) {
+        if (macroReviewMode != MacroReviewMode.LIVE_SHADOW || groupId == null || groupId.isBlank()) return false;
+        try {
+            return macroReviewGroups.contains(Long.parseLong(groupId.trim()));
+        } catch (NumberFormatException ignored) {
+            return false;
+        }
+    }
 
     public static int getWorkingMemoryDefaultExpireHours() {
         return workingMemoryDefaultExpireHours;

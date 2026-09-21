@@ -98,6 +98,16 @@ public class ConversationState {
         }
     }
 
+    /** Returns pending text and IDs from one lock scope so positional matching cannot race an inbound message. */
+    public PendingSnapshot getPendingSnapshot() {
+        synchronized (pendingMessages) {
+            // Message IDs are optional for legacy callers, so keep null entries
+            // while still returning snapshots detached from the mutable buffer.
+            return new PendingSnapshot(List.copyOf(pendingMessages),
+                    Collections.unmodifiableList(new ArrayList<>(pendingMessageIds)));
+        }
+    }
+
     /** 获取当前所有图片信息的快照 */
     public List<ImageInfo> getImageInfos() {
         synchronized (imageInfos) {
@@ -130,6 +140,8 @@ public class ConversationState {
     }
 
     public record MessageEntry(String text, long timestamp) {}
+
+    public record PendingSnapshot(List<MessageEntry> messages, List<String> messageIds) {}
 
     public record ImageInfo(String url, String file, String messageId, int imageIndex, String senderId) {
         public ImageInfo(String url, String file) {

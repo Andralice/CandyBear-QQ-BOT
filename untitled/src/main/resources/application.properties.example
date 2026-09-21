@@ -23,6 +23,13 @@ BAILIAN_MULTIMODAL_ENABLED=false
 BAILIAN_TIMEOUT_MS=90000
 BAILIAN_MAX_RETRIES=2
 
+# 图片视觉处理只在表情包入库或用户明确需要时调用；默认复用辅助 Luna 线路
+VISION_ENABLED=true
+VISION_API_KEY=
+VISION_BASE_URL=https://www.wyy22.com/v1
+VISION_MODEL=gpt-5.6-luna
+VISION_TIMEOUT_MS=60000
+
 # 主模型候选池（可选）：启动探测一次；当前线路变慢/失败时并发短探测，后续新请求使用最快成功线路
 # 格式：id|base_url|model|protocol|api_key_env，多条线路用分号分隔；最后一列只能写环境变量名
 # 运行时增删：将完整候选串写入运行时配置 main_model_pool_candidates；下一次请求热重载，留空回退本配置
@@ -33,6 +40,13 @@ BAILIAN_POOL_ENABLED=false
 BAILIAN_POOL_PROBE_INTERVAL_MS=600000
 BAILIAN_POOL_PROBE_TIMEOUT_MS=15000
 BAILIAN_POOL_CANDIDATES=claude-opus-4-6-yetoken|https://yetoken.vip/v1|claude-opus-4-6|anthropic|YETOKEN_CLAUDE_API_KEY;claude-haiku-4-5-20251001-yetoken|https://yetoken.vip/v1|claude-haiku-4-5-20251001|anthropic|YETOKEN_CLAUDE_API_KEY;claude-opus-4-7-yetoken|https://yetoken.vip/v1|claude-opus-4-7|anthropic|YETOKEN_CLAUDE_API_KEY;claude-fable-5-yetoken|https://yetoken.vip/v1|claude-fable-5|anthropic|YETOKEN_CLAUDE_API_KEY;claude-opus-5-yetoken|https://yetoken.vip/v1|claude-opus-5|anthropic|YETOKEN_CLAUDE_API_KEY;gemini-3.1-flash-lite|https://yetoken.vip/v1|gemini-3.1-flash-lite|anthropic|YETOKEN_API_KEY;gemini-3-flash|https://yetoken.vip/v1|gemini-3-flash|anthropic|YETOKEN_API_KEY;gemini-2.5-flash-lite|https://yetoken.vip/v1|gemini-2.5-flash-lite|anthropic|YETOKEN_API_KEY;gpt-5.6-luna-wyy-1|https://www.wyy22.com/v1|gpt-5.6-luna|openai|WYY22_API_KEY_1;gpt-5.6-luna-wyy-2|https://www.wyy22.com/v1|gpt-5.6-luna|openai|WYY22_API_KEY_2;deepseek-flash-official|https://api.deepseek.com/v1|deepseek-flash|openai|DEEPSEEK_FLASH_API_KEY|thinking=disabled
+
+# 后台文本分析模型（不占用主聊天模型池）
+AUXILIARY_API_KEY=
+AUXILIARY_BASE_URL=https://www.wyy22.com/v1
+AUXILIARY_MODEL=gpt-5.6-luna
+AUXILIARY_TIMEOUT_MS=120000
+AUXILIARY_MAX_RETRIES=2
 
 # Agnes 免费 Flash 生图/生视频（需要明确设置 AGNES_ENABLED=true）
 # 密钥只通过 AGNES_API_KEY 注入；默认 API 地址与 agnes-free-media skill 一致
@@ -48,17 +62,23 @@ AGNES_POLL_INTERVAL_MS=2000
 AGNES_VERIFY_FREE_PRICING=true
 
 # Agent 服务配置
-AGENT_API_KEY=sk-your-key
-AGENT_BASE_URL=https://api.deepseek.com/v1/chat/completions
-AGENT_MODEL=deepseek-v4-pro
+AGENT_API_KEY=
+AGENT_BASE_URL=https://www.wyy22.com/v1/chat/completions
+AGENT_MODEL=gpt-5.6-luna
 AGENT_TIMEOUT_MS=90000
 AGENT_MAX_RETRIES=2
 
 # 审计/日志总结服务（OpenAI 兼容 API）
-AUDIT_API_KEY=sk-your-key
-AUDIT_BASE_URL=https://ai.furry.vg/v1/chat/completions
-AUDIT_MODEL=deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
+AUDIT_API_KEY=
+AUDIT_BASE_URL=https://www.wyy22.com/v1/chat/completions
+AUDIT_MODEL=gpt-5.6-luna
 AUDIT_TIMEOUT_MS=120000
+
+# 群认知与宏观审查默认关闭；需要时再显式指定群号和模式
+GROUP_COGNITION_MODE=off
+GROUP_COGNITION_GROUPS=
+MACRO_REVIEW_MODE=off
+MACRO_REVIEW_GROUPS=
 
 # 兼容旧版
 DASHSCOPE_API_KEY=sk-your-key

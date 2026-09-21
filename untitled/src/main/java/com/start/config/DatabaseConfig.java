@@ -478,6 +478,35 @@ public class DatabaseConfig {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """,
             """
+            CREATE TABLE IF NOT EXISTS macro_review_cursors (
+                group_id VARCHAR(64) PRIMARY KEY,
+                last_message_id BIGINT NOT NULL DEFAULT 0,
+                updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS macro_review_runs (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                task_id BIGINT NOT NULL,
+                group_id VARCHAR(64) NOT NULL,
+                from_message_id BIGINT NOT NULL,
+                to_message_id BIGINT NOT NULL,
+                processed_through_message_id BIGINT NOT NULL,
+                overlap_message_count INT NOT NULL DEFAULT 0,
+                processed_message_count INT NOT NULL DEFAULT 0,
+                window_truncated BOOLEAN NOT NULL DEFAULT FALSE,
+                status VARCHAR(24) NOT NULL,
+                result_json JSON NULL,
+                model_name VARCHAR(128) NULL,
+                prompt_version VARCHAR(64) NULL,
+                input_tokens INT NULL,
+                output_tokens INT NULL,
+                created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                INDEX idx_macro_run_group (group_id, id),
+                INDEX idx_macro_run_task (task_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
             CREATE TABLE IF NOT EXISTS message_state_changes (
                 id BIGINT AUTO_INCREMENT PRIMARY KEY,
                 message_id BIGINT NOT NULL,

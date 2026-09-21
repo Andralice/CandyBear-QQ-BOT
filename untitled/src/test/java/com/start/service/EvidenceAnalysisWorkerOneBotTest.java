@@ -3,6 +3,7 @@ package com.start.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.start.config.MacroReviewMode;
 import com.start.model.AnalysisTask;
 import com.start.model.MediaPartInput;
 import com.start.repository.AnalysisTaskRepository;
@@ -170,6 +171,38 @@ class EvidenceAnalysisWorkerOneBotTest {
         assertTrue(wideTasks.completedResult().contains("\"node_count\":100"));
     }
 
+    @Test
+    void legacyProfileTaskForShadowGroupIsSkippedBeforeExtraction() throws Exception {
+        AnalysisTask task = task("EXTRACT_PROFILE_FACTS", "{}", "437625485");
+
+        assertTrue(EvidenceAnalysisWorker.shouldSkipLegacyProfileExtraction(
+                task, MacroReviewMode.LIVE_SHADOW, java.util.Set.of(437625485L)));
+
+        FakeTaskRepository tasks = new FakeTaskRepository(task);
+        EvidenceAnalysisWorker worker = worker(tasks, new FakeArtifactRepository(filePart("unused")), null);
+
+        assertTrue(worker.runOnce(MacroReviewMode.LIVE_SHADOW, java.util.Set.of(437625485L)));
+        assertTrue(tasks.completedResult().contains("\"status\":\"SKIPPED\""));
+        assertTrue(tasks.completedResult().contains("MACRO_REVIEW_OWNS_PROFILE_EXTRACTION"));
+    }
+
+    @Test
+    void legacyProfileTaskForOtherGroupIsNotSkipped() {
+        assertFalse(EvidenceAnalysisWorker.shouldSkipLegacyProfileExtraction(
+                task("EXTRACT_PROFILE_FACTS", "{}", "group-1"),
+                MacroReviewMode.LIVE_SHADOW, java.util.Set.of(437625485L)));
+    }
+
+    @Test
+    void groupAtmosphereIsSkippedWhenCognitionIsOff() throws Exception {
+        FakeTaskRepository tasks = new FakeTaskRepository(
+                task("ANALYZE_GROUP_ATMOSPHERE", "{\"message_id\":1}"));
+        EvidenceAnalysisWorker worker = worker(tasks, new FakeArtifactRepository(filePart("unused")), null);
+
+        assertTrue(worker.runOnce());
+        assertTrue(tasks.completedResult().contains("GROUP_COGNITION_DISABLED"));
+    }
+
     private static EvidenceAnalysisWorker worker(FakeTaskRepository tasks, FakeArtifactRepository artifacts,
                                                  BiFunction<String, JsonNode, CompletableFuture<JsonNode>> api) {
         return new EvidenceAnalysisWorker(tasks, artifacts, new MessageRepository(),
@@ -177,7 +210,11 @@ class EvidenceAnalysisWorkerOneBotTest {
     }
 
     private static AnalysisTask task(String type, String refs) {
-        return new AnalysisTask(1, "test-task", type, "PROCESSING", 1, "group-1", "user-1", refs,
+        return task(type, refs, "group-1");
+    }
+
+    private static AnalysisTask task(String type, String refs, String groupId) {
+        return new AnalysisTask(1, "test-task", type, "PROCESSING", 1, groupId, "user-1", refs,
                 1, 3, LocalDateTime.now(), "test-worker", LocalDateTime.now().plusMinutes(1));
     }
 

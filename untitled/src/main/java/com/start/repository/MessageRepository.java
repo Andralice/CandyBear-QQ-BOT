@@ -1,5 +1,6 @@
 package com.start.repository;
 
+import com.start.config.BotConfig;
 import com.start.config.DatabaseConfig;
 import com.start.model.ChatMessage;
 import com.start.model.MessagePart;
@@ -133,9 +134,12 @@ public class MessageRepository extends BaseRepository {
                             task.executeBatch();
                         }
                     }
+                    String groupId = getStringValue(data, "groupId", null);
+                    boolean macroReviewShadow = !getBooleanValue(data, "isRobotReply", false)
+                            && BotConfig.isMacroReviewShadowFor(groupId);
                     if (!getBooleanValue(data, "isRobotReply", false)
                             && (!getStringValue(data, "content", "").isBlank()
-                            || (parts != null && !parts.isEmpty()))) {
+                            || (parts != null && !parts.isEmpty())) && !macroReviewShadow) {
                         String profileTaskSql = "INSERT INTO model_analysis_tasks (task_key, task_type, priority, " +
                                 "scope_group_id, scope_user_id, input_refs, max_attempts) VALUES (?, ?, ?, ?, ?, ?, ?)";
                         try (PreparedStatement profileTask = conn.prepareStatement(profileTaskSql)) {
@@ -149,8 +153,24 @@ public class MessageRepository extends BaseRepository {
                             profileTask.executeUpdate();
                         }
                     }
-                    String groupId = getStringValue(data, "groupId", null);
-                    if (!getBooleanValue(data, "isRobotReply", false) && groupId != null && !groupId.isBlank()) {
+                    if (macroReviewShadow && (!getStringValue(data, "content", "").isBlank()
+                            || (parts != null && !parts.isEmpty()))) {
+                        String macroTaskSql = "INSERT INTO model_analysis_tasks (task_key, task_type, priority, " +
+                                "scope_group_id, input_refs, max_attempts) VALUES (?, 'MACRO_REVIEW_BATCH', 5, ?, ?, 3) " +
+                                "ON DUPLICATE KEY UPDATE input_refs=VALUES(input_refs), " +
+                                "status=CASE WHEN status IN ('SUCCEEDED','DEAD') THEN 'PENDING' ELSE status END, " +
+                                "attempt_count=CASE WHEN status IN ('SUCCEEDED','DEAD') THEN 0 ELSE attempt_count END, " +
+                                "not_before=CURRENT_TIMESTAMP(3), updated_at=CURRENT_TIMESTAMP(3)";
+                        long bucket = System.currentTimeMillis() / 300_000L;
+                        try (PreparedStatement macroTask = conn.prepareStatement(macroTaskSql)) {
+                            macroTask.setString(1, "group:" + groupId + ":MACRO_REVIEW:" + bucket);
+                            macroTask.setString(2, groupId);
+                            macroTask.setString(3, "{\"message_id\":" + messageId + "}");
+                            macroTask.executeUpdate();
+                        }
+                    }
+                    if (!getBooleanValue(data, "isRobotReply", false)
+                            && BotConfig.isGroupCognitionEnabledFor(groupId)) {
                         String atmosphereTaskSql = "INSERT INTO model_analysis_tasks (task_key, task_type, priority, scope_group_id, input_refs, max_attempts) " +
                                 "VALUES (?, 'ANALYZE_GROUP_ATMOSPHERE', 1, ?, ?, 3) ON DUPLICATE KEY UPDATE input_refs=VALUES(input_refs), updated_at=CURRENT_TIMESTAMP(3)";
                         long bucket = System.currentTimeMillis() / 300_000L;
@@ -176,6 +196,24 @@ public class MessageRepository extends BaseRepository {
                     conn.setAutoCommit(true);
                 }
             }
+        });
+    }
+
+    /** Enqueues a follow-up after a shadow run discovers messages arrived during processing. */
+    public DatabaseResult<Integer> enqueueMacroReviewTask(String groupId, long messageId, String taskKey) {
+        if (!BotConfig.isMacroReviewShadowFor(groupId) || messageId <= 0
+                || taskKey == null || taskKey.isBlank()) return DatabaseResult.success(0);
+        return safeExecute(() -> {
+            String sql = "INSERT INTO model_analysis_tasks (task_key, task_type, priority, scope_group_id, " +
+                    "input_refs, max_attempts) VALUES (?, 'MACRO_REVIEW_BATCH', 5, ?, ?, 3) " +
+                    "ON DUPLICATE KEY UPDATE input_refs=VALUES(input_refs), " +
+                    "status=CASE WHEN status IN ('SUCCEEDED','DEAD') THEN 'PENDING' ELSE status END, " +
+                    "attempt_count=CASE WHEN status IN ('SUCCEEDED','DEAD') THEN 0 ELSE attempt_count END, " +
+                    "not_before=CURRENT_TIMESTAMP(3), updated_at=CURRENT_TIMESTAMP(3)";
+            DatabaseResult<Long> inserted = executeInsert(sql, taskKey, groupId,
+                    "{\"message_id\":" + messageId + "}");
+            if (!inserted.isSuccess()) throw new SQLException(inserted.getError());
+            return inserted.getData() == null ? 0 : 1;
         });
     }
 
@@ -221,6 +259,81 @@ public class MessageRepository extends BaseRepository {
         List<Map<String, Object>> chronological = new ArrayList<>(result.getData());
         Collections.reverse(chronological);
         return DatabaseResult.success(chronological);
+    }
+
+    /** Returns new group messages plus a bounded overlap before the review cursor. */
+    public DatabaseResult<List<Map<String, Object>>> findMacroReviewMessages(
+            String groupId, long afterMessageId, long throughMessageId, int overlap, int limit) {
+        if (groupId == null || groupId.isBlank() || throughMessageId <= afterMessageId) {
+            return DatabaseResult.success(List.of());
+        }
+        int boundedLimit = Math.max(1, Math.min(limit, 96));
+        int boundedOverlap = Math.max(0, Math.min(overlap, boundedLimit - 1));
+        String columns = "id, user_id, group_id, session_id, content, raw_content, sender_type, " +
+                "is_robot_reply, is_private, reply_to_id, availability_status, created_at";
+        DatabaseResult<List<Map<String, Object>>> fresh = executeQuery(
+                "SELECT " + columns + " FROM messages WHERE group_id=? AND is_private=FALSE " +
+                        "AND id>? AND id<=? AND retracted_at IS NULL AND redacted_at IS NULL " +
+                        "ORDER BY id ASC LIMIT ?", this::mapToHashMap,
+                groupId, afterMessageId, throughMessageId, boundedLimit - boundedOverlap);
+        if (!fresh.isSuccess() || fresh.getData() == null) return fresh;
+
+        List<Map<String, Object>> overlapRows = List.of();
+        if (afterMessageId > 0 && boundedOverlap > 0) {
+            DatabaseResult<List<Map<String, Object>>> previous = executeQuery(
+                    "SELECT " + columns + " FROM messages WHERE group_id=? AND is_private=FALSE " +
+                            "AND id<=? AND retracted_at IS NULL AND redacted_at IS NULL " +
+                            "ORDER BY id DESC LIMIT ?", this::mapToHashMap,
+                    groupId, afterMessageId, boundedOverlap);
+            if (!previous.isSuccess() || previous.getData() == null) {
+                return DatabaseResult.failure(previous.getError());
+            }
+            overlapRows = new ArrayList<>(previous.getData());
+            Collections.reverse(overlapRows);
+        }
+
+        Map<Long, Map<String, Object>> ordered = new LinkedHashMap<>();
+        for (Map<String, Object> row : overlapRows) ordered.put(rowId(row), row);
+        for (Map<String, Object> row : fresh.getData()) ordered.put(rowId(row), row);
+        return DatabaseResult.success(new ArrayList<>(ordered.values()));
+    }
+
+    /** Returns one bounded recent window for the first shadow run; it must not replay all history by default. */
+    public DatabaseResult<List<Map<String, Object>>> findRecentMacroReviewMessages(
+            String groupId, long throughMessageId, int limit) {
+        if (groupId == null || groupId.isBlank() || throughMessageId <= 0) {
+            return DatabaseResult.success(List.of());
+        }
+        int boundedLimit = Math.max(1, Math.min(limit, 96));
+        String columns = "id, user_id, group_id, session_id, content, raw_content, sender_type, " +
+                "is_robot_reply, is_private, reply_to_id, availability_status, created_at";
+        DatabaseResult<List<Map<String, Object>>> result = executeQuery(
+                "SELECT " + columns + " FROM messages WHERE group_id=? AND is_private=FALSE " +
+                        "AND id<=? AND retracted_at IS NULL AND redacted_at IS NULL " +
+                        "ORDER BY id DESC LIMIT ?", this::mapToHashMap,
+                groupId, throughMessageId, boundedLimit);
+        if (!result.isSuccess() || result.getData() == null) return result;
+        List<Map<String, Object>> chronological = new ArrayList<>(result.getData());
+        Collections.reverse(chronological);
+        return DatabaseResult.success(chronological);
+    }
+
+    public DatabaseResult<Long> findLatestGroupMessageId(String groupId) {
+        if (groupId == null || groupId.isBlank()) return DatabaseResult.success(0L);
+        return executeQuerySingle(
+                "SELECT COALESCE(MAX(id), 0) FROM messages WHERE group_id=? AND is_private=FALSE " +
+                        "AND retracted_at IS NULL AND redacted_at IS NULL", rs -> {
+                    try {
+                        return rs.getLong(1);
+                    } catch (SQLException e) {
+                        throw new IllegalStateException(e);
+                    }
+                }, groupId);
+    }
+
+    private static long rowId(Map<String, Object> row) {
+        Object value = row == null ? null : row.get("id");
+        return value instanceof Number number ? number.longValue() : 0;
     }
 
     public DatabaseResult<Map<String, Object>> findMessageById(long messageId) {

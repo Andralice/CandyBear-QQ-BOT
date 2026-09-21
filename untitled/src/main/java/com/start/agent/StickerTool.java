@@ -20,10 +20,10 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 表情包发送工具 —— AI 在聊天中发送表情包/梗图/QQ 表情。
+ * 表情包发送工具 —— AI 在聊天中发送真实表情包/梗图。
  *
  * <p>数据源统一由 {@link StickerIngestService} 管理：自动入库的表情包 + 管理员私聊导入的 legacy
- * 表情包关键词映射（file 字段为空时回退到 QQ face）。
+ * 表情包关键词映射；没有真实图片时不发送 QQ 内置表情。
  */
 public class StickerTool implements Tool {
 
@@ -41,26 +41,13 @@ public class StickerTool implements Tool {
     private static final Map<String, Long> lastSendTime = new ConcurrentHashMap<>();
     private static final long COOLDOWN_MS = 30_000;
 
-    // QQ 内置表情 face id 映射（file 字段空时的回退）
-    private static final Map<String, Integer> FACE_FALLBACK = Map.ofEntries(
-            Map.entry("开心", 14), Map.entry("笑", 14), Map.entry("哈哈", 14),
-            Map.entry("无语", 11), Map.entry("尴尬", 11),
-            Map.entry("哭", 6), Map.entry("难过", 6),
-            Map.entry("生气", 12), Map.entry("怒", 12),
-            Map.entry("惊讶", 1), Map.entry("震惊", 1),
-            Map.entry("害羞", 7),
-            Map.entry("赞", 76), Map.entry("厉害", 76), Map.entry("牛", 76),
-            Map.entry("爱", 66), Map.entry("喜欢", 66),
-            Map.entry("白眼", 22), Map.entry("嫌弃", 22)
-    );
-
     public StickerTool(Main bot) {
         this.bot = bot;
         try {
             int count = StickerIngestService.getInstance().getAllStickers().size();
             logger.info("StickerTool 初始化：当前 sticker 库 {} 条", count);
         } catch (Exception e) {
-            logger.warn("StickerIngestService 未初始化，sticker 功能将只使用 QQ face: {}", e.getMessage());
+            logger.warn("StickerIngestService 未初始化，sticker 功能暂不可用: {}", e.getMessage());
         }
     }
 
@@ -69,7 +56,7 @@ public class StickerTool implements Tool {
 
     @Override
     public String getDescription() {
-        return "用表情包/QQ表情/梗图回应群友/私聊好友，是你日常聊天的一部分。\n" +
+        return "用真实表情包/梗图回应群友/私聊好友，是你日常聊天的一部分。\n" +
                 "触发场景：\n" +
                 "- 对方表达明显情绪（开心/难过/无语/愤怒/惊讶等）→ 发匹配情绪的图\n" +
                 "- 对方发了图/梗 → 跟图\n" +
@@ -124,10 +111,10 @@ public class StickerTool implements Tool {
                     String b64 = Base64.getEncoder().encodeToString(bytes);
                     cqCode = "[CQ:image,file=base64://" + b64 + "]";
                 } else {
-                    cqCode = faceFallback(selected);
+                    return "表情包读取失败，暂时没有可发送的图片";
                 }
             } else {
-                cqCode = faceFallback(selected);
+                return "没找到可发送的真实表情包";
             }
 
             if (cqCode == null || cqCode.isBlank()) {
@@ -177,7 +164,7 @@ public class StickerTool implements Tool {
         } catch (Exception e) {
             return null;
         }
-        // 只选有真图的（file 非空）。legacy face fallback 条目不进选池。
+        // 只选有真实图片的记录；旧的无图记录不参与发送。
         List<StickerRecord> realStickers = new ArrayList<>();
         for (StickerRecord r : all) {
             if (r.file != null && !r.file.isBlank()) {
@@ -185,8 +172,7 @@ public class StickerTool implements Tool {
             }
         }
         if (realStickers.isEmpty()) {
-            // 没真图时 fallback 到 face（保留功能）
-            return pickFaceFallback(all);
+            return null;
         }
         if (keywords == null || keywords.isBlank()) {
             return realStickers.get(ThreadLocalRandom.current().nextInt(realStickers.size()));
@@ -235,26 +221,4 @@ public class StickerTool implements Tool {
 
     private record ScoredSticker(StickerRecord sticker, int score) {}
 
-    /** 仅在没真图时兜底用：返回一条 legacy（file=""），execute() 走 faceFallback 路径。 */
-    private StickerRecord pickFaceFallback(List<StickerRecord> all) {
-        for (StickerRecord r : all) {
-            if (r.file == null || r.file.isBlank()) {
-                return r;
-            }
-        }
-        return null;
-    }
-
-    private String faceFallback(StickerRecord entry) {
-        // 优先用 keywords（管理员修正的），回退到 autoKeywords
-        List<String> candidates = !entry.keywords.isEmpty() ? entry.keywords : entry.autoKeywords;
-        for (String kw : candidates) {
-            for (Map.Entry<String, Integer> fb : FACE_FALLBACK.entrySet()) {
-                if (kw.contains(fb.getKey()) || fb.getKey().contains(kw)) {
-                    return "[CQ:face,id=" + fb.getValue() + "]";
-                }
-            }
-        }
-        return "[CQ:face,id=" + (14 + ThreadLocalRandom.current().nextInt(5)) + "]";
-    }
 }

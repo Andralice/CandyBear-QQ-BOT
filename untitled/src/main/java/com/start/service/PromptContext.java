@@ -27,6 +27,8 @@ public class PromptContext {
     String spyGameDesc;
     String numberGameDesc;
     String publicGroupContext;
+    /** 程序从本轮群消息提取的指向证据，包含发送者、@目标和回复链。 */
+    String turnEvidence;
     String timeContext;
     String metricsHint;
     boolean allowSilence;
@@ -61,6 +63,7 @@ public class PromptContext {
     public PromptContext spyGameDesc(String v) { this.spyGameDesc = v; return this; }
     public PromptContext numberGameDesc(String v) { this.numberGameDesc = v; return this; }
     public PromptContext publicGroupContext(String v) { this.publicGroupContext = v; return this; }
+    public PromptContext turnEvidence(String v) { this.turnEvidence = v; return this; }
     public PromptContext timeContext(String v) { this.timeContext = v; return this; }
     public PromptContext metricsHint(String v) { this.metricsHint = v; return this; }
     public PromptContext allowSilence(boolean v) { this.allowSilence = v; return this; }

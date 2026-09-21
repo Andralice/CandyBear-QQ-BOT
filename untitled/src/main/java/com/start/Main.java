@@ -350,29 +350,77 @@ public class Main extends WebSocketClient {
                     logger.warn("保存消息失败: {}", e.getMessage());
                 }
 
-                // 分发事件给注册的处理器
-                this.handlerRegistry.dispatch(event, this);
+                // OneBot 的读取线程只能负责收包和完成 echo 回执。处理器可能触发图片下载、模型调用
+                // 或等待发送回执，必须移到已有的按群/用户串行执行器，否则大图发送会把后续回执一起堵住。
+                dispatchInboundAsync(event, messageType, event.path("group_id").asLong(), userId);
             }
 
         } catch (Exception e) {
             logger.error("❌ 处理消息失败", e);
             try {
-                String msgType = null;
-                long groupId = 0;
-                long userId = 0;
-                try {
-                    JsonNode event = MAPPER.readTree(message);
-                    msgType = event.path("message_type").asText();
-                    groupId = event.path("group_id").asLong();
-                    userId = event.path("user_id").asLong();
-                } catch (Exception ignored) {}
-                String fallback = BaiLianService.GENERATION_FAILURE_MESSAGE;
-                if ("group".equals(msgType) && groupId > 0) {
-                    sendGroupReply(groupId, fallback);
-                } else if ("private".equals(msgType) && userId > 0) {
-                    sendPrivateReply(userId, fallback);
+                JsonNode failedEvent = MAPPER.readTree(message);
+                scheduleFallbackForEvent(failedEvent);
+            } catch (Exception ignored) {
+                // Malformed payload has no reliable target; log above is sufficient.
+            }
+        }
+    }
+
+    private void dispatchInboundAsync(JsonNode event, String messageType, long groupId, long userId) {
+        Runnable dispatch = () -> {
+            try {
+                if (handlerRegistry != null) {
+                    handlerRegistry.dispatch(event, this);
                 }
-            } catch (Exception ignored) {}
+            } catch (Throwable t) {
+                logger.error("异步处理 OneBot 消息失败", t);
+                sendFallbackForEvent(event);
+            }
+        };
+
+        if (conversationExecutor == null) {
+            dispatch.run();
+            return;
+        }
+
+        String key = dispatchKey(messageType, groupId, userId);
+        conversationExecutor.execute(key, dispatch);
+    }
+
+    static String dispatchKey(String messageType, long groupId, long userId) {
+        if ("group".equals(messageType) && groupId > 0) {
+            return "inbound:group:" + groupId;
+        }
+        if ("private".equals(messageType) && userId > 0) {
+            return "inbound:private:" + userId;
+        }
+        return "inbound:unknown";
+    }
+
+    private void scheduleFallbackForEvent(JsonNode event) {
+        if (event == null) return;
+        Runnable fallback = () -> sendFallbackForEvent(event);
+        if (conversationExecutor == null) {
+            fallback.run();
+            return;
+        }
+        String messageType = event.path("message_type").asText();
+        conversationExecutor.execute(dispatchKey(messageType,
+                event.path("group_id").asLong(), event.path("user_id").asLong()), fallback);
+    }
+
+    private void sendFallbackForEvent(JsonNode event) {
+        try {
+            String messageType = event.path("message_type").asText();
+            long groupId = event.path("group_id").asLong();
+            long userId = event.path("user_id").asLong();
+            if ("group".equals(messageType) && groupId > 0) {
+                sendGroupReply(groupId, BaiLianService.GENERATION_FAILURE_MESSAGE);
+            } else if ("private".equals(messageType) && userId > 0) {
+                sendPrivateReply(userId, BaiLianService.GENERATION_FAILURE_MESSAGE);
+            }
+        } catch (Exception fallbackError) {
+            logger.warn("异步消息兜底发送失败: {}", fallbackError.getMessage());
         }
     }
 
@@ -647,12 +695,13 @@ public class Main extends WebSocketClient {
             if (receipt == null) {
                 return false;
             }
+            String sentMessageId = receiptMessageId(receipt);
             // ✅ 仅在 OneBot 确认送达后才持久化
             try {
                 if (this.messageService != null) {
                     this.messageService.saveAIReply(sessionId,
                             String.valueOf(groupId), reply, null, false,
-                            receiptMessageId(receipt), receipt.toString(), null);
+                            sentMessageId, receipt.toString(), null);
                 }
             } catch (Exception e) {
                 logger.warn("群消息已发送，但消息持久化失败: {}", e.getMessage());
@@ -663,7 +712,7 @@ public class Main extends WebSocketClient {
                     String gid = String.valueOf(groupId);
                     this.baiLianService.recordGroupContext(
                             gid, "candybear", "糖果熊", reply, "bot_reply");
-                    this.baiLianService.recordBotOwnGroupMessage(gid, reply);
+                    this.baiLianService.recordBotOwnGroupMessage(gid, reply, sentMessageId);
                     this.baiLianService.getBotMemory().record(
                             String.valueOf(groupId), BotMemoryService.EntryType.SAID, null,
                             reply.length() > 100 ? reply.substring(0, 100) + "..." : reply);
@@ -690,6 +739,8 @@ public class Main extends WebSocketClient {
     static String sanitizeOutgoingMessage(String message) {
         if (message == null || message.isEmpty()) return "";
         message = BaiLianService.normalizeBareAtCqCodes(message);
+        // 普通出站允许 @ 和真实媒体，但 QQ 内置 face/mface 属于表情输出，统一丢弃。
+        message = BaiLianService.stripDisallowedCqCodes(message);
         Matcher matcher = CQ_CODE_PATTERN.matcher(message);
         List<String> cqCodes = new java.util.ArrayList<>();
         StringBuilder masked = new StringBuilder(message.length());

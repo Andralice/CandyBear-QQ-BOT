@@ -132,6 +132,68 @@ public class MessageUtil {
     }
 
     /**
+     * 将 OneBot 消息段压缩成给群聊关系判断使用的可读摘要。
+     * 不把 URL、文件内容或原始 CQ 码塞进公共上下文，只保留消息类型和必要的短标题。
+     */
+    public static String summarizeSegments(JsonNode messageNode) {
+        if (messageNode == null || messageNode.isNull()) return "";
+        if (messageNode.isTextual()) return messageNode.asText().isBlank() ? "" : "文字";
+        if (!messageNode.isArray()) return "其他消息";
+
+        List<String> parts = new ArrayList<>();
+        for (JsonNode seg : messageNode) {
+            if (seg == null || !seg.isObject()) continue;
+            String type = seg.path("type").asText("").trim().toLowerCase();
+            JsonNode data = seg.path("data");
+            switch (type) {
+                case "text" -> {
+                    if (!data.path("text").asText("").isBlank()) parts.add("文字");
+                }
+                case "at" -> {
+                    String qq = data.path("qq").asText("").trim();
+                    parts.add(qq.isEmpty() ? "@某人" : "@用户" + qq);
+                }
+                case "reply" -> {
+                    String id = data.path("id").asText("").trim();
+                    parts.add(id.isEmpty() ? "回复消息" : "回复消息" + id);
+                }
+                case "image" -> parts.add("图片");
+                case "face", "mface" -> parts.add("表情");
+                case "file" -> {
+                    String name = compactSegmentValue(data.path("file").asText(""), 40);
+                    parts.add(name.isEmpty() ? "文件" : "文件「" + name + "」");
+                }
+                case "record", "音频" -> parts.add("语音");
+                case "video" -> parts.add("视频");
+                case "share" -> {
+                    String title = compactSegmentValue(data.path("title").asText(""), 40);
+                    parts.add(title.isEmpty() ? "分享卡片" : "分享卡片「" + title + "」");
+                }
+                case "music" -> {
+                    String title = compactSegmentValue(data.path("title").asText(""), 40);
+                    parts.add(title.isEmpty() ? "音乐" : "音乐「" + title + "」");
+                }
+                case "forward" -> parts.add("转发消息");
+                case "json" -> parts.add("JSON 卡片");
+                case "xml" -> parts.add("XML 卡片");
+                case "contact" -> parts.add("联系人");
+                case "location" -> parts.add("位置");
+                case "node" -> parts.add("转发节点");
+                case "" -> parts.add("未知消息段");
+                default -> parts.add("其他消息段(" + compactSegmentValue(type, 24) + ")");
+            }
+        }
+        return String.join("、", parts.stream().distinct().toList());
+    }
+
+    private static String compactSegmentValue(String value, int maxChars) {
+        if (value == null) return "";
+        String compact = value.replaceAll("[\\r\\n]+", " ").trim();
+        if (compact.length() <= maxChars) return compact;
+        return compact.substring(0, Math.max(0, maxChars - 3)) + "...";
+    }
+
+    /**
      * 判断消息是否 @ 了指定的 QQ
      */
     public static boolean isAt(JsonNode messageNode, long targetQq) {
