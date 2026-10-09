@@ -230,7 +230,7 @@ public class PromptBuilder {
             if (real.isEmpty()) {
                 sb.append("\n库还是空的，群里发图会自动积累。库为空时不要调用 send_sticker，也不要自己编写 QQ 表情码。");
             } else {
-                sb.append("\n需要用图表达情绪时调用 send_sticker（选情绪关键词）；普通文字回复不要写 QQ 表情码。");
+                sb.append("\n只有图片比文字回应更自然或对方明确要图时才调用 send_sticker，并传清楚这次想表达的情绪或场景；视觉模型会看候选图，无合适图就不发。普通回复不要写 QQ 表情码。");
             }
         } catch (Exception e) {
             // ignore — StickerIngestService 未初始化时跳过
