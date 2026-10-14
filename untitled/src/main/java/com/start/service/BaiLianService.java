@@ -1540,7 +1540,8 @@ public class BaiLianService implements AutoCloseable {
                         pendingCalls.get(0).path("function").path("name").asText())) {
                     WebDashboardListener.recordToolCall(GroupTurnResultTool.NAME);
                     return completeGroupTurn(pendingCalls.get(0), groupId, userPrompt, allowSilence,
-                            toolCalls, groupAssessmentAtMs, replyToCurrentMessage);
+                            toolCalls, groupAssessmentAtMs, replyToCurrentMessage,
+                            systemPrompt, modelRoute, messages);
                 }
 
                 // === 有工具调用 ===
@@ -1901,13 +1902,16 @@ public class BaiLianService implements AutoCloseable {
         }
 
         if (groupId != null) {
+            GroupTurnAssessment assessment;
             try {
-                return completeGroupTurn(GroupTurnResultTool.parse(reply, objectMapper), groupId,
-                        userPrompt, allowSilence, toolCalls, groupAssessmentAtMs, replyToCurrentMessage);
+                assessment = GroupTurnResultTool.parse(reply, objectMapper);
             } catch (Exception e) {
-                logger.warn("群聊模型未提交有效的最终决策，拒绝发送: {}", e.getClass().getSimpleName());
-                return GenerationResult.error(GENERATION_FAILURE_MESSAGE);
+                return retryGroupTurnDecision(systemPrompt, modelRoute, messages, groupId,
+                        userPrompt, allowSilence, toolCalls, groupAssessmentAtMs,
+                        replyToCurrentMessage, e);
             }
+            return completeGroupTurn(assessment, groupId, userPrompt, allowSilence,
+                    toolCalls, groupAssessmentAtMs, replyToCurrentMessage);
         }
 
         // 规则书和画像只属于模型的思考上下文。模型偶尔把自我介绍写成设定清单时，
@@ -1975,14 +1979,90 @@ public class BaiLianService implements AutoCloseable {
 
     private GenerationResult completeGroupTurn(JsonNode toolCall, String groupId, String userPrompt,
                                                boolean allowSilence, int toolCalls, long assessedAtMs,
-                                               boolean replyToCurrentMessage) {
+                                               boolean replyToCurrentMessage, String systemPrompt,
+                                               MainModelPool.Candidate modelRoute,
+                                               List<Map<String, Object>> messages) {
+        GroupTurnAssessment assessment;
         try {
-            GroupTurnAssessment assessment = GroupTurnResultTool.parse(
+            assessment = GroupTurnResultTool.parse(
                     toolCall.path("function").path("arguments").asText("{}"), objectMapper);
-            return completeGroupTurn(assessment, groupId, userPrompt, allowSilence,
-                    toolCalls + 1, assessedAtMs, replyToCurrentMessage);
         } catch (Exception e) {
-            logger.warn("群聊最终决策结果无效，拒绝发送: {}", e.getClass().getSimpleName());
+            return retryGroupTurnDecision(systemPrompt, modelRoute, messages, groupId,
+                    userPrompt, allowSilence, toolCalls + 1, assessedAtMs,
+                    replyToCurrentMessage, e);
+        }
+        return completeGroupTurn(assessment, groupId, userPrompt, allowSilence,
+                toolCalls + 1, assessedAtMs, replyToCurrentMessage);
+    }
+
+    private GenerationResult retryGroupTurnDecision(String systemPrompt,
+                                                     MainModelPool.Candidate modelRoute,
+                                                     List<Map<String, Object>> messages,
+                                                     String groupId, String userPrompt,
+                                                     boolean allowSilence, int toolCalls,
+                                                     long assessedAtMs,
+                                                     boolean replyToCurrentMessage,
+                                                     Exception initialFailure) {
+        logger.warn("群聊最终决策无法解析，尝试一次格式修复: {}",
+                initialFailure.getClass().getSimpleName());
+        try {
+            LlmProtocol.Type protocol = modelRoute.protocol();
+            List<Map<String, Object>> retryMessages = new ArrayList<>(messages);
+            retryMessages.add(buildMessage("user",
+                    "上一轮最终决策格式无效。请根据现有上下文，只调用 group_turn_result 提交有效决策；"
+                            + "不要调用其他工具，也不要执行任何操作。",
+                    Collections.emptyList(), protocol));
+            List<Map<String, Object>> retryToolSpecs = LlmProtocol.buildToolSpecs(
+                    protocol, List.of(new GroupTurnResultTool()), ignored -> null);
+            Map<String, Object> body = LlmProtocol.buildRequestBody(
+                    protocol, modelRoute.model(), systemPrompt, retryMessages, retryToolSpecs,
+                    1024, baiLianReasoningEffort, modelRoute.thinkingDisabled());
+            body.put("tool_choice", protocol.isAnthropic()
+                    ? Map.of("type", "tool", "name", GroupTurnResultTool.NAME)
+                    : Map.of("type", "function", "function", Map.of("name", GroupTurnResultTool.NAME)));
+
+            HttpRequest request = LlmProtocol.addAuthHeaders(HttpRequest.newBuilder()
+                            .uri(URI.create(modelRoute.endpoint())), protocol, modelRoute.apiKey())
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))
+                    .timeout(Duration.ofMillis(this.bailianTimeoutMs))
+                    .build();
+            long startedAt = System.nanoTime();
+            HttpResponse<String> response = BailianRetryExecutor.executeHttp(
+                    "群聊最终决策格式修复 " + modelRoute.id(),
+                    () -> httpClient.send(request, HttpResponse.BodyHandlers.ofString()),
+                    this.bailianMaxRetries);
+            if (response.statusCode() != 200) {
+                throw new RuntimeException("HTTP " + response.statusCode());
+            }
+            JsonNode root = objectMapper.readTree(response.body());
+            if (root.has("error")) throw new RuntimeException("provider error");
+            JsonNode message = LlmProtocol.normalizeAssistantResponse(objectMapper, root, protocol);
+
+            GroupTurnAssessment assessment;
+            boolean usedGroupResultTool = false;
+            if (LlmProtocol.hasToolCalls(message)) {
+                JsonNode calls = message.path("tool_calls");
+                if (!calls.isArray() || calls.size() != 1
+                        || !GroupTurnResultTool.NAME.equals(
+                        calls.get(0).path("function").path("name").asText())) {
+                    throw new IllegalArgumentException("invalid group_turn_result retry tool call");
+                }
+                assessment = GroupTurnResultTool.parse(
+                        calls.get(0).path("function").path("arguments").asText("{}"), objectMapper);
+                usedGroupResultTool = true;
+                WebDashboardListener.recordToolCall(GroupTurnResultTool.NAME);
+            } else {
+                assessment = GroupTurnResultTool.parse(LlmProtocol.extractText(message), objectMapper);
+            }
+            long latencyMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+            mainModelPool.reportSuccess(modelRoute, latencyMs);
+            return completeGroupTurn(assessment, groupId, userPrompt, allowSilence,
+                    toolCalls + (usedGroupResultTool ? 1 : 0), assessedAtMs, replyToCurrentMessage);
+        } catch (Exception retryFailure) {
+            mainModelPool.reportFailure(modelRoute,
+                    retryFailure.getClass().getSimpleName() + ": " + retryFailure.getMessage());
+            logger.warn("群聊最终决策格式修复失败: {}", retryFailure.getMessage());
             return GenerationResult.error(GENERATION_FAILURE_MESSAGE);
         }
     }
