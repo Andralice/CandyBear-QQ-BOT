@@ -452,7 +452,11 @@ public final class AgnesMediaService implements AutoCloseable {
                         .header("User-Agent", "Mozilla/5.0").GET().build();
                 var response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
                 try (var input = response.body()) {
-                    if (response.statusCode() != 200) throw new AgnesMediaException("读取参考图片失败（HTTP " + response.statusCode() + "），请重新发送原图");
+                    if (response.statusCode() != 200) {
+                        String reason = safeImageFetchFailureReason(input.readNBytes(2_048));
+                        throw new AgnesMediaException("读取参考图片失败（HTTP " + response.statusCode()
+                                + "，REMOTE_" + reason + "），请重新发送原图");
+                    }
                     if (response.headers().firstValueAsLong("Content-Length").orElse(0) > MAX_IMAGE_BYTES)
                         throw new AgnesMediaException("参考图片超过大小限制");
                     bytes = input.readNBytes(MAX_IMAGE_BYTES + 1);
@@ -469,6 +473,23 @@ public final class AgnesMediaService implements AutoCloseable {
             return "data:" + mime + ";base64," + Base64.getEncoder().encodeToString(bytes);
         } catch (AgnesMediaException e) { throw e; }
         catch (Exception e) { throw new AgnesMediaException("读取参考图片失败，请重新发送原图", e); }
+    }
+
+    static String safeImageFetchFailureReason(byte[] body) {
+        if (body == null || body.length == 0) return "EMPTY_RESPONSE";
+        String text = new String(body, StandardCharsets.UTF_8).toLowerCase(Locale.ROOT);
+        if (text.contains("expired") || text.contains("过期")) return "EXPIRED";
+        if (text.contains("signature") || text.contains("签名") || text.contains("rkey")
+                || text.contains("filekey")) return "SIGNATURE_REJECTED";
+        if (text.contains("unauthorized") || text.contains("forbidden") || text.contains("permission denied")
+                || text.contains("access denied") || text.contains("权限")) {
+            return "ACCESS_REJECTED";
+        }
+        if (text.contains("not found") || text.contains("不存在")) return "NOT_FOUND";
+        if (text.contains("invalid") || text.contains("bad request") || text.contains("参数")) {
+            return "INVALID_REFERENCE";
+        }
+        return "UNCLASSIFIED";
     }
 
     private Path download(String url, String prefix, String suffix, int maxBytes) throws AgnesMediaException {

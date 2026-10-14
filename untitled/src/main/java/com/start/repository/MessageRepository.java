@@ -135,11 +135,11 @@ public class MessageRepository extends BaseRepository {
                         }
                     }
                     String groupId = getStringValue(data, "groupId", null);
-                    boolean macroReviewShadow = !getBooleanValue(data, "isRobotReply", false)
-                            && BotConfig.isMacroReviewShadowFor(groupId);
+                    boolean macroReviewEnabled = !getBooleanValue(data, "isRobotReply", false)
+                            && BotConfig.isMacroReviewEnabledFor(groupId);
                     if (!getBooleanValue(data, "isRobotReply", false)
                             && (!getStringValue(data, "content", "").isBlank()
-                            || (parts != null && !parts.isEmpty())) && !macroReviewShadow) {
+                            || (parts != null && !parts.isEmpty())) && !macroReviewEnabled) {
                         String profileTaskSql = "INSERT INTO model_analysis_tasks (task_key, task_type, priority, " +
                                 "scope_group_id, scope_user_id, input_refs, max_attempts) VALUES (?, ?, ?, ?, ?, ?, ?)";
                         try (PreparedStatement profileTask = conn.prepareStatement(profileTaskSql)) {
@@ -151,22 +151,6 @@ public class MessageRepository extends BaseRepository {
                             profileTask.setString(6, "{\"message_id\":" + messageId + "}");
                             profileTask.setInt(7, 3);
                             profileTask.executeUpdate();
-                        }
-                    }
-                    if (macroReviewShadow && (!getStringValue(data, "content", "").isBlank()
-                            || (parts != null && !parts.isEmpty()))) {
-                        String macroTaskSql = "INSERT INTO model_analysis_tasks (task_key, task_type, priority, " +
-                                "scope_group_id, input_refs, max_attempts) VALUES (?, 'MACRO_REVIEW_BATCH', 5, ?, ?, 3) " +
-                                "ON DUPLICATE KEY UPDATE input_refs=VALUES(input_refs), " +
-                                "status=CASE WHEN status IN ('SUCCEEDED','DEAD') THEN 'PENDING' ELSE status END, " +
-                                "attempt_count=CASE WHEN status IN ('SUCCEEDED','DEAD') THEN 0 ELSE attempt_count END, " +
-                                "not_before=CURRENT_TIMESTAMP(3), updated_at=CURRENT_TIMESTAMP(3)";
-                        long bucket = System.currentTimeMillis() / 300_000L;
-                        try (PreparedStatement macroTask = conn.prepareStatement(macroTaskSql)) {
-                            macroTask.setString(1, "group:" + groupId + ":MACRO_REVIEW:" + bucket);
-                            macroTask.setString(2, groupId);
-                            macroTask.setString(3, "{\"message_id\":" + messageId + "}");
-                            macroTask.executeUpdate();
                         }
                     }
                     if (!getBooleanValue(data, "isRobotReply", false)
@@ -199,21 +183,69 @@ public class MessageRepository extends BaseRepository {
         });
     }
 
-    /** Enqueues a follow-up after a shadow run discovers messages arrived during processing. */
-    public DatabaseResult<Integer> enqueueMacroReviewTask(String groupId, long messageId, String taskKey) {
-        if (!BotConfig.isMacroReviewShadowFor(groupId) || messageId <= 0
-                || taskKey == null || taskKey.isBlank()) return DatabaseResult.success(0);
+    public DatabaseResult<Integer> enqueueMacroReviewPageTask(String groupId, long messageId,
+                                                               long expectedCursor) {
+        if (!BotConfig.isMacroReviewEnabledFor(groupId) || messageId <= 0 || expectedCursor < 0) {
+            return DatabaseResult.success(0);
+        }
         return safeExecute(() -> {
             String sql = "INSERT INTO model_analysis_tasks (task_key, task_type, priority, scope_group_id, " +
                     "input_refs, max_attempts) VALUES (?, 'MACRO_REVIEW_BATCH', 5, ?, ?, 3) " +
-                    "ON DUPLICATE KEY UPDATE input_refs=VALUES(input_refs), " +
+                    "ON DUPLICATE KEY UPDATE task_key=VALUES(task_key)";
+            try (Connection conn = DatabaseConfig.getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, macroReviewPageTaskKey(groupId, messageId, expectedCursor));
+                ps.setString(2, groupId);
+                ps.setString(3, "{\"review_kind\":\"PAGE\",\"message_id\":" + messageId
+                        + ",\"expected_cursor\":" + expectedCursor + "}");
+                return ps.executeUpdate();
+            }
+        });
+    }
+
+    public DatabaseResult<Integer> enqueueMacroReviewTriggerTask(String groupId, String taskKey, int delaySeconds) {
+        if (!BotConfig.isMacroReviewEnabledFor(groupId) || taskKey == null || taskKey.isBlank()) {
+            return DatabaseResult.success(0);
+        }
+        return safeExecute(() -> {
+            String sql = "INSERT INTO model_analysis_tasks (task_key, task_type, priority, scope_group_id, " +
+                    "input_refs, not_before, max_attempts) " +
+                    "VALUES (?, 'MACRO_REVIEW_BATCH', 5, ?, '{\"review_kind\":\"TRIGGER\"}', " +
+                    "TIMESTAMPADD(SECOND, ?, CURRENT_TIMESTAMP(3)), 3) " +
+                    "ON DUPLICATE KEY UPDATE task_key=VALUES(task_key)";
+            try (Connection conn = DatabaseConfig.getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, taskKey);
+                ps.setString(2, groupId);
+                ps.setInt(3, Math.max(0, Math.min(18_000, delaySeconds)));
+                return ps.executeUpdate();
+            }
+        });
+    }
+
+    static String macroReviewPageTaskKey(String groupId, long messageId, long expectedCursor) {
+        return "group:" + groupId + ":MACRO_REVIEW_PAGE:" + messageId + ":" + expectedCursor;
+    }
+
+    public static String macroReviewTriggerTaskKey(String groupId, long afterTaskId) {
+        return "group:" + groupId + ":MACRO_REVIEW_TRIGGER_AFTER:" + afterTaskId;
+    }
+
+    /** Enqueues one low-priority page for the independent historical backfill line. */
+    public DatabaseResult<Integer> enqueueMacroHistoryReviewTask(String groupId) {
+        if (!BotConfig.isMacroReviewHistoryEnabledFor(groupId)) return DatabaseResult.success(0);
+        return safeExecute(() -> {
+            String sql = "INSERT INTO model_analysis_tasks (task_key, task_type, priority, scope_group_id, " +
+                    "input_refs, max_attempts) VALUES (?, 'MACRO_REVIEW_HISTORY_BATCH', 1, ?, ?, 3) " +
+                    "ON DUPLICATE KEY UPDATE " +
+                    "attempt_count=CASE WHEN status IN ('SUCCEEDED','DEAD') OR attempt_count >= max_attempts " +
+                    "THEN 0 ELSE attempt_count END, " +
                     "status=CASE WHEN status IN ('SUCCEEDED','DEAD') THEN 'PENDING' ELSE status END, " +
-                    "attempt_count=CASE WHEN status IN ('SUCCEEDED','DEAD') THEN 0 ELSE attempt_count END, " +
                     "not_before=CURRENT_TIMESTAMP(3), updated_at=CURRENT_TIMESTAMP(3)";
-            DatabaseResult<Long> inserted = executeInsert(sql, taskKey, groupId,
-                    "{\"message_id\":" + messageId + "}");
-            if (!inserted.isSuccess()) throw new SQLException(inserted.getError());
-            return inserted.getData() == null ? 0 : 1;
+            try (Connection conn = DatabaseConfig.getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, "group:" + groupId + ":MACRO_REVIEW_HISTORY");
+                ps.setString(2, groupId);
+                ps.setString(3, "{\"history\":true}");
+                return ps.executeUpdate();
+            }
         });
     }
 
@@ -298,6 +330,72 @@ public class MessageRepository extends BaseRepository {
         return DatabaseResult.success(new ArrayList<>(ordered.values()));
     }
 
+    /** Returns one chronological historical page plus a bounded overlap before the history cursor. */
+    public DatabaseResult<List<Map<String, Object>>> findMacroReviewHistoryMessages(
+            String groupId, long afterMessageId, long throughMessageId, int overlap, int limit) {
+        return findMacroReviewHistoryMessages(groupId, afterMessageId, throughMessageId,
+                null, overlap, limit);
+    }
+
+    /** Returns a historical page while enforcing the configured lower time boundary. */
+    public DatabaseResult<List<Map<String, Object>>> findMacroReviewHistoryMessages(
+            String groupId, long afterMessageId, long throughMessageId, LocalDateTime startAt,
+            int overlap, int limit) {
+        if (groupId == null || groupId.isBlank() || throughMessageId <= afterMessageId) {
+            return DatabaseResult.success(List.of());
+        }
+        int boundedLimit = Math.max(1, Math.min(limit, 200));
+        int boundedOverlap = Math.max(0, Math.min(overlap, boundedLimit - 1));
+        String columns = "id, user_id, group_id, session_id, content, raw_content, sender_type, " +
+                "is_robot_reply, is_private, reply_to_id, availability_status, created_at";
+        String startClause = startAt == null ? "" : " AND created_at>=?";
+        Timestamp startTimestamp = startAt == null ? null : Timestamp.valueOf(startAt);
+        List<Object> freshParams = new ArrayList<>(List.of(groupId, afterMessageId, throughMessageId));
+        if (startTimestamp != null) freshParams.add(startTimestamp);
+        freshParams.add(boundedLimit - boundedOverlap);
+        DatabaseResult<List<Map<String, Object>>> fresh = executeQuery(
+                "SELECT " + columns + " FROM messages WHERE group_id=? AND is_private=FALSE " +
+                        "AND id>? AND id<=?" + startClause +
+                        " AND retracted_at IS NULL AND redacted_at IS NULL " +
+                        "ORDER BY id ASC LIMIT ?", this::mapToHashMap, freshParams.toArray());
+        if (!fresh.isSuccess() || fresh.getData() == null) return fresh;
+
+        List<Map<String, Object>> overlapRows = List.of();
+        if (afterMessageId > 0 && boundedOverlap > 0) {
+            List<Object> overlapParams = new ArrayList<>(List.of(groupId, afterMessageId));
+            if (startTimestamp != null) overlapParams.add(startTimestamp);
+            overlapParams.add(boundedOverlap);
+            DatabaseResult<List<Map<String, Object>>> previous = executeQuery(
+                    "SELECT " + columns + " FROM messages WHERE group_id=? AND is_private=FALSE " +
+                            "AND id<=?" + startClause +
+                            " AND retracted_at IS NULL AND redacted_at IS NULL " +
+                            "ORDER BY id DESC LIMIT ?", this::mapToHashMap, overlapParams.toArray());
+            if (!previous.isSuccess() || previous.getData() == null) {
+                return DatabaseResult.failure(previous.getError());
+            }
+            overlapRows = new ArrayList<>(previous.getData());
+            Collections.reverse(overlapRows);
+        }
+
+        Map<Long, Map<String, Object>> ordered = new LinkedHashMap<>();
+        for (Map<String, Object> row : overlapRows) ordered.put(rowId(row), row);
+        for (Map<String, Object> row : fresh.getData()) ordered.put(rowId(row), row);
+        return DatabaseResult.success(new ArrayList<>(ordered.values()));
+    }
+
+    public DatabaseResult<Long> findLastGroupMessageIdBefore(String groupId, LocalDateTime startAt) {
+        if (groupId == null || groupId.isBlank() || startAt == null) return DatabaseResult.success(0L);
+        return executeQuerySingle(
+                "SELECT COALESCE(MAX(id), 0) FROM messages WHERE group_id=? AND is_private=FALSE " +
+                        "AND created_at<? AND retracted_at IS NULL AND redacted_at IS NULL", rs -> {
+                    try {
+                        return rs.getLong(1);
+                    } catch (SQLException e) {
+                        throw new IllegalStateException(e);
+                    }
+                }, groupId, Timestamp.valueOf(startAt));
+    }
+
     /** Returns one bounded recent window for the first shadow run; it must not replay all history by default. */
     public DatabaseResult<List<Map<String, Object>>> findRecentMacroReviewMessages(
             String groupId, long throughMessageId, int limit) {
@@ -338,6 +436,23 @@ public class MessageRepository extends BaseRepository {
 
     public DatabaseResult<Map<String, Object>> findMessageById(long messageId) {
         return executeQuerySingle("SELECT * FROM messages WHERE id=?", this::mapToHashMap, messageId);
+    }
+
+    /**
+     * Resolves a OneBot reply target.  The protocol message id is not
+     * necessarily the local auto-increment id, so callers must not use
+     * findMessageById() for a provider id.
+     */
+    public DatabaseResult<Map<String, Object>> findMessageByProviderMessageId(
+            String providerMessageId, String groupId) {
+        if (providerMessageId == null || providerMessageId.isBlank()) {
+            return DatabaseResult.success(null);
+        }
+        String sql = "SELECT * FROM messages WHERE provider_message_id=? "
+                + "AND (? IS NULL OR group_id=?) AND retracted_at IS NULL "
+                + "ORDER BY id DESC LIMIT 1";
+        return executeQuerySingle(sql, this::mapToHashMap,
+                providerMessageId, groupId, groupId);
     }
 
     public DatabaseResult<List<Map<String, Object>>> findMessageParts(long messageId) {
@@ -713,7 +828,13 @@ public class MessageRepository extends BaseRepository {
         boolean group = groupId != null && !groupId.isBlank();
         if (!group && (sessionId == null || sessionId.isBlank())) return DatabaseResult.success(List.of());
         StringBuilder sql = new StringBuilder("SELECT m.id, m.provider_message_id, m.user_id, m.created_at, " +
-                "m.is_robot_reply, m.content, m.image_data, m.raw_segments_json, m.availability_status FROM messages m WHERE ");
+                "m.is_robot_reply, m.content, m.image_data, m.raw_segments_json, m.availability_status, " +
+                "(SELECT GROUP_CONCAT(CONCAT(p.part_index, ':', COALESCE((SELECT a.status FROM media_artifacts a " +
+                "WHERE a.part_id=p.id AND a.artifact_type='IMAGE_DESCRIPTION' ORDER BY a.id DESC LIMIT 1), " +
+                "CASE WHEN p.availability_status IN ('AVAILABLE','PENDING','PROCESSING') THEN 'PENDING' " +
+                "ELSE p.availability_status END)) ORDER BY p.part_index SEPARATOR ',') " +
+                "FROM message_parts p WHERE p.message_id=m.id AND p.part_type='image') AS image_vision_status " +
+                "FROM messages m WHERE ");
         List<Object> params = new ArrayList<>();
         sql.append(group ? "m.group_id=? AND m.is_private=FALSE " : "m.group_id IS NULL AND m.session_id=? AND m.is_private=TRUE ");
         params.add(group ? groupId : sessionId);

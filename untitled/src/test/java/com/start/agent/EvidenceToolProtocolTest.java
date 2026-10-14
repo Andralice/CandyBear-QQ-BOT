@@ -37,6 +37,36 @@ class EvidenceToolProtocolTest {
             assertFalse(tool.getDescription().isBlank());
         }
         assertTrue(tools.stream().anyMatch(tool -> tool.getDescription().contains("availability_status")));
+        Tool context = tools.get(0);
+        Map<String, Object> contextParameters = cast(cast(context.getFunctionSpec().get("function")).get("parameters"));
+        Map<String, Object> properties = cast(contextParameters.get("properties"));
+        assertTrue(properties.containsKey("after_message_id"));
+        assertTrue(properties.containsKey("wait_ms"));
+        assertTrue(context.getDescription().contains("after_message_id"));
+        assertTrue(context.getDescription().contains("wait_ms"));
+    }
+
+    @Test
+    void messageContextAfterUsesTheNewMessageStreamBranch() {
+        EvidenceQueryRepository evidence = new EvidenceQueryRepository() {
+            @Override
+            public List<Map<String, Object>> messageContextAfter(String groupId, String sessionId,
+                                                                  long afterMessageId, int limit) {
+                assertEquals("g", groupId);
+                assertEquals(41L, afterMessageId);
+                assertEquals(8, limit);
+                return List.of(Map.of("id", 42L, "provider_message_id", "9001",
+                        "user_id", "u2", "content", "新消息"));
+            }
+        };
+        QueryMessageContextTool context = new QueryMessageContextTool(evidence,
+                new MessageRepository(), "u", "g", "s");
+
+        String result = context.execute(Map.of("after_message_id", "41", "limit", "8"));
+
+        assertTrue(result.contains("\"kind\":\"message_stream\""));
+        assertTrue(result.contains("\"next_cursor\":42"));
+        assertTrue(result.contains("新消息"));
     }
 
     @SuppressWarnings("unchecked")

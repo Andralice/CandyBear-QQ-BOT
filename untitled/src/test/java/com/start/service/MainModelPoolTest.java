@@ -52,6 +52,124 @@ class MainModelPoolTest {
     }
 
     @Test
+    void parsesOptionalPriorityTierAndKeepsLegacyRoutesAtTierOne() {
+        List<MainModelPool.Candidate> candidates = MainModelPool.parseCandidates(
+                "tier-two|https://two.example/v1|tier-two-model|openai|KEY|tier=2|thinking=disabled"
+                        + ";legacy|https://legacy.example/v1|legacy-model|openai|KEY",
+                Map.of("KEY", "unit-test-key")::get);
+
+        assertEquals(2, candidates.size());
+        assertEquals(2, candidates.get(0).tier());
+        assertTrue(candidates.get(0).thinkingDisabled());
+        assertEquals(1, candidates.get(1).tier());
+    }
+
+    @Test
+    void manuallySelectsAHealthyRouteAndPinsIt() {
+        MainModelPool.Candidate first = candidate("first");
+        MainModelPool.Candidate second = candidate("second");
+        MainModelPool pool = new MainModelPool(List.of(first, second), false, 10_000, 1_000);
+        AtomicInteger probeCalls = new AtomicInteger();
+        try {
+            pool.start((candidate, timeoutMs) -> {
+                probeCalls.incrementAndGet();
+                assertSame(second, candidate);
+                return MainModelPool.ProbeResult.healthy(candidate, 350);
+            });
+
+            MainModelPool.ManualSelectionResult result = pool.selectManually("second", false);
+
+            assertEquals(MainModelPool.ManualSelectionStatus.SELECTED, result.status());
+            assertEquals(350, result.latencyMs());
+            assertSame(second, pool.snapshot());
+            assertTrue(pool.isManuallySelected());
+            assertEquals(1, probeCalls.get());
+        } finally {
+            pool.close();
+        }
+    }
+
+    @Test
+    void requiresExplicitConfirmationBeforeSelectingASlowRoute() {
+        MainModelPool.Candidate first = candidate("first");
+        MainModelPool.Candidate second = candidate("second");
+        MainModelPool pool = new MainModelPool(List.of(first, second), false, 10_000, 1_000);
+        AtomicInteger probeCalls = new AtomicInteger();
+        try {
+            pool.start((candidate, timeoutMs) -> {
+                probeCalls.incrementAndGet();
+                return MainModelPool.ProbeResult.healthy(candidate, 4_001);
+            });
+
+            MainModelPool.ManualSelectionResult firstAttempt = pool.selectManually("second", false);
+            assertEquals(MainModelPool.ManualSelectionStatus.SLOW_CONFIRMATION_REQUIRED, firstAttempt.status());
+            assertSame(first, pool.snapshot());
+            assertFalse(pool.isManuallySelected());
+
+            MainModelPool.ManualSelectionResult confirmed = pool.selectManually("second", true);
+            assertEquals(MainModelPool.ManualSelectionStatus.SELECTED, confirmed.status());
+            assertSame(second, pool.snapshot());
+            assertTrue(pool.isManuallySelected());
+            assertEquals(2, probeCalls.get());
+        } finally {
+            pool.close();
+        }
+    }
+
+    @Test
+    void refusesAnUnavailableRouteWithoutChangingTheActiveRoute() {
+        MainModelPool.Candidate first = candidate("first");
+        MainModelPool.Candidate second = candidate("second");
+        MainModelPool pool = new MainModelPool(List.of(first, second), false, 10_000, 1_000);
+        AtomicInteger probeCalls = new AtomicInteger();
+        try {
+            pool.start((candidate, timeoutMs) -> {
+                probeCalls.incrementAndGet();
+                assertSame(second, candidate);
+                return MainModelPool.ProbeResult.failed(candidate, 80, "HTTP 503");
+            });
+
+            MainModelPool.ManualSelectionResult result = pool.selectManually("second", false);
+
+            assertEquals(MainModelPool.ManualSelectionStatus.UNAVAILABLE, result.status());
+            assertSame(first, pool.snapshot());
+            assertFalse(pool.isManuallySelected());
+            assertEquals(1, probeCalls.get());
+        } finally {
+            pool.close();
+        }
+    }
+
+    @Test
+    void healthyAutomaticProbesKeepTheManualRouteAndRealFailureReleasesIt() {
+        MainModelPool.Candidate first = candidate("first");
+        MainModelPool.Candidate second = candidate("second");
+        MainModelPool pool = new MainModelPool(List.of(first, second), false, 10_000, 1_000);
+        try {
+            pool.start((candidate, timeoutMs) -> MainModelPool.ProbeResult.healthy(candidate, 100));
+            assertEquals(MainModelPool.ManualSelectionStatus.SELECTED,
+                    pool.selectManually("second", false).status());
+
+            assertSame(second, pool.selectFastest(List.of(
+                    MainModelPool.ProbeResult.healthy(first, 20),
+                    MainModelPool.ProbeResult.healthy(second, 100))));
+            assertTrue(pool.isManuallySelected());
+            assertTrue(pool.reportSuccess(second, 15_000));
+            assertSame(second, pool.snapshot());
+            assertTrue(pool.isManuallySelected());
+
+            assertSame(first, pool.reportFailure(second, "HTTP 500"));
+            assertFalse(pool.isManuallySelected());
+        } finally {
+            pool.close();
+        }
+    }
+
+    private static MainModelPool.Candidate candidate(String id) {
+        return MainModelPool.Candidate.fromBaseUrl(
+                id, "https://" + id + ".example/v1", id + "-model", "openai", "KEY", "key");
+    }
+    @Test
     void selectsFastestHealthyRouteAndKeepsCurrentWhenAllFail() {
         MainModelPool.Candidate first = MainModelPool.Candidate.fromBaseUrl(
                 "first", "https://one.example/v1", "first-model", "openai", "KEY", "key");
@@ -71,6 +189,41 @@ class MainModelPoolTest {
                     MainModelPool.ProbeResult.failed(first, 10, "HTTP 500"),
                     MainModelPool.ProbeResult.failed(second, 10, "timeout"),
                     MainModelPool.ProbeResult.failed(third, 10, "HTTP 429"))));
+        } finally {
+            pool.close();
+        }
+    }
+
+    @Test
+    void prefersTierOneOverFasterTierTwoAndFallsBackWhenTierOneFails() {
+        MainModelPool.Candidate tierOne = MainModelPool.Candidate.fromBaseUrl(
+                "tier-one", "https://one.example/v1", "tier-one-model", "openai", "KEY", "key", "", 1);
+        MainModelPool.Candidate tierTwo = MainModelPool.Candidate.fromBaseUrl(
+                "tier-two", "https://two.example/v1", "tier-two-model", "openai", "KEY", "key", "", 2);
+        MainModelPool pool = new MainModelPool(List.of(tierOne, tierTwo), true, 10_000, 1_000);
+        try {
+            assertSame(tierOne, pool.selectFastest(List.of(
+                    MainModelPool.ProbeResult.healthy(tierOne, 100),
+                    MainModelPool.ProbeResult.healthy(tierTwo, 10))));
+            assertSame(tierTwo, pool.selectFastest(List.of(
+                    MainModelPool.ProbeResult.failed(tierOne, 10, "HTTP 500"),
+                    MainModelPool.ProbeResult.healthy(tierTwo, 10))));
+        } finally {
+            pool.close();
+        }
+    }
+
+    @Test
+    void attemptsAvailableTierOneBeforeActiveTierTwo() {
+        MainModelPool.Candidate tierTwo = MainModelPool.Candidate.fromBaseUrl(
+                "tier-two", "https://two.example/v1", "tier-two-model", "openai", "KEY", "key", "", 2);
+        MainModelPool.Candidate tierOne = MainModelPool.Candidate.fromBaseUrl(
+                "tier-one", "https://one.example/v1", "tier-one-model", "openai", "KEY", "key", "", 1);
+        MainModelPool pool = new MainModelPool(List.of(tierTwo, tierOne), true, 10_000, 1_000);
+        try {
+            assertSame(tierOne, pool.attemptOrder().get(0));
+            pool.reportFailure(tierOne, "HTTP 500");
+            assertSame(tierTwo, pool.attemptOrder().get(0));
         } finally {
             pool.close();
         }

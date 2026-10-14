@@ -44,6 +44,18 @@ class CapabilityToolsTest {
         return new PromptBuilder().buildRuleBook(selection.baseRules(), new PromptContext().nickname("测试者").userId("u")) + selection.prompt();
     }
 
+    @Test void creativeConfirmationRestoresScopedCapabilityAndReloadDoesNotClaimNewWork() {
+        CapabilityTools continuation = selection();
+        continuation.preload("你想他是什么样子就行", false, false, Set.of(IMAGE));
+        assertTrue(names(continuation.activeTools()).contains("generate_image"));
+        assertTrue(continuation.prompt().contains("不再询问画面方向"));
+        assertTrue(continuation.execute(Map.of("capabilities", List.of("image"))).contains("已经加载"));
+        assertFalse(continuation.activatePending());
+        CapabilityTools unrelated = selection();
+        unrelated.preload("你想他是什么样子就行", false, false, Set.of());
+        assertFalse(names(unrelated.activeTools()).contains("generate_image"));
+    }
+
     @Test void ordinaryChatKeepsCoreRulesAndToolsButRemovesPilotDetails() {
         CapabilityTools selection = selection();
         selection.preload("今天有点累，陪我聊会儿", false, false, Set.of());
@@ -67,6 +79,8 @@ class CapabilityToolsTest {
                 Map.entry("查一下三角洲脑机", Set.of(DELTA)),
                 Map.entry("洛克王国查蛋组", Set.of(LOKO)),
                 Map.entry("订阅远行商人", Set.of(LOKO)),
+                Map.entry("抽取", Set.of(SOCIAL)),
+                Map.entry("抽取职业", Set.of(SOCIAL)),
                 Map.entry("查战力，和他PK", Set.of(SOCIAL)),
                 Map.entry("幸运值排行榜", Set.of(SOCIAL)),
                 Map.entry("来玩谁是卧底", Set.of(PARTY)),
@@ -78,6 +92,13 @@ class CapabilityToolsTest {
             assertEquals(expected, selection.selected(), request);
             if (!expected.contains(VOICE)) assertFalse(names(selection.activeTools()).contains("send_voice"));
         });
+    }
+
+    @Test void extractingConversationContentDoesNotPreloadProfessionTools() {
+        CapabilityTools selection = selection();
+        selection.preload("把刚才设定抽取出来", false, false, Set.of());
+        assertTrue(selection.selected().isEmpty());
+        assertFalse(names(selection.activeTools()).contains("get_profession"));
     }
 
     @Test void attachmentAndLegacyVisionPathsSupportEditingWithoutTreatingEveryImageAsCreation() {

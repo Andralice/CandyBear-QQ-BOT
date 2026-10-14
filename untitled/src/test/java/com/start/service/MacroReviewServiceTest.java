@@ -32,6 +32,16 @@ class MacroReviewServiceTest {
     }
 
     @Test
+    void payloadCarriesPreviousReviewAsNonEvidenceSummary() throws Exception {
+        String payload = MacroReviewService.buildPayload(List.of(), Map.of(), MAPPER.readTree(
+                "{\"stories\":[{\"story_key\":\"server\",\"status\":\"OPEN\"}]}"));
+
+        var root = MAPPER.readTree(payload);
+        assertEquals("server", root.path("previous_review").path("stories").get(0)
+                .path("story_key").asText());
+    }
+
+    @Test
     void validationRejectsRobotAndWrongSenderEvidence() throws Exception {
         List<Map<String, Object>> window = List.of(
                 row(101L, "u1", "USER", false, "AVAILABLE"),
@@ -55,6 +65,26 @@ class MacroReviewServiceTest {
         assertTrue(validated.path("validation").path("private_messages_excluded").asBoolean());
         assertEquals("NONE", validated.path("observations").get(0).path("write_action").asText());
         assertTrue(validated.path("observations").get(0).path("validation_errors").size() > 0);
+    }
+
+    @Test
+    void validationDoesNotTreatThirdPartyObservationAsWritablePersonalFact() throws Exception {
+        List<Map<String, Object>> window = List.of(
+                row(101L, "u1", "USER", false, "AVAILABLE"),
+                row(102L, "u2", "USER", false, "AVAILABLE"));
+        var modelResult = MacroReviewService.parseJsonObject("""
+                {"observations":[
+                  {"subject_user_id":"u1","relation_target":"THIRD_PARTY","kind":"occupation",
+                   "claim":"u2在实习","temporal_scope":"CURRENT_STATE","speech_act":"OTHER",
+                   "status":"CANDIDATE","confidence":0.8,"evidence_message_ids":[102],"reason":"第三方"}
+                ],"stories":[],"group_state":[]}
+                """);
+
+        var validated = EvidenceAnalysisWorker.validateMacroResult(modelResult, window);
+
+        assertEquals(0, validated.path("validation").path("valid_observations").asInt());
+        assertTrue(validated.path("observations").get(0).path("validation_errors").toString()
+                .contains("NON_SELF_RELATION"));
     }
 
     @Test

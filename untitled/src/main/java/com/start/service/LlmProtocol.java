@@ -50,6 +50,16 @@ final class LlmProtocol {
         return url + "/messages";
     }
 
+    static String responsesEndpoint(String configuredUrl) {
+        if (configuredUrl == null || configuredUrl.isBlank()) return configuredUrl;
+        String url = configuredUrl.trim().replaceFirst("/+$", "");
+        if (url.endsWith("/responses")) return url;
+        if (url.endsWith("/chat/completions")) {
+            return url.substring(0, url.length() - "/chat/completions".length()) + "/responses";
+        }
+        return url + "/responses";
+    }
+
     static HttpRequest.Builder addAuthHeaders(HttpRequest.Builder builder, Type type, String apiKey) {
         String key = apiKey == null ? "" : apiKey;
         if (type == Type.ANTHROPIC) {
@@ -273,10 +283,45 @@ final class LlmProtocol {
     }
 
     static Map<String, Object> buildAnthropicToolResult(String callId, String content) {
+        return buildAnthropicToolResult(callId, content, List.of());
+    }
+
+    static Map<String, Object> buildAnthropicToolResult(String callId, String content,
+                                                         List<Tool.ImageAttachment> images) {
         Map<String, Object> block = new LinkedHashMap<>();
         block.put("type", "tool_result");
         block.put("tool_use_id", callId);
-        block.put("content", content);
+        if (images == null || images.isEmpty()) {
+            block.put("content", content);
+            return block;
+        }
+        List<Map<String, Object>> contentBlocks = new ArrayList<>();
+        if (content != null && !content.isBlank()) {
+            contentBlocks.add(Map.of("type", "text", "text", content));
+        }
+        for (Tool.ImageAttachment image : images) {
+            if (image == null || image.dataUri() == null || image.dataUri().isBlank()) continue;
+            if (image.label() != null && !image.label().isBlank()) {
+                contentBlocks.add(Map.of("type", "text", "text", "image_id=" + image.label()));
+            }
+            contentBlocks.add(buildImageContent(image.dataUri(), Type.ANTHROPIC));
+        }
+        block.put("content", contentBlocks);
         return block;
+    }
+
+    static Map<String, Object> buildImageContent(String uri, Type protocol) {
+        if (protocol != Type.ANTHROPIC || uri == null || !uri.startsWith("data:")) {
+            return Map.of("type", "image_url", "image_url", Map.of("url", uri == null ? "" : uri));
+        }
+        int comma = uri.indexOf(',');
+        int semicolon = uri.indexOf(';', 5);
+        if (comma <= 5 || semicolon <= 5 || !uri.substring(semicolon + 1, comma).contains("base64")) {
+            return Map.of("type", "image_url", "image_url", Map.of("url", uri));
+        }
+        String mediaType = uri.substring(5, semicolon);
+        String data = uri.substring(comma + 1);
+        return Map.of("type", "image", "source", Map.of(
+                "type", "base64", "media_type", mediaType, "data", data));
     }
 }

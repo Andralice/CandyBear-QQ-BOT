@@ -213,6 +213,10 @@ public final class BotBootstrap {
     private static void startDashboard(Main bot) {
         WebDashboardListener dashboard = new WebDashboardListener();
         bot.dashboardListener = dashboard;
+        if (bot.baiLianService != null) {
+            dashboard.setReplayService(new ManualMessageReplayService(DatabaseConfig.getDataSource(),
+                    bot.baiLianService::snapshotReplayProfile, bot.baiLianService::generateReplay));
+        }
         if (bot.conversationExecutor != null) {
             dashboard.setExecutorMetricsProvider(() -> bot.conversationExecutor.getMetrics());
         }

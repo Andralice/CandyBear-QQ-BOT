@@ -56,14 +56,20 @@ public class TtsService {
     private VolcTtsEngine volcTtsEngine;
 
     public TtsService() {
+        this(true);
+    }
+
+    public TtsService(boolean prepareOutputDirectory) {
         this.defaultVoice = BotConfig.getTtsDefaultVoice();
         this.requestTimeoutMs = BotConfig.getTtsTimeoutMs();
         this.maxRetries = BotConfig.getTtsMaxRetries();
         this.outputDir = Paths.get(BotConfig.getTtsOutputDir());
-        try {
-            Files.createDirectories(outputDir);
-        } catch (IOException e) {
-            logger.warn("Cannot create TTS output dir: {}", outputDir);
+        if (prepareOutputDirectory) {
+            try {
+                Files.createDirectories(outputDir);
+            } catch (IOException e) {
+                logger.warn("Cannot create TTS output dir: {}", outputDir);
+            }
         }
         logger.info("TTS Service: text-to-speech.cn, voice={}, output={}", defaultVoice, outputDir);
     }

@@ -56,6 +56,18 @@ class AgnesMediaServiceTest {
     }
 
     @Test
+    void imageSourceFailureBodyIsReducedToAnAllowlistedReason() {
+        assertEquals("EXPIRED", AgnesMediaService.safeImageFetchFailureReason(
+                "media link expired".getBytes(StandardCharsets.UTF_8)));
+        assertEquals("SIGNATURE_REJECTED", AgnesMediaService.safeImageFetchFailureReason(
+                "invalid rkey signature".getBytes(StandardCharsets.UTF_8)));
+        assertEquals("ACCESS_REJECTED", AgnesMediaService.safeImageFetchFailureReason(
+                "permission denied".getBytes(StandardCharsets.UTF_8)));
+        assertEquals("UNCLASSIFIED", AgnesMediaService.safeImageFetchFailureReason(
+                "opaque private response".getBytes(StandardCharsets.UTF_8)));
+    }
+
+    @Test
     void imageRequestUsesAgnesContractAndDownloadsNonEmptyFile() throws Exception {
         AtomicInteger imageRequests = new AtomicInteger();
         server.createContext("/v1/images/generations", exchange -> {

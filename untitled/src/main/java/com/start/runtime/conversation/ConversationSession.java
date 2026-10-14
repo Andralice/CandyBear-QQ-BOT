@@ -16,6 +16,8 @@ import java.util.Set;
  * 取代散落在各处的 groupId/userId/nickname/ats/allowSilence 参数。
  */
 public class ConversationSession {
+    public record SearchImage(String dataUri, String messageId, int selectionIndex, int messageImageIndex) {}
+
     private final String groupId;
     private final String userId;
     private final String nickname;
@@ -32,6 +34,7 @@ public class ConversationSession {
     private final Set<String> excludedPublicMessageIds;
     private final GroupDialoguePlan dialoguePlan;
     private final List<String> imageDataUris;
+    private final List<SearchImage> searchImages;
 
     private GenerationResult result;
     private long latencyMs;
@@ -53,6 +56,7 @@ public class ConversationSession {
         this.excludedPublicMessageIds = b.excludedPublicMessageIds;
         this.dialoguePlan = b.dialoguePlan;
         this.imageDataUris = b.imageDataUris;
+        this.searchImages = b.searchImages;
     }
 
     // ---- getters ----
@@ -74,6 +78,7 @@ public class ConversationSession {
     public Set<String> excludedPublicMessageIds() { return excludedPublicMessageIds; }
     public GroupDialoguePlan dialoguePlan() { return dialoguePlan; }
     public List<String> imageDataUris() { return imageDataUris; }
+    public List<SearchImage> searchImages() { return searchImages; }
     public GenerationResult result() { return result; }
     public long latencyMs() { return latencyMs; }
 
@@ -111,6 +116,7 @@ public class ConversationSession {
         private Set<String> excludedPublicMessageIds = Set.of();
         private GroupDialoguePlan dialoguePlan;
         private List<String> imageDataUris = List.of();
+        private List<SearchImage> searchImages = List.of();
 
         Builder(String groupId, String userId, String nickname) {
             this.groupId = groupId;
@@ -136,6 +142,10 @@ public class ConversationSession {
         public Builder dialoguePlan(GroupDialoguePlan v) { dialoguePlan = v; return this; }
         public Builder imageDataUris(List<String> v) {
             imageDataUris = v == null ? List.of() : List.copyOf(v);
+            return this;
+        }
+        public Builder searchImages(List<SearchImage> v) {
+            searchImages = v == null ? List.of() : List.copyOf(v);
             return this;
         }
 

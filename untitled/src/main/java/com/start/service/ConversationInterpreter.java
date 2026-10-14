@@ -43,11 +43,14 @@ public class ConversationInterpreter {
 
         stateStore.purgeExpiredAwaits();
 
-        boolean atsOthers = ats != null && ats.stream().anyMatch(q -> q != BotConfig.getBotQq());
+        boolean addressedToOtherByLeadingName = GroupAddressingEvidence.addressesOtherThanBot(text);
+        boolean addressedElsewhere = (ats != null && ats.stream().anyMatch(q -> q != BotConfig.getBotQq()))
+                || addressedToOtherByLeadingName;
 
         // 1. 追问检测（120s 窗口）
         ConversationStateStore.UserThread thread = stateStore.getUserThread(fullUserId);
-        if (!atsOthers && thread != null && now - thread.lastInteraction() < 120_000) {
+        if (!addressedElsewhere
+                && thread != null && now - thread.lastInteraction() < 120_000) {
             if (isFollowUpMessage(text)) {
                 stateStore.removePendingAwait(fullUserId); // cancel await
                 String cleanReply = normalizeReplyForContext(thread.lastBotReply());
@@ -58,7 +61,8 @@ public class ConversationInterpreter {
         }
 
         // 2. 异步等待回复
-        ConversationStateStore.PendingAwait await = stateStore.removePendingAwait(fullUserId);
+        ConversationStateStore.PendingAwait await = addressedElsewhere
+                ? null : stateStore.removePendingAwait(fullUserId);
         if (await != null && !await.isExpired()) {
             String prompt = "你之前问了" + await.targetNickname + "(" + await.targetUserId + "): " + await.question
                     + "\n你想了解的是: " + await.context
@@ -68,23 +72,19 @@ public class ConversationInterpreter {
         }
 
         // 3. 概率性主动插话（消息 @ 了别人则跳过，不插嘴）
-        if (atsOthers) {
+        if (addressedElsewhere) {
             return InterpretResult.NOTHING;
         }
 
-        Map<String, Object> personality = aiDatabaseService.getCandyBearPersonality();
-        @SuppressWarnings("unchecked")
-        Map<String, Object> activeReply = (Map<String, Object>) personality.get("activeReply");
-        double baseProbability = (double) activeReply.get("baseProbability");
-        if (baseProbability >= 0.5) {
-            if (aiDatabaseService.shouldJoinTopic(text, groupId)) {
-                String prompt = "群友说：" + text
-                        + "\n结合当前话题、对象和前后对话自然回应：闲聊接住就停，明确问题或求助时把需要说清楚；"
-                        + "不要把倾诉自动变成劝导，也不必机械分析、追问或建议。"
-                        + "\n如果没有与你有关且值得补充的内容（例如话题已过去、其他人正处理、你刚回过），"
-                        + "只输出 <NO_REPLY>，不输出任何其他内容。";
-                return InterpretResult.of(ConversationEvent.PROBABILISTIC, prompt);
-            }
+        if (aiDatabaseService.shouldJoinTopic(text, groupId)) {
+            String prompt = "群友说：" + text
+                    + "\n这是旧主动话题关键词命中的候选；命中只表示话题可能相关，不代表群友在对你说、邀请你回应或一定值得插话。"
+                    + "结合本轮完整群聊指向证据和前后对话判断：若明确是在与其他群友对话，或只有对象不明的“你”且没有其他指向证据，就保持安静；"
+                    + "若是开放群聊话题或邀请，且你确实有自然、有价值的补充，可以简短参与。闲聊接住就停，明确问题或求助时把需要说清楚；"
+                    + "不要把倾诉自动变成劝导，也不必机械分析、追问或建议。"
+                    + "\n如果没有值得补充的内容（例如话题已过、其他人正处理、你刚回过），"
+                    + "只输出 <NO_REPLY>，不输出任何其他内容。";
+            return InterpretResult.of(ConversationEvent.PROBABILISTIC, prompt);
         }
 
         // 4. AI 发言被评论
@@ -94,7 +94,8 @@ public class ConversationInterpreter {
                     .filter(e -> "ai_reply".equals(e.type()))
                     .reduce((first, second) -> second);
             if (lastAi.isPresent() && now - lastAi.get().timestamp() < 180_000) {
-                if (isResponseToAIMessage(text, lastAi.get().content())) {
+                if (!addressedElsewhere
+                        && isResponseToAIMessage(text, lastAi.get().content())) {
                     String cleanReply = normalizeReplyForContext(lastAi.get().content());
                     String prompt = "候选对话上下文——你之前说：" + cleanReply + "\n另一个群友消息：" + text
                             + "\n先根据本轮群聊指向证据判断这句是不是在评论你；确实评论你时再自然回应，需要时解释或修正，不必为了友好而机械附和。";

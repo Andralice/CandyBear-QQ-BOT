@@ -19,6 +19,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -137,7 +138,7 @@ class EvidenceProfileIntegrationTest {
         long partId = insertMessagePart(messageId, "record", "AVAILABLE");
         long artifactId = insertMediaArtifact(partId, "SUCCEEDED");
         long candidate = candidate("recent_state", "available-audio", "发送了一段可解析语音", "SELF_REPORTED", "ASSERT",
-                0.90, List.of(messageId));
+                0.90, List.of(messageId), LocalDateTime.now(), LocalDateTime.now().plusDays(1));
         factRepository.addEvidence(candidate, messageId, partId, artifactId, "audio", "{\"test\":true}",
                 "AVAILABLE", 1.0);
 
@@ -149,11 +150,35 @@ class EvidenceProfileIntegrationTest {
     }
 
     @Test
+    void currentStateWithoutValidityCannotBecomeFormalFact() throws Exception {
+        long messageId = insertMessage("unbounded-current-state", LocalDateTime.now(), "我现在在上班");
+        long candidate = candidate("recent_state", "work-now", "现在在上班", "SELF_REPORTED", "ASSERT",
+                0.90, List.of(messageId));
+        addEvidence(candidate, messageId);
+
+        assertEquals(0, factRepository.promoteCandidate(candidate));
+        assertEquals("CANDIDATE", scalar("SELECT status FROM profile_fact_candidates WHERE id=?", candidate));
+        assertEquals(0, count("SELECT COUNT(*) FROM profile_facts WHERE source_candidate_id=?", candidate));
+    }
+
+    @Test
+    void expiredValidityCannotBecomeFormalFact() throws Exception {
+        LocalDateTime observedAt = LocalDateTime.now().minusDays(2);
+        long messageId = insertMessage("expired-validity", observedAt, "我昨天在出差");
+        long candidate = candidate("recent_state", "business-trip", "昨天在出差", "SELF_REPORTED", "ASSERT",
+                0.90, List.of(messageId), observedAt, observedAt.plusHours(1));
+        addEvidence(candidate, messageId);
+
+        assertEquals(0, factRepository.promoteCandidate(candidate));
+        assertEquals("CANDIDATE", scalar("SELECT status FROM profile_fact_candidates WHERE id=?", candidate));
+    }
+
+    @Test
     void staleFactExpiresWithAuditHistory() throws Exception {
         LocalDateTime observedAt = LocalDateTime.now().minusDays(40);
         long messageId = insertMessage("stale-fact", observedAt);
-        long candidate = candidate("recent_state", "stale-state", "曾经在旅行", "SELF_REPORTED", "ASSERT",
-                0.90, List.of(messageId), observedAt, null);
+        long candidate = candidate("interest", "stale-state", "曾经喜欢旅行", "SELF_REPORTED", "ASSERT",
+                0.90, List.of(messageId));
         addEvidence(candidate, messageId);
         long fact = factRepository.promoteCandidate(candidate);
         assertTrue(fact > 0);
@@ -169,19 +194,32 @@ class EvidenceProfileIntegrationTest {
 
     @Test
     void concurrentClaimAllowsOnlyOneLease() throws Exception {
-        insertTask(keyPrefix + "-claim", "TEST_CLAIM", Integer.MAX_VALUE, 3, "PENDING", LocalDateTime.now(), null, 0);
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
-            Future<Optional<AnalysisTask>> first = executor.submit(() -> taskRepository.claimNext("worker-a", 60));
-            Future<Optional<AnalysisTask>> second = executor.submit(() -> taskRepository.claimNext("worker-b", 60));
+            for (int attempt = 0; attempt < 12; attempt++) {
+                String taskKey = keyPrefix + "-claim-" + attempt;
+                insertTask(taskKey, "TEST_CLAIM", Integer.MAX_VALUE, 3, "PENDING", LocalDateTime.now(), null, 0);
+                CountDownLatch start = new CountDownLatch(1);
+                Future<Optional<AnalysisTask>> first = executor.submit(() -> {
+                    start.await();
+                    return taskRepository.claimNext("worker-a", 60);
+                });
+                Future<Optional<AnalysisTask>> second = executor.submit(() -> {
+                    start.await();
+                    return taskRepository.claimNext("worker-b", 60);
+                });
+                start.countDown();
 
-            boolean firstClaimed = first.get(10, TimeUnit.SECONDS).isPresent();
-            boolean secondClaimed = second.get(10, TimeUnit.SECONDS).isPresent();
-            assertTrue(firstClaimed ^ secondClaimed, "同一任务只能被一个 worker 抢到");
+                Optional<AnalysisTask> firstClaim = first.get(10, TimeUnit.SECONDS);
+                Optional<AnalysisTask> secondClaim = second.get(10, TimeUnit.SECONDS);
+                assertTrue(firstClaim.isPresent() ^ secondClaim.isPresent(), "同一任务只能被一个 worker 抢到");
+                AnalysisTask claimed = firstClaim.orElseGet(secondClaim::orElseThrow);
+                assertEquals(taskKey, claimed.taskKey());
+                assertEquals("PROCESSING", scalar("SELECT status FROM model_analysis_tasks WHERE task_key=?", taskKey));
+            }
         } finally {
             executor.shutdownNow();
         }
-        assertEquals("PROCESSING", scalar("SELECT status FROM model_analysis_tasks WHERE task_key=?", keyPrefix + "-claim"));
     }
 
     @Test
@@ -206,9 +244,10 @@ class EvidenceProfileIntegrationTest {
 
     @Test
     void repeatedEvidencePromotesStablePersonalFact() throws Exception {
+        LocalDateTime evidenceBeforeCurrent = LocalDateTime.now().minusMinutes(1);
         long first = insertMessage("m1", LocalDateTime.now().minusDays(2));
         long second = insertMessage("m2", LocalDateTime.now().minusDays(1));
-        long third = insertMessage("m3", LocalDateTime.now());
+        long third = insertMessage("m3", evidenceBeforeCurrent);
         long candidate = candidate("interest", "game", "喜欢某款游戏", "OBSERVED_BEHAVIOR", "ASSERT", 0.78,
                 List.of(first, second, third));
         addEvidence(candidate, first);
@@ -222,6 +261,67 @@ class EvidenceProfileIntegrationTest {
         assertEquals("STABLE", scalar("SELECT stability FROM profile_facts WHERE id=?", fact));
         assertEquals("PERSONAL", scalar("SELECT scope FROM profile_facts WHERE id=?", fact));
         assertEquals(1, factRepository.findActiveByUserId(subjectUserId, false, 10).size());
+    }
+
+    @Test
+    void repeatedOccupationPromotesStableProfileFact() throws Exception {
+        long first = insertMessage("occupation-1", LocalDateTime.now().minusDays(2), "我是后端工程师");
+        long second = insertMessage("occupation-2", LocalDateTime.now().minusDays(1), "工作还是后端开发");
+        long third = insertMessage("occupation-3", LocalDateTime.now(), "最近继续做后端工程");
+        long candidate = candidate("occupation", "occupation", "从事后端开发", "SELF_REPORTED", "ASSERT",
+                0.90, List.of(first, second, third));
+        addEvidence(candidate, first);
+        addEvidence(candidate, second);
+        addEvidence(candidate, third);
+
+        long fact = factRepository.promoteCandidate(candidate);
+
+        assertTrue(fact > 0);
+        assertEquals("STABLE", scalar("SELECT stability FROM profile_facts WHERE id=?", fact));
+    }
+
+    @Test
+    void explicitSelfReportedBirthdayBecomesStableProfileFact() throws Exception {
+        long messageId = insertMessage("birthday", LocalDateTime.now(), "我的生日是5月1日");
+        long candidate = candidate("birthday", "birthday", "生日是5月1日", "SELF_REPORTED", "ASSERT",
+                0.90, List.of(messageId));
+        addEvidence(candidate, messageId);
+
+        long fact = factRepository.promoteCandidate(candidate);
+
+        assertTrue(fact > 0);
+        assertEquals("STABLE", scalar("SELECT stability FROM profile_facts WHERE id=?", fact));
+        assertEquals("birthday", scalar("SELECT kind FROM profile_facts WHERE id=?", fact));
+    }
+
+    @Test
+    void oneOffPersonalityObservationStaysCandidate() throws Exception {
+        long messageId = insertMessage("personality-one-off", LocalDateTime.now(), "好不好看得看对比");
+        long candidate = candidate("personality", "appearance-judgment", "好不好看得看对比", "SELF_REPORTED",
+                "ASSERT", 0.40, List.of(messageId));
+        addEvidence(candidate, messageId);
+
+        assertEquals(0, factRepository.promoteCandidate(candidate));
+        assertEquals("CANDIDATE", scalar("SELECT status FROM profile_fact_candidates WHERE id=?", candidate));
+        assertEquals(0, count("SELECT COUNT(*) FROM profile_facts WHERE source_candidate_id=?", candidate));
+    }
+
+    @Test
+    void repeatedPersonalityObservationNeedsMultipleDaysAndEvents() throws Exception {
+        LocalDateTime evidenceBeforeCurrent = LocalDateTime.now().minusMinutes(1);
+        long first = insertMessage("personality-1", LocalDateTime.now().minusDays(2), "我更重视对比后的外貌评价");
+        long second = insertMessage("personality-2", LocalDateTime.now().minusDays(1), "评价好不好看要看对比");
+        long third = insertMessage("personality-3", evidenceBeforeCurrent, "还是要对比之后再判断外貌");
+        long candidate = candidate("personality", "appearance-judgment", "评价外貌时会进行对比", "OBSERVED_BEHAVIOR",
+                "ASSERT", 0.40, List.of(first, second, third));
+        addEvidence(candidate, first);
+        addEvidence(candidate, second);
+        addEvidence(candidate, third);
+
+        long fact = factRepository.promoteCandidate(candidate);
+
+        assertTrue(fact > 0);
+        assertEquals("STABLE", scalar("SELECT stability FROM profile_facts WHERE id=?", fact));
     }
 
     @Test
@@ -240,11 +340,28 @@ class EvidenceProfileIntegrationTest {
     }
 
     @Test
+    void historicalFactLookupDoesNotLeakLaterObservation() throws Exception {
+        LocalDateTime oldObserved = LocalDateTime.now().minusDays(2);
+        long oldMessage = insertMessage("as-of-old", oldObserved);
+        long oldCandidate = candidate("preference", "as-of-preference", "喜欢安静", "SELF_REPORTED",
+                "ASSERT", 0.90, List.of(oldMessage), oldObserved, null);
+        addEvidence(oldCandidate, oldMessage);
+        long oldFact = factRepository.promoteCandidate(oldCandidate);
+        assertTrue(oldFact > 0);
+
+        LocalDateTime asOf = oldObserved.plusHours(1);
+        assertEquals(1, factRepository.findByUserIdAsOf(subjectUserId, false, 10, asOf).size());
+        assertEquals(0, factRepository.findByUserIdAsOf(subjectUserId, false, 10,
+                oldObserved.minusHours(1)).size());
+    }
+
+    @Test
     void privateFactDoesNotBecomeGroupVisible() throws Exception {
         long messageId = insertPrivateMessage("private-only", LocalDateTime.now(), "私聊中的个人事实");
+        LocalDateTime observedAt = observationTime(List.of(messageId));
         long candidate = factRepository.upsertCandidate(new ProfileFactCandidateInput(subjectUserId, null,
                 "preference", "SELF_REPORTED", "private-preference", "只在私聊提过的偏好", "ASSERT",
-                "ONE_OFF", 0.90, "PRIVATE_ONLY", LocalDateTime.now(), null, "integration-test", null,
+                "ONE_OFF", 0.90, "PRIVATE_ONLY", observedAt, null, "integration-test", null,
                 "test", List.of(messageId), "text", "{\"test\":true}", "AVAILABLE"));
         addEvidence(candidate, messageId);
 
@@ -280,10 +397,38 @@ class EvidenceProfileIntegrationTest {
     }
 
     @Test
+    void explicitCorrectionSupersedesOldFactAndLeavesConflictHistory() throws Exception {
+        long oldMessage = insertMessage("correction-old", LocalDateTime.now().minusDays(2));
+        long oldCandidate = candidate("location", "residence", "住在北京", "SELF_REPORTED",
+                "ASSERT", 0.90, List.of(oldMessage));
+        addEvidence(oldCandidate, oldMessage);
+        long oldFact = factRepository.promoteCandidate(oldCandidate);
+        assertTrue(oldFact > 0);
+
+        long correctionMessage = insertMessage("correction-new", LocalDateTime.now());
+        long correctionCandidate = candidate("location", "residence", "住在上海", "SELF_REPORTED",
+                "ASSERT", 0.95, List.of(correctionMessage));
+        addEvidence(correctionCandidate, correctionMessage);
+        long correctedFact = factRepository.promoteCandidate(correctionCandidate, true);
+
+        assertTrue(correctedFact > 0);
+        assertNotEquals(oldFact, correctedFact);
+        assertEquals("SUPERSEDED", scalar("SELECT status FROM profile_facts WHERE id=?", oldFact));
+        assertEquals("ACTIVE", scalar("SELECT status FROM profile_facts WHERE id=?", correctedFact));
+        assertEquals("RESOLVED", scalar("SELECT status FROM profile_fact_conflicts WHERE existing_fact_id=? AND incoming_candidate_id=?",
+                oldFact, correctionCandidate));
+        assertEquals("EXPLICIT_CORRECTION", scalar("SELECT resolution FROM profile_fact_conflicts WHERE existing_fact_id=? AND incoming_candidate_id=?",
+                oldFact, correctionCandidate));
+        assertEquals("EXPLICIT_CORRECTION", scalar("SELECT reason_code FROM profile_fact_changes " +
+                "WHERE entity_id=? AND to_status='SUPERSEDED' ORDER BY id DESC LIMIT 1", oldFact));
+    }
+
+    @Test
     void retractedEvidenceInvalidatesCandidateAndFormalFact() throws Exception {
-        String providerMessageId = keyPrefix + "-provider";
-        long messageId = insertMessage(providerMessageId, LocalDateTime.now());
-        long candidate = candidate("recent_state", "trip", "正在旅行", "SELF_REPORTED", "ASSERT", 0.90, List.of(messageId));
+        long messageId = insertMessage("retracted-evidence", LocalDateTime.now());
+        String providerMessageId = String.valueOf(scalarValue(
+                "SELECT provider_message_id FROM messages WHERE id=?", messageId));
+        long candidate = candidate("interest", "trip", "正在旅行", "SELF_REPORTED", "ASSERT", 0.90, List.of(messageId));
         addEvidence(candidate, messageId);
         long fact = factRepository.promoteCandidate(candidate);
         assertTrue(fact > 0);
@@ -367,7 +512,17 @@ class EvidenceProfileIntegrationTest {
     private long candidate(String kind, String claimKey, String claim, String epistemicType, String polarity,
                            double confidence, List<Long> evidenceIds) throws Exception {
         return candidate(kind, claimKey, claim, epistemicType, polarity, confidence, evidenceIds,
-                LocalDateTime.now(), null);
+                observationTime(evidenceIds), null);
+    }
+
+    private LocalDateTime observationTime(List<Long> evidenceIds) throws Exception {
+        String placeholders = String.join(",", evidenceIds.stream().map(id -> "?").toList());
+        Object value = scalarValue("SELECT MAX(created_at) FROM messages WHERE id IN (" + placeholders + ")",
+                evidenceIds.toArray());
+        if (!(value instanceof Timestamp timestamp)) throw new SQLException("evidence has no source timestamp");
+        LocalDateTime observedAt = timestamp.toLocalDateTime();
+        while (observedAt.isAfter(LocalDateTime.now().minusNanos(100_000_000))) Thread.sleep(50);
+        return observedAt;
     }
 
     private long candidate(String kind, String claimKey, String claim, String epistemicType, String polarity,
@@ -398,7 +553,7 @@ class EvidenceProfileIntegrationTest {
             ps.setString(4, content);
             ps.setString(5, keyPrefix + "-message-" + suffix);
             ps.setString(6, groupId);
-            ps.setString(7, keyPrefix + "-provider-" + suffix);
+            ps.setString(7, "it-" + UUID.randomUUID());
             ps.setTimestamp(8, Timestamp.valueOf(createdAt));
             ps.executeUpdate();
             try (ResultSet keys = ps.getGeneratedKeys()) {
@@ -419,7 +574,7 @@ class EvidenceProfileIntegrationTest {
             ps.setString(3, content);
             ps.setString(4, content);
             ps.setString(5, keyPrefix + "-private-message-" + suffix);
-            ps.setString(6, keyPrefix + "-private-provider-" + suffix);
+            ps.setString(6, "it-" + UUID.randomUUID());
             ps.setTimestamp(7, Timestamp.valueOf(createdAt));
             ps.executeUpdate();
             try (ResultSet keys = ps.getGeneratedKeys()) {

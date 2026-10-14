@@ -2,6 +2,8 @@ package com.start.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -9,8 +11,19 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayDeque;
 import java.util.Set;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 
 class ConversationContextPolicyTest {
+
+    @Test
+    void privateMessagesHaveNoGroupHistoryAndGroupLookupsStillWork() {
+        var history = new ConcurrentHashMap<String, java.util.Deque<BaiLianService.PublicMessage>>();
+        var groupHistory = new ArrayDeque<BaiLianService.PublicMessage>();
+        history.put("group-1", groupHistory);
+
+        assertNull(BaiLianService.lookupPublicGroupHistory(history, null));
+        assertSame(groupHistory, BaiLianService.lookupPublicGroupHistory(history, "group-1"));
+    }
 
     @Test
     void followUpAndAiCommentReceiveGroupEvidenceForTurnResolution() {
@@ -126,7 +139,23 @@ class ConversationContextPolicyTest {
     }
 
     @Test
-    void turnEvidenceKeepsNonTextMessageAndBotReceiptIdWithoutInjectingVisionText() {
+    void currentBotVocativeIsDerivedOnlyFromCurrentMessages() {
+        var history = new ArrayDeque<BaiLianService.PublicMessage>();
+        history.add(new BaiLianService.PublicMessage("old", "u1", "甲", "糖果熊，你看这个"));
+        history.add(new BaiLianService.PublicMessage("current", "u2", "乙", "小鲸鱼，这是你吗？"));
+
+        assertFalse(BaiLianService.isCurrentMessageAddressedToBot(history, Set.of("current")));
+        assertTrue(BaiLianService.isCurrentMessageAddressedToBot(history, Set.of("old")));
+    }
+
+    @Test
+    void knownDeepSeekPeerIsMarkedAsAnotherBotNotCandyBear() {
+        assertEquals("其他机器人", BaiLianService.senderRole("3111651836"));
+        assertEquals("群友", BaiLianService.senderRole("2590355304"));
+    }
+
+    @Test
+    void turnEvidenceKeepsNonTextMessageAndBotReceiptIdWithVerifiedVisionText() {
         var history = new ArrayDeque<BaiLianService.PublicMessage>();
         history.add(new BaiLianService.PublicMessage(
                 "900", String.valueOf(com.start.config.BotConfig.getBotQq()), "糖果熊", "画好了", List.of(), null, "文字"));
@@ -144,8 +173,8 @@ class ConversationContextPolicyTest {
         assertTrue(evidence.contains("reply_to_message_parts=文字"));
         assertTrue(evidence.contains("reply_to_content=画好了"));
         assertTrue(evidence.contains("reply_target_is_candybear=true"));
-        assertTrue(evidence.contains("image_content=图片存在但未读取画面，不能据此猜测"));
-        assertFalse(evidence.contains("红围巾"));
+        assertTrue(evidence.contains("image_content=一只戴红围巾的熊站在雪地里"));
+        assertTrue(evidence.contains("红围巾"));
         assertTrue(evidence.contains("content=（无文字内容）"));
     }
 
@@ -159,6 +188,51 @@ class ConversationContextPolicyTest {
         withImage.add(new BaiLianService.PublicMessage("2", "u1", "甲", "", List.of(), null, "图片"));
         String evidence = BaiLianService.buildTurnEvidence(withImage, Set.of("2"));
         assertTrue(evidence.contains("证据链里有图片"));
-        assertTrue(evidence.contains("不包含画面内容"));
+        assertTrue(evidence.contains("当前证据链没有识图结果"));
+    }
+
+    @Test
+    void denseRealReplyChainNeverLosesCurrentMessageToEvidenceBudget() {
+        var history = new ArrayDeque<BaiLianService.PublicMessage>();
+        for (int i = 0; i < 10; i++) {
+            history.add(new BaiLianService.PublicMessage(String.valueOf(1000 + i),
+                    "member-" + i, "群友", "聊天背景".repeat(55)));
+        }
+        history.add(new BaiLianService.PublicMessage("309720350", "member-a", "甲", "而且没啥玩的"));
+        history.add(new BaiLianService.PublicMessage("574016084", "member-c", "丙",
+                "星露谷物语种地", List.of(), 309720350L, "文字、回复消息309720350"));
+
+        String evidence = BaiLianService.buildTurnEvidence(history, Set.of("574016084"));
+        assertTrue(evidence.contains("message_id=574016084"), "本轮消息被旧背景挤出证据链");
+        assertTrue(evidence.contains("reply_to_content=而且没啥玩的"));
+        assertTrue(evidence.contains("reply_target_is_candybear=false"));
+    }
+
+    @Test
+    void evidenceMarksIndependentSpeakerChangeInsteadOfMergingTheirMeaning() {
+        var history = new ArrayDeque<BaiLianService.PublicMessage>();
+        history.add(new BaiLianService.PublicMessage("309720350", "u1", "甲", "我最近没啥玩的", List.of(), null, "文字"));
+        history.add(new BaiLianService.PublicMessage("574016084", "u2", "乙", "星露谷物语", List.of(), null, "文字"));
+
+        String evidence = BaiLianService.buildTurnEvidence(history, Set.of("574016084"));
+
+        assertTrue(evidence.contains("message_id=574016084"));
+        assertTrue(evidence.contains("relation_to_previous=SPEAKER_CHANGED_NO_PROTOCOL_LINK"));
+        assertTrue(evidence.contains("不得把后一句改写成前一句的回答"));
+    }
+
+    @Test
+    void completedVisionDescriptionIsPartOfEvidenceButMissingDescriptionIsNotGuessed() {
+        var history = new ArrayDeque<BaiLianService.PublicMessage>();
+        var described = new BaiLianService.PublicMessage("img-1", "u1", "甲", "",
+                List.of(), null, "图片");
+        described.imageDescription = "一只戴红围巾的棕色熊";
+        history.add(described);
+        history.add(new BaiLianService.PublicMessage("img-2", "u2", "乙", "",
+                List.of(), null, "图片"));
+
+        String evidence = BaiLianService.buildTurnEvidence(history, Set.of("img-2"));
+        assertTrue(evidence.contains("image_content=一只戴红围巾的棕色熊"));
+        assertTrue(evidence.contains("image_content=图片存在但当前证据链没有识图结果，不能据此猜测"));
     }
 }

@@ -8,10 +8,41 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class BaiLianServiceReplySplittingTest {
 
     @Test
-    void ordinaryParagraphsStayInOneMessage() {
-        String reply = "我是 Claude。\n\n你继续问具体区别，我再慢慢说。";
+    void ordinaryBlankLineIsOnlyLayout() {
+        assertEquals(List.of("我是 Claude。\n\n你继续问具体区别，我再慢慢说。"),
+                BaiLianService.splitIntoShortMessages("我是 Claude。\n\n你继续问具体区别，我再慢慢说。"));
+    }
+
+    @Test
+    void multipleBlankLinesRemainOneMessage() {
+        assertEquals(List.of("第一段\n\n第二段\n\n第三段"),
+                BaiLianService.splitIntoShortMessages("第一段\n\n第二段\n\n第三段"));
+    }
+
+    @Test
+    void whitespaceOnlyBlankLinesAndCrLfRemainLayout() {
+        assertEquals(List.of("第一段\r\n \t\r\n第二段\r\n\r\n第三段"),
+                BaiLianService.splitIntoShortMessages("第一段\r\n \t\r\n第二段\r\n\r\n第三段"));
+    }
+
+    @Test
+    void codeBlockKeepsItsInternalBlankLine() {
+        String reply = "```text\n第一行\n\n第二行\n```";
 
         assertEquals(List.of(reply), BaiLianService.splitIntoShortMessages(reply));
+    }
+
+    @Test
+    void singleLineBreakDoesNotSplitMessage() {
+        String reply = "第一行\n第二行";
+
+        assertEquals(List.of(reply), BaiLianService.splitIntoShortMessages(reply));
+    }
+
+    @Test
+    void leadingCqMentionStaysWithTheSingleMessage() {
+        assertEquals(List.of("[CQ:at,qq=123] 第一段\n\n第二段"),
+                BaiLianService.splitIntoShortMessages("[CQ:at,qq=123] \n\n第一段\n\n第二段"));
     }
 
     @Test

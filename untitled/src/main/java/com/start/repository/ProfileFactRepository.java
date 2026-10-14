@@ -19,7 +19,7 @@ import java.util.LinkedHashMap;
 import java.security.MessageDigest;
 import java.nio.charset.StandardCharsets;
 
-/** Read-only access to confirmed, globally keyed personal profile facts. */
+/** Persistence for sourced, globally keyed personal profile facts and their candidates. */
 public class ProfileFactRepository implements Repository {
     private final DataSource dataSource;
 
@@ -34,19 +34,46 @@ public class ProfileFactRepository implements Repository {
 
     public List<ProfileFactSummary> findActiveByUserId(String userId, boolean privateContext, int limit)
             throws Exception {
+        return findFacts(userId, privateContext, limit, null);
+    }
+
+    /**
+     * Returns facts that could have been known at the supplied historical point.
+     * Rows observed after that point are deliberately excluded because this table
+     * is not an event-sourced snapshot of every fact update.
+     */
+    public List<ProfileFactSummary> findByUserIdAsOf(String userId, boolean privateContext, int limit,
+                                                     LocalDateTime asOf) throws Exception {
+        if (asOf == null) return findActiveByUserId(userId, privateContext, limit);
+        return findFacts(userId, privateContext, limit, asOf);
+    }
+
+    private List<ProfileFactSummary> findFacts(String userId, boolean privateContext, int limit,
+                                               LocalDateTime asOf) throws Exception {
         String scopeClause = privateContext
                 ? "scope IN ('PERSONAL', 'PRIVATE_ONLY')"
                 : "scope = 'PERSONAL'";
+        String timeClause = asOf == null
+                ? "status = 'ACTIVE' AND (valid_until IS NULL OR valid_until > CURRENT_TIMESTAMP(3))"
+                : "first_observed_at <= ? AND last_observed_at <= ? AND valid_from <= ? " +
+                "AND (valid_until IS NULL OR valid_until > ?)";
         String sql = "SELECT id, kind, epistemic_type, claim, stability, confidence, scope, " +
                 "last_observed_at, valid_until FROM profile_facts " +
-                "WHERE subject_user_id = ? AND status = 'ACTIVE' " +
-                "AND (valid_until IS NULL OR valid_until > CURRENT_TIMESTAMP(3)) AND " + scopeClause + " " +
+                "WHERE subject_user_id = ? AND " + timeClause + " AND " + scopeClause + " " +
                 "ORDER BY confidence DESC, last_observed_at DESC LIMIT ?";
         List<ProfileFactSummary> facts = new ArrayList<>();
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, userId);
-            ps.setInt(2, Math.max(1, Math.min(limit, 20)));
+            int parameter = 2;
+            if (asOf != null) {
+                Timestamp timestamp = Timestamp.valueOf(asOf);
+                ps.setTimestamp(parameter++, timestamp);
+                ps.setTimestamp(parameter++, timestamp);
+                ps.setTimestamp(parameter++, timestamp);
+                ps.setTimestamp(parameter++, timestamp);
+            }
+            ps.setInt(parameter, Math.max(1, Math.min(limit, 20)));
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     Timestamp observed = rs.getTimestamp("last_observed_at");
@@ -111,14 +138,24 @@ public class ProfileFactRepository implements Repository {
 
     public long upsertCandidate(ProfileFactCandidateInput input) throws Exception {
         LocalDateTime now = input.observedAt() == null ? LocalDateTime.now() : input.observedAt();
-        String dedupeKey = sha256(String.join("|", safe(input.subjectUserId()), safe(input.scope()),
+        String dedupeKey = sha256(String.join("|", safe(input.subjectUserId()), safe(input.sourceGroupId()), safe(input.scope()),
                 safe(input.kind()), safe(input.epistemicType()), safe(input.claimKey()),
                 safe(input.claim()), safe(input.polarity())));
+        String legacyDedupeKey = sha256(String.join("|", safe(input.subjectUserId()), safe(input.scope()),
+                safe(input.kind()), safe(input.epistemicType()), safe(input.claimKey()),
+                safe(input.claim()), safe(input.polarity())));
+        String storedDedupeKey = findExistingCandidateKey(dedupeKey, legacyDedupeKey, input.sourceGroupId());
+        if (storedDedupeKey == null) storedDedupeKey = dedupeKey;
         String sql = "INSERT INTO profile_fact_candidates (subject_user_id, source_group_id, kind, epistemic_type, " +
                 "claim_key, claim, polarity, status, stability, confidence, scope, first_observed_at, last_observed_at, " +
                 "valid_from, valid_until, audit_rationale, analysis_task_id, model_version, dedupe_key) " +
                 "VALUES (?, ?, ?, ?, ?, ?, ?, 'CANDIDATE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
-                "ON DUPLICATE KEY UPDATE last_observed_at=GREATEST(last_observed_at, VALUES(last_observed_at)), " +
+                "ON DUPLICATE KEY UPDATE first_observed_at=LEAST(first_observed_at, VALUES(first_observed_at)), " +
+                "last_observed_at=GREATEST(last_observed_at, VALUES(last_observed_at)), " +
+                "valid_from=LEAST(valid_from, VALUES(valid_from)), " +
+                "valid_until=CASE WHEN VALUES(valid_until) IS NULL THEN valid_until " +
+                "WHEN valid_until IS NULL THEN VALUES(valid_until) " +
+                "ELSE GREATEST(valid_until, VALUES(valid_until)) END, " +
                 "confidence=GREATEST(confidence, VALUES(confidence)), audit_rationale=VALUES(audit_rationale), " +
                 "analysis_task_id=VALUES(analysis_task_id), model_version=VALUES(model_version)";
         try (Connection conn = dataSource.getConnection();
@@ -142,7 +179,7 @@ public class ProfileFactRepository implements Repository {
             if (input.analysisTaskId() == null) ps.setNull(16, Types.BIGINT);
             else ps.setLong(16, input.analysisTaskId());
             ps.setString(17, input.modelVersion());
-            ps.setString(18, dedupeKey);
+            ps.setString(18, storedDedupeKey);
             ps.executeUpdate();
             try (ResultSet keys = ps.getGeneratedKeys()) {
                 if (keys.next() && keys.getLong(1) > 0) return keys.getLong(1);
@@ -151,12 +188,29 @@ public class ProfileFactRepository implements Repository {
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(
                      "SELECT id FROM profile_fact_candidates WHERE dedupe_key=?")) {
-            ps.setString(1, dedupeKey);
+            ps.setString(1, storedDedupeKey);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) return rs.getLong(1);
             }
         }
         throw new SQLException("候选画像事实已写入但未返回主键");
+    }
+
+    private String findExistingCandidateKey(String currentKey, String legacyKey, String sourceGroupId)
+            throws SQLException {
+        String sql = "SELECT dedupe_key FROM profile_fact_candidates WHERE dedupe_key IN (?, ?) " +
+                "AND (source_group_id=? OR (source_group_id IS NULL AND ? IS NULL)) " +
+                "ORDER BY CASE WHEN dedupe_key=? THEN 0 ELSE 1 END LIMIT 1";
+        try (Connection conn = dataSource.getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, currentKey);
+            ps.setString(2, legacyKey);
+            ps.setString(3, sourceGroupId);
+            ps.setString(4, sourceGroupId);
+            ps.setString(5, currentKey);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getString(1) : null;
+            }
+        }
     }
 
     public List<Map<String, Object>> findEvidenceForFact(long factId, int limit) throws SQLException {
@@ -225,6 +279,14 @@ public class ProfileFactRepository implements Repository {
      * the candidate remains a candidate. Existing facts are superseded, never deleted.
      */
     public long promoteCandidate(long candidateId) throws SQLException {
+        return promoteCandidate(candidateId, false);
+    }
+
+    /**
+     * Promotes a candidate and optionally treats it as an explicit correction of the same claim key.
+     * The correction path keeps the old fact and its evidence, but marks it superseded in one transaction.
+     */
+    public long promoteCandidate(long candidateId, boolean explicitCorrection) throws SQLException {
         try (Connection conn = dataSource.getConnection()) {
             conn.setAutoCommit(false);
             try {
@@ -235,24 +297,62 @@ public class ProfileFactRepository implements Repository {
                 }
                 EvidenceStats stats = evidenceStats(conn, candidateId);
                 if (stats.messageCount == 0) { conn.commit(); return 0; }
+                // MySQL stores these fields as DATETIME(3), so allow its sub-millisecond rounding.
+                LocalDateTime now = LocalDateTime.now();
+                boolean invalidNow = (candidate.validFrom != null && candidate.validFrom.isAfter(now.plusNanos(1_000_000)))
+                        || (candidate.validUntil != null && !candidate.validUntil.isAfter(now))
+                        || requiresFormalValidity(candidate.kind, candidate.validUntil);
                 if ("PROMOTED".equals(candidate.status)) {
                     long existingFactId = findFactByCandidate(conn, candidateId);
                     if (existingFactId == 0) {
                         conn.commit();
                         return 0;
                     }
+                    FactState fact = lockFact(conn, existingFactId);
+                    if (fact == null || !("ACTIVE".equals(fact.status) || "EXPIRED".equals(fact.status))
+                            || stats.unlinkedMessageCount == 0 || invalidNow
+                            || lacksPersonalityEvidence(candidate, stats)) {
+                        conn.commit();
+                        return existingFactId;
+                    }
+                    boolean reactivated = "EXPIRED".equals(fact.status);
+                    String stability = isStableCandidate(candidate, stats) ? "STABLE" : fact.stability;
+                    LocalDateTime validUntil = candidate.validUntil;
+                    if (validUntil == null && !reactivated) validUntil = fact.validUntil;
+                    else if (validUntil != null && fact.validUntil != null
+                            && fact.validUntil.isAfter(validUntil)) validUntil = fact.validUntil;
+                    double confidence = Math.max(0.0, Math.min(1.0, candidate.confidence));
+                    if ("MODEL_INFERENCE".equals(candidate.epistemicType)) confidence = Math.min(confidence, 0.55);
                     try (PreparedStatement update = conn.prepareStatement(
-                            "UPDATE profile_facts SET last_observed_at=GREATEST(last_observed_at, ?), confidence=GREATEST(confidence, ?) WHERE id=?")) {
-                        update.setTimestamp(1, Timestamp.valueOf(candidate.lastObservedAt));
-                        update.setDouble(2, candidate.confidence);
-                        update.setLong(3, existingFactId);
+                            "UPDATE profile_facts SET status=?, stability=?, last_observed_at=GREATEST(last_observed_at, ?), " +
+                                    "confidence=GREATEST(confidence, ?), valid_until=?, version=version+1 WHERE id=?")) {
+                        update.setString(1, reactivated ? "ACTIVE" : fact.status);
+                        update.setString(2, stability);
+                        update.setTimestamp(3, Timestamp.valueOf(candidate.lastObservedAt));
+                        update.setDouble(4, confidence);
+                        if (validUntil == null) update.setNull(5, Types.TIMESTAMP);
+                        else update.setTimestamp(5, Timestamp.valueOf(validUntil));
+                        update.setLong(6, existingFactId);
                         update.executeUpdate();
                     }
                     try (PreparedStatement updateEvidence = conn.prepareStatement(
-                            "UPDATE profile_fact_evidence SET fact_id=? WHERE candidate_id=?")) {
+                            "UPDATE profile_fact_evidence SET fact_id=? WHERE candidate_id=? AND fact_id IS NULL")) {
                         updateEvidence.setLong(1, existingFactId);
                         updateEvidence.setLong(2, candidateId);
                         updateEvidence.executeUpdate();
+                    }
+                    if (reactivated) {
+                        insertChange(conn, existingFactId, "EXPIRED", "ACTIVE", "REOBSERVED_AFTER_EXPIRY",
+                                candidate.claim, stability);
+                    }
+                    if (!"STABLE".equals(fact.stability) && "STABLE".equals(stability)) {
+                        insertChange(conn, existingFactId, fact.stability, "STABLE", "EVIDENCE_THRESHOLD_MET",
+                                candidate.claim, stability);
+                        try (PreparedStatement update = conn.prepareStatement(
+                                "UPDATE profile_fact_candidates SET stability='STABLE', updated_at=CURRENT_TIMESTAMP(3) WHERE id=?")) {
+                            update.setLong(1, candidateId);
+                            update.executeUpdate();
+                        }
                     }
                     conn.commit();
                     return existingFactId;
@@ -261,10 +361,15 @@ public class ProfileFactRepository implements Repository {
                     conn.commit();
                     return 0;
                 }
-                boolean stableKind = List.of("interest", "preference", "habit").contains(candidate.kind);
-                boolean stable = candidate.validUntil == null && stableKind && !"MODEL_INFERENCE".equals(candidate.epistemicType)
-                        && "ASSERT".equals(candidate.polarity)
-                        && stats.messageCount >= 3 && stats.dayCount >= 2 && stats.eventCount >= 2;
+                if (invalidNow) {
+                    conn.commit();
+                    return 0;
+                }
+                if (lacksPersonalityEvidence(candidate, stats)) {
+                    conn.commit();
+                    return 0;
+                }
+                boolean stable = isStableCandidate(candidate, stats);
                 boolean temporary = "SELF_REPORTED".equals(candidate.epistemicType)
                         || stats.messageCount >= 2;
                 if (!stable && !temporary) {
@@ -275,7 +380,7 @@ public class ProfileFactRepository implements Repository {
                 double confidence = Math.max(0.0, Math.min(1.0, candidate.confidence));
                 if ("MODEL_INFERENCE".equals(candidate.epistemicType)) confidence = Math.min(confidence, 0.55);
                 long factId = findOrInsertFact(conn, candidate, stability, confidence);
-                resolveConflicts(conn, candidate, factId);
+                resolveConflicts(conn, candidate, factId, explicitCorrection);
                 try (PreparedStatement ps = conn.prepareStatement(
                         "UPDATE profile_fact_evidence SET fact_id=? WHERE candidate_id=?")) {
                     ps.setLong(1, factId);
@@ -320,13 +425,19 @@ public class ProfileFactRepository implements Repository {
                     long id = rs.getLong(1);
                     try (PreparedStatement update = conn.prepareStatement(
                             "UPDATE profile_facts SET last_observed_at=GREATEST(last_observed_at, ?), " +
-                                    "confidence=GREATEST(confidence, ?), stability=?, valid_until=? WHERE id=?")) {
+                                    "confidence=GREATEST(confidence, ?), stability=?, " +
+                                    "valid_until=CASE WHEN ? IS NULL THEN valid_until " +
+                                    "WHEN valid_until IS NULL THEN ? ELSE GREATEST(valid_until, ?) END WHERE id=?")) {
                         update.setTimestamp(1, Timestamp.valueOf(candidate.lastObservedAt));
                         update.setDouble(2, confidence);
                         update.setString(3, stability);
                         if (candidate.validUntil == null) update.setNull(4, Types.TIMESTAMP);
                         else update.setTimestamp(4, Timestamp.valueOf(candidate.validUntil));
-                        update.setLong(5, id);
+                        if (candidate.validUntil == null) update.setNull(5, Types.TIMESTAMP);
+                        else update.setTimestamp(5, Timestamp.valueOf(candidate.validUntil));
+                        if (candidate.validUntil == null) update.setNull(6, Types.TIMESTAMP);
+                        else update.setTimestamp(6, Timestamp.valueOf(candidate.validUntil));
+                        update.setLong(7, id);
                         update.executeUpdate();
                     }
                     return id;
@@ -362,15 +473,35 @@ public class ProfileFactRepository implements Repository {
 
     private long findFactByCandidate(Connection conn, long candidateId) throws SQLException {
         try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT id FROM profile_facts WHERE source_candidate_id=? ORDER BY id DESC LIMIT 1")) {
+                "SELECT COALESCE(" +
+                        "(SELECT id FROM profile_facts WHERE source_candidate_id=? ORDER BY id DESC LIMIT 1), " +
+                        "(SELECT fact_id FROM profile_fact_evidence WHERE candidate_id=? AND fact_id IS NOT NULL " +
+                        "ORDER BY fact_id DESC LIMIT 1))")) {
             ps.setLong(1, candidateId);
+            ps.setLong(2, candidateId);
             try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getLong(1) : 0;
+                if (!rs.next()) return 0;
+                long id = rs.getLong(1);
+                return rs.wasNull() ? 0 : id;
             }
         }
     }
 
-    private void resolveConflicts(Connection conn, CandidateRow candidate, long newFactId) throws SQLException {
+    private FactState lockFact(Connection conn, long factId) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT status, stability, valid_until FROM profile_facts WHERE id=? FOR UPDATE")) {
+            ps.setLong(1, factId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+                Timestamp validUntil = rs.getTimestamp("valid_until");
+                return new FactState(rs.getString("status"), rs.getString("stability"),
+                        validUntil == null ? null : validUntil.toLocalDateTime());
+            }
+        }
+    }
+
+    private void resolveConflicts(Connection conn, CandidateRow candidate, long newFactId,
+                                  boolean explicitCorrection) throws SQLException {
         String sql = "SELECT id, claim, polarity FROM profile_facts WHERE subject_user_id=? AND claim_key=? " +
                 "AND status='ACTIVE' AND id<>? AND scope=? FOR UPDATE";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -385,8 +516,12 @@ public class ProfileFactRepository implements Repository {
                             || !candidate.polarity.equals(rs.getString("polarity"));
                     if (!differs) continue;
                     // A bounded exception must not retire the standing preference it temporarily overrides.
-                    String resolution = "DENY".equals(candidate.polarity) && candidate.validUntil == null
-                            ? "EXPLICIT_DENIAL" : null;
+                    boolean unboundedSelfReport = "SELF_REPORTED".equals(candidate.epistemicType)
+                            && candidate.validUntil == null;
+                    String resolution = explicitCorrection && unboundedSelfReport
+                            ? "EXPLICIT_CORRECTION"
+                            : ("DENY".equals(candidate.polarity) && unboundedSelfReport
+                            ? "EXPLICIT_DENIAL" : null);
                     try (PreparedStatement conflict = conn.prepareStatement(
                             "INSERT INTO profile_fact_conflicts (existing_fact_id, incoming_candidate_id, conflict_type, status, resolution, resolved_by, resolved_at) VALUES (?, ?, ?, ?, ?, 'SYSTEM_RULE', ?)")) {
                         conflict.setLong(1, existingId);
@@ -399,13 +534,14 @@ public class ProfileFactRepository implements Repository {
                         conflict.executeUpdate();
                     }
                     if (resolution != null) {
+                        String changeReason = explicitCorrection ? "EXPLICIT_CORRECTION" : "EXPLICIT_DENIAL";
                         try (PreparedStatement update = conn.prepareStatement(
                                 "UPDATE profile_facts SET status='SUPERSEDED', superseded_by_fact_id=?, valid_until=CURRENT_TIMESTAMP(3) WHERE id=?")) {
                             update.setLong(1, newFactId);
                             update.setLong(2, existingId);
                             update.executeUpdate();
                         }
-                        insertChange(conn, existingId, "ACTIVE", "SUPERSEDED", "EXPLICIT_DENIAL",
+                        insertChange(conn, existingId, "ACTIVE", "SUPERSEDED", changeReason,
                                 candidate.claim, "SUPERSEDED");
                     }
                 }
@@ -448,7 +584,8 @@ public class ProfileFactRepository implements Repository {
 
     private EvidenceStats evidenceStats(Connection conn, long candidateId) throws SQLException {
         String sql = "SELECT COUNT(DISTINCT e.message_id), COUNT(DISTINCT DATE(m.created_at)), " +
-                "COUNT(DISTINCT COALESCE(e.event_id, e.message_id)) FROM profile_fact_evidence e " +
+                "COUNT(DISTINCT COALESCE(e.event_id, e.message_id)), " +
+                "COUNT(DISTINCT CASE WHEN e.fact_id IS NULL THEN e.message_id END) FROM profile_fact_evidence e " +
                 "JOIN messages m ON m.id=e.message_id WHERE e.candidate_id=? AND e.evidence_role='SUPPORT' " +
                 "AND e.availability_snapshot='AVAILABLE' AND m.retracted_at IS NULL " +
                 "AND m.redacted_at IS NULL AND m.availability_status='AVAILABLE' " +
@@ -461,7 +598,7 @@ public class ProfileFactRepository implements Repository {
             ps.setLong(1, candidateId);
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
-                return new EvidenceStats(rs.getInt(1), rs.getInt(2), rs.getInt(3));
+                return new EvidenceStats(rs.getInt(1), rs.getInt(2), rs.getInt(3), rs.getInt(4));
             }
         }
     }
@@ -472,7 +609,31 @@ public class ProfileFactRepository implements Repository {
                                 LocalDateTime firstObservedAt, LocalDateTime lastObservedAt,
                                 LocalDateTime validFrom, LocalDateTime validUntil) {}
 
-    private record EvidenceStats(int messageCount, int dayCount, int eventCount) {}
+    private record FactState(String status, String stability, LocalDateTime validUntil) {}
+
+    private record EvidenceStats(int messageCount, int dayCount, int eventCount, int unlinkedMessageCount) {}
+
+    private static boolean lacksPersonalityEvidence(CandidateRow candidate, EvidenceStats stats) {
+        return "personality".equals(candidate.kind)
+                && (stats.messageCount < 3 || stats.dayCount < 2 || stats.eventCount < 2);
+    }
+
+    private static boolean isStableCandidate(CandidateRow candidate, EvidenceStats stats) {
+        boolean stableKind = List.of("interest", "preference", "habit", "identity", "birthday",
+                "occupation", "location", "relationship", "personality").contains(candidate.kind);
+        boolean explicitBirthday = "birthday".equals(candidate.kind)
+                && "SELF_REPORTED".equals(candidate.epistemicType)
+                && "ASSERT".equals(candidate.polarity)
+                && candidate.validUntil == null
+                && candidate.confidence >= 0.85;
+        return candidate.validUntil == null && stableKind && !"MODEL_INFERENCE".equals(candidate.epistemicType)
+                && "ASSERT".equals(candidate.polarity)
+                && (explicitBirthday || (stats.messageCount >= 3 && stats.dayCount >= 2 && stats.eventCount >= 2));
+    }
+
+    private static boolean requiresFormalValidity(String kind, LocalDateTime validUntil) {
+        return validUntil == null && ("recent_state".equals(kind) || "age".equals(kind));
+    }
 
     private static String safe(String value) { return value == null ? "" : value.trim(); }
 

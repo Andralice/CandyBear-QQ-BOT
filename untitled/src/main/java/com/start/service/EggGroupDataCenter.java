@@ -42,6 +42,15 @@ public class EggGroupDataCenter {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     public EggGroupDataCenter() {
+        this(true);
+    }
+
+    public EggGroupDataCenter(boolean enabled) {
+        if (!enabled) {
+            logger.info("蛋组数据中心在隔离运行模式下禁用");
+            return;
+        }
+
         // 1. 启动时先加载本地缓存（防止刚启动没数据）
         boolean loaded = loadLocalData();
         

@@ -13,25 +13,49 @@ import java.util.Optional;
 public class AnalysisTaskRepository extends BaseRepository {
 
     public Optional<AnalysisTask> claimNext(String owner, int leaseSeconds) throws SQLException {
+        return claimNext(owner, leaseSeconds, null, true);
+    }
+
+    /** Claims only the requested task type for an independent low-priority worker. */
+    public Optional<AnalysisTask> claimNextForType(String owner, int leaseSeconds, String taskType)
+            throws SQLException {
+        if (taskType == null || taskType.isBlank()) return Optional.empty();
+        return claimNext(owner, leaseSeconds, taskType, true);
+    }
+
+    /** Keeps the live worker from consuming work owned by the historical line. */
+    public Optional<AnalysisTask> claimNextExcludingType(String owner, int leaseSeconds, String taskType)
+            throws SQLException {
+        if (taskType == null || taskType.isBlank()) return claimNext(owner, leaseSeconds);
+        return claimNext(owner, leaseSeconds, taskType, false);
+    }
+
+    private Optional<AnalysisTask> claimNext(String owner, int leaseSeconds,
+                                             String taskType, boolean includeTaskType) throws SQLException {
         String worker = owner == null || owner.isBlank() ? "analysis-worker" : owner;
         int lease = Math.max(10, Math.min(900, leaseSeconds));
         try (Connection conn = DatabaseConfig.getConnection()) {
+            conn.setAutoCommit(true);
+            recoverExpiredLeases(conn);
             conn.setAutoCommit(false);
             try {
-                recoverExpiredLeases(conn);
                 String sql = "SELECT id, task_key, task_type, status, priority, scope_group_id, scope_user_id, " +
                         "input_refs, attempt_count, max_attempts, not_before, lease_owner, lease_until " +
                         "FROM model_analysis_tasks " +
                         "WHERE status IN ('PENDING','RETRY') AND not_before <= CURRENT_TIMESTAMP(3) " +
-                        "AND attempt_count < max_attempts ORDER BY priority DESC, id ASC LIMIT 1 FOR UPDATE";
+                        "AND attempt_count < max_attempts" +
+                        (taskType == null ? "" : " AND task_type" + (includeTaskType ? "=?" : "<>?")) +
+                        " ORDER BY priority DESC, id ASC LIMIT 1 FOR UPDATE SKIP LOCKED";
                 AnalysisTask task;
-                try (PreparedStatement ps = conn.prepareStatement(sql);
-                     ResultSet rs = ps.executeQuery()) {
-                    if (!rs.next()) {
-                        conn.commit();
-                        return Optional.empty();
+                try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                    if (taskType != null) ps.setString(1, taskType);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (!rs.next()) {
+                            conn.commit();
+                            return Optional.empty();
+                        }
+                        task = map(rs);
                     }
-                    task = map(rs);
                 }
 
                 LocalDateTime leaseUntil = LocalDateTime.now().plusSeconds(lease);

@@ -25,9 +25,23 @@ class MainOutgoingMessageSanitizationTest {
     }
 
     @Test
+    void removesBlankLinesButKeepsSingleLineBreaks() {
+        assertEquals("第一段\n第二段\n第三段",
+                Main.sanitizeOutgoingMessage("第一段\r\n \t\r\n\r\n第二段\n第三段\n\n"));
+    }
+
+    @Test
     void videoReceiptGetsLongerUploadTimeout() {
         assertEquals(120, Main.receiptTimeoutSeconds("[CQ:video,file=/tmp/video.mp4]"));
         assertEquals(30, Main.receiptTimeoutSeconds("[CQ:image,file=/tmp/image.png]"));
         assertEquals(5, Main.receiptTimeoutSeconds("普通文本"));
+    }
+
+    @Test
+    void encodesReplyAsOneBotMessageSegment() {
+        assertEquals("[CQ:reply,id=1627481010]收到",
+                Main.withReplyReference("收到", 1627481010L));
+        assertEquals("收到", Main.withReplyReference("收到", null));
+        assertEquals("收到", Main.withReplyReference("收到", 0L));
     }
 }

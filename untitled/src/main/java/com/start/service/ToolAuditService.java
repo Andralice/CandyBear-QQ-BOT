@@ -1,5 +1,7 @@
 package com.start.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.start.model.ToolAuditLog;
 import com.start.repository.ToolAuditLogRepository;
 import org.slf4j.Logger;
@@ -23,6 +25,7 @@ public class ToolAuditService {
     private static final int ARGS_MAX = 500;
     private static final int RESULT_MAX = 1000;
     private static final int ERROR_MAX = 1000;
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private static volatile ToolAuditService instance;
     private final ToolAuditLogRepository repo;
@@ -86,6 +89,13 @@ public class ToolAuditService {
             // 未初始化（如某些测试场景），静默丢弃
             return;
         }
+        String resultError = failureReason(toolName, result);
+        if (rejected || resultError != null) {
+            success = false;
+            if (errorMessage == null || errorMessage.isBlank()) {
+                errorMessage = resultError != null ? resultError : result;
+            }
+        }
         ToolAuditLog log = new ToolAuditLog();
         log.setToolName(toolName);
         log.setCallerUserId(userId);
@@ -119,6 +129,32 @@ public class ToolAuditService {
         ToolAuditService inst = instance;
         if (inst == null) return;
         inst.record(toolName, userId, groupId, sessionId, argsJson, result, rejected, success, errorMessage, latencyMs);
+    }
+
+    /** Inspect the result envelope only; quoted chat contents are not execution status. */
+    static String failureReason(String toolName, String result) {
+        if (result == null || result.isBlank()) return null;
+        try {
+            JsonNode root = JSON.readTree(result);
+            if (root != null && root.isObject()) {
+                String status = root.path("status").asText("");
+                JsonNode error = root.path("error");
+                boolean failed = "ERROR".equalsIgnoreCase(status) || "FAILED".equalsIgnoreCase(status)
+                        || "FAILURE".equalsIgnoreCase(status)
+                        || root.path("success").isBoolean() && !root.path("success").asBoolean();
+                if (failed) {
+                    return !error.isMissingNode() && !error.isNull() && !error.asText().isBlank()
+                            ? error.asText() : "工具返回失败状态：" + status;
+                }
+            }
+        } catch (Exception ignored) {
+            // Existing tools can return ordinary text.
+        }
+        if (("generate_image".equals(toolName) || "generate_video".equals(toolName))
+                && (result.startsWith("画图失败：") || result.startsWith("视频生成失败：")
+                || result.startsWith("图画好了，但发送失败") || result.startsWith("画图前还缺信息：")
+                || result.startsWith("视频生成前还缺信息："))) return result;
+        return null;
     }
 
     static String truncate(String value, int max) {

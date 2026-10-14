@@ -66,6 +66,9 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
     private static final int MAX_LINK_BYTES = 256 * 1024;
     private static final int MAX_FILE_BYTES = 2 * 1024 * 1024;
     private static final String PARSER_VERSION = "evidence-v1";
+    private static final String HISTORY_TASK_TYPE = "MACRO_REVIEW_HISTORY_BATCH";
+    private static final int MAX_LIVE_REVIEW_MESSAGES = 24;
+    private static final int LIVE_REVIEW_INTERVAL_SECONDS = 5 * 60 * 60;
 
     private final AnalysisTaskRepository taskRepository;
     private final MediaArtifactRepository artifactRepository;
@@ -75,10 +78,12 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
     private final MacroReviewRepository macroReviewRepository;
     private final BaiLianService aiService;
     private final MacroReviewService macroReviewService;
+    private final MacroReviewService macroReviewHistoryService;
     private final BiFunction<String, JsonNode, CompletableFuture<JsonNode>> oneBotApi;
     private final String owner;
     private final HttpClient httpClient;
     private ScheduledExecutorService scheduler;
+    private ScheduledExecutorService historyScheduler;
 
     public EvidenceAnalysisWorker(BaiLianService aiService) {
         this(new AnalysisTaskRepository(), new MediaArtifactRepository(), new MessageRepository(),
@@ -126,6 +131,8 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
                 factRepository == null ? null : factRepository.getDataSource());
         this.aiService = aiService;
         this.macroReviewService = MacroReviewService.fromConfig(messageRepository, factRepository);
+        this.macroReviewHistoryService = MacroReviewService.fromConfig(messageRepository, factRepository,
+                BotConfig.getMacroReviewHistoryTimeoutMs());
         this.oneBotApi = oneBotApi;
         this.owner = owner;
         this.httpClient = httpClient;
@@ -146,6 +153,16 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
             return t;
         });
         scheduler.scheduleWithFixedDelay(this::runOnceSafely, 2, 2, TimeUnit.SECONDS);
+        if (BotConfig.isMacroReviewHistoryEnabled()) {
+            historyScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "Evidence-History-Worker");
+                t.setDaemon(true);
+                return t;
+            });
+            historyScheduler.scheduleWithFixedDelay(this::runHistoryOnceSafely, 2, 2, TimeUnit.SECONDS);
+            historyScheduler.schedule(this::enqueueHistoricalReviewTasksSafely, 0, TimeUnit.SECONDS);
+        }
+        enqueueInitialMacroReviewTasksSafely();
         logger.info("证据画像分析 worker 已启动");
     }
 
@@ -157,13 +174,76 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
         }
     }
 
+    private void runHistoryOnceSafely() {
+        try {
+            runHistoryOnce();
+        } catch (Exception e) {
+            logger.warn("历史宏观审查 worker 单轮失败: {}", e.getMessage());
+        }
+    }
+
+    private void enqueueHistoricalReviewTasksSafely() {
+        try {
+            enqueueHistoricalReviewTasks();
+        } catch (Exception e) {
+            logger.warn("历史宏观审查任务调度失败: {}", e.getMessage());
+        }
+    }
+
+    private void enqueueInitialMacroReviewTasksSafely() {
+        if (!BotConfig.getMacroReviewMode().enabled()) return;
+        for (Long configuredGroupId : BotConfig.getMacroReviewGroups()) {
+            if (configuredGroupId == null) continue;
+            String groupId = String.valueOf(configuredGroupId);
+            var queued = messageRepository.enqueueMacroReviewTriggerTask(groupId,
+                    "group:" + groupId + ":MACRO_REVIEW_INITIAL", 0);
+            if (!queued.isSuccess()) {
+                logger.warn("实时宏观审查初始触发入队失败 group={}: {}", groupId, queued.getError());
+            }
+        }
+    }
+
+    void enqueueHistoricalReviewTasks() throws SQLException {
+        if (!BotConfig.isMacroReviewHistoryEnabled()) return;
+        for (Long configuredGroupId : BotConfig.getMacroReviewGroups()) {
+            if (configuredGroupId == null) continue;
+            String groupId = String.valueOf(configuredGroupId);
+            if (!BotConfig.isMacroReviewHistoryEnabledFor(groupId)) continue;
+            var latest = messageRepository.findLatestGroupMessageId(groupId);
+            if (!latest.isSuccess() || latest.getData() == null || latest.getData() <= 0) continue;
+            var boundary = messageRepository.findLastGroupMessageIdBefore(
+                    groupId, BotConfig.getMacroReviewHistoryStartAt());
+            if (!boundary.isSuccess() || boundary.getData() == null) {
+                logger.warn("历史宏观审查无法确定起始游标 group={}: {}", groupId, boundary.getError());
+                continue;
+            }
+            macroReviewRepository.initializeHistoryCursor(groupId, latest.getData(), boundary.getData());
+            MacroReviewRepository.HistoryCursor cursor = macroReviewRepository.findHistoryCursor(groupId);
+            if (!cursor.initialized() || "COMPLETE".equals(cursor.status())
+                    || cursor.lastMessageId() >= cursor.targetMessageId()) continue;
+            messageRepository.enqueueMacroHistoryReviewTask(groupId);
+        }
+    }
+
     /** Runs at most one task, keeping model and media cost bounded per tick. */
     public boolean runOnce() throws Exception {
         return runOnce(BotConfig.getMacroReviewMode(), BotConfig.getMacroReviewGroups());
     }
 
     boolean runOnce(MacroReviewMode macroReviewMode, Set<Long> macroReviewGroups) throws Exception {
-        Optional<AnalysisTask> claimed = taskRepository.claimNext(owner, 180);
+        Optional<AnalysisTask> claimed = taskRepository.claimNextExcludingType(owner, 180, HISTORY_TASK_TYPE);
+        return processClaimedTask(claimed, macroReviewMode, macroReviewGroups);
+    }
+
+    private boolean runHistoryOnce() throws Exception {
+        Optional<AnalysisTask> claimed = taskRepository.claimNextForType(
+                owner + "-history", 600, HISTORY_TASK_TYPE);
+        return processClaimedTask(claimed, BotConfig.getMacroReviewMode(), BotConfig.getMacroReviewGroups());
+    }
+
+    private boolean processClaimedTask(Optional<AnalysisTask> claimed,
+                                       MacroReviewMode macroReviewMode,
+                                       Set<Long> macroReviewGroups) throws Exception {
         if (claimed.isEmpty()) return false;
         AnalysisTask task = claimed.get();
         try {
@@ -181,13 +261,21 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
                     case "EXPAND_FORWARD" -> expandForward(task, result);
                     case "EXTRACT_PROFILE_FACTS" -> extractProfileFacts(task, result);
                     case "MACRO_REVIEW_BATCH" -> reviewMacroBatch(task, result);
+                    case "MACRO_REVIEW_HISTORY_BATCH" -> reviewMacroHistoryBatch(task, result);
                     case "ANALYZE_GROUP_ATMOSPHERE" -> analyzeGroupAtmosphere(task, result);
                     default -> throw new PermanentAnalysisException("UNKNOWN_TASK_TYPE", "不支持的任务类型: " + task.taskType());
                 }
             }
+            if ("MACRO_REVIEW_BATCH".equals(task.taskType())) {
+                enqueueNextMacroReviewTask(task, result);
+            }
             taskRepository.complete(task, result.toString(),
                     task.taskType().startsWith("PARSE_") ? BotConfig.getVisionModel() : null,
                     PARSER_VERSION, null, null, null);
+            if (HISTORY_TASK_TYPE.equals(task.taskType())
+                    && "SUCCEEDED".equals(result.path("status").asText())) {
+                enqueueNextHistoricalReviewTask(task.scopeGroupId());
+            }
         } catch (PermanentAnalysisException e) {
             try {
                 taskRepository.complete(task, json("status", "UNAVAILABLE", "error_code", e.code,
@@ -212,7 +300,7 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
                                                       MacroReviewMode mode,
                                                       Set<Long> groups) {
         if (task == null || !"EXTRACT_PROFILE_FACTS".equals(task.taskType())
-                || mode != MacroReviewMode.LIVE_SHADOW
+                || mode == null || !mode.ownsProfileExtraction()
                 || task.scopeGroupId() == null || task.scopeGroupId().isBlank()) {
             return false;
         }
@@ -476,11 +564,12 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
         if (!content.isBlank() || hasUsableMediaPart(messageId)) usableSubjectMessages.add(messageId);
         int accepted = 0;
         int rejected = 0;
+        int promoted = 0;
         LocalDateTime observedAt = timestamp(message.get("created_at"));
         for (JsonNode fact : facts) {
             if (!fact.isObject()) { rejected++; continue; }
-            String kind = enumOr(fact.path("kind").asText(), Set.of("interest", "preference", "habit", "occupation",
-                    "location", "relationship", "personality", "recent_state", "event"), "recent_state");
+            String kind = enumOr(fact.path("kind").asText(), Set.of("interest", "preference", "habit", "identity",
+                    "birthday", "age", "occupation", "location", "relationship", "personality", "recent_state", "event"), "recent_state");
             String epistemic = enumOr(fact.path("epistemic_type").asText(),
                     Set.of("SELF_REPORTED", "OBSERVED_BEHAVIOR", "MODEL_INFERENCE"), "MODEL_INFERENCE");
             String claim = limit(fact.path("claim").asText(""), 600);
@@ -503,6 +592,7 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
             if (evidence.isEmpty() && usableSubjectMessages.contains(messageId)) evidence.add(messageId);
             if (evidence.isEmpty()) { rejected++; continue; }
             LocalDateTime validUntil = parseTime(fact.path("valid_until").asText(null));
+            boolean invalidValidity = validUntil != null && !validUntil.isAfter(observedAt);
             ProfileFactCandidateInput input = new ProfileFactCandidateInput(subjectUserId, groupId, kind, epistemic,
                     claimKey, claim, polarity, "ONE_OFF", confidence, scope, observedAt, validUntil,
                     limit(fact.path("reasoning").asText("仅保留可回溯证据"), 1000), task.id(),
@@ -516,24 +606,61 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
                         "SELF_REPORTED".equals(epistemic) ? 1.0 : 0.6);
             }
             if (!hasUsableEvidence) { rejected++; continue; }
-            factRepository.promoteCandidate(candidateId);
+            if (invalidValidity) {
+                accepted++;
+                continue;
+            }
+            if (requiresExplicitValidity(kind, "UNKNOWN", validUntil)) {
+                accepted++;
+                continue;
+            }
+            if (factRepository.promoteCandidate(candidateId) > 0) promoted++;
             accepted++;
         }
-        result.put("status", "SUCCEEDED").put("accepted", accepted).put("rejected", rejected);
+        result.put("status", "SUCCEEDED").put("accepted", accepted).put("promoted", promoted).put("rejected", rejected);
     }
 
     private void reviewMacroBatch(AnalysisTask task, ObjectNode result) throws Exception {
         String groupId = task.scopeGroupId();
-        if (!BotConfig.isMacroReviewShadowFor(groupId)) {
+        if (!BotConfig.isMacroReviewEnabledFor(groupId)) {
             result.put("status", "SKIPPED").put("reason", "MACRO_REVIEW_DISABLED_FOR_GROUP");
             return;
         }
-        long anchorMessageId = inputRefs(task).path("message_id").asLong(0);
-        if (anchorMessageId <= 0) throw new PermanentAnalysisException("MACRO_NO_ANCHOR", "宏观审查任务缺少消息锚点");
-
+        JsonNode refs = inputRefs(task);
+        String reviewKind = refs.path("review_kind").asText("");
         long cursor = macroReviewRepository.findCursor(groupId);
-        int windowLimit = BotConfig.getMacroReviewWindowMessages();
-        int overlapLimit = BotConfig.getMacroReviewOverlapMessages();
+        long anchorMessageId;
+        long expectedCursor;
+        if ("TRIGGER".equals(reviewKind)) {
+            var latest = messageRepository.findLatestGroupMessageId(groupId);
+            if (!latest.isSuccess() || latest.getData() == null) {
+                throw new IllegalStateException(latest.getError());
+            }
+            anchorMessageId = latest.getData();
+            expectedCursor = cursor;
+        } else if ("PAGE".equals(reviewKind)) {
+            anchorMessageId = refs.path("message_id").asLong(0);
+            expectedCursor = refs.path("expected_cursor").asLong(-1);
+        } else {
+            result.put("status", "SKIPPED").put("reason", "LEGACY_LIVE_REVIEW_TASK");
+            return;
+        }
+
+        if (expectedCursor != cursor) {
+            result.put("status", "NOOP").put("reason", "STALE_REVIEW_PAGE")
+                    .put("from_message_id", expectedCursor).put("to_message_id", anchorMessageId)
+                    .put("processed_through_message_id", cursor);
+            return;
+        }
+        if (anchorMessageId <= cursor) {
+            result.put("status", "NOOP").put("reason", "NO_NEW_MESSAGES")
+                    .put("from_message_id", cursor).put("to_message_id", anchorMessageId)
+                    .put("processed_through_message_id", cursor);
+            return;
+        }
+
+        int windowLimit = liveReviewWindowLimit(BotConfig.getMacroReviewWindowMessages());
+        int overlapLimit = Math.min(windowLimit - 1, BotConfig.getMacroReviewOverlapMessages());
         boolean bootstrapWindow = cursor <= 0;
         var contextResult = bootstrapWindow
                 ? messageRepository.findRecentMacroReviewMessages(groupId, anchorMessageId, windowLimit)
@@ -547,7 +674,10 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
                 ? window
                 : window.stream().filter(row -> rowId(row) > cursor).toList();
         if (fresh.isEmpty()) {
-            result.put("status", "NOOP").put("cursor", cursor).put("anchor_message_id", anchorMessageId);
+            macroReviewRepository.advanceCursor(groupId, anchorMessageId);
+            result.put("status", "NOOP").put("reason", "NO_USABLE_MESSAGES")
+                    .put("from_message_id", cursor).put("to_message_id", anchorMessageId)
+                    .put("processed_through_message_id", anchorMessageId);
             return;
         }
 
@@ -556,6 +686,13 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
         Map<String, List<ProfileFactSummary>> previousFacts = loadPreviousFacts(window);
         MacroReviewService.ReviewResult review = macroReviewService.review(groupId, window, previousFacts);
         ObjectNode validated = validateMacroResult(review.result(), window);
+        if (BotConfig.isMacroReviewActiveFor(groupId)) {
+            validated.set("write_summary", persistMacroObservations(task, groupId, window, validated, review));
+            validated.put("production_write", true);
+        } else {
+            validated.putObject("write_summary").put("mode", "LIVE_SHADOW").put("promoted", 0)
+                    .put("candidates_stored", 0).put("skipped", validated.path("observations").size());
+        }
         macroReviewRepository.saveRun(new MacroReviewRepository.RunInput(
                 task.id(), groupId, cursor, anchorMessageId, processedThrough,
                 bootstrapWindow ? 0 : (int) window.stream().filter(row -> rowId(row) <= cursor).count(),
@@ -565,7 +702,7 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
         macroReviewRepository.advanceCursor(groupId, processedThrough);
 
         result.put("status", "SUCCEEDED")
-                .put("mode", "LIVE_SHADOW")
+                .put("mode", BotConfig.isMacroReviewActiveFor(groupId) ? "LIVE_ACTIVE" : "LIVE_SHADOW")
                 .put("from_message_id", cursor)
                 .put("to_message_id", anchorMessageId)
                 .put("processed_through_message_id", processedThrough)
@@ -574,14 +711,132 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
                 .put("window_truncated", truncated)
                 .set("validation", validated.path("validation").deepCopy());
 
-        var latestResult = messageRepository.findLatestGroupMessageId(groupId);
-        if (latestResult.isSuccess() && latestResult.getData() != null && latestResult.getData() > processedThrough) {
-            messageRepository.enqueueMacroReviewTask(groupId, latestResult.getData(),
-                    "group:" + groupId + ":MACRO_REVIEW:followup:" + processedThrough);
+    }
+
+    private void enqueueNextMacroReviewTask(AnalysisTask task, ObjectNode result) throws Exception {
+        String status = result.path("status").asText();
+        if (!Set.of("SUCCEEDED", "NOOP").contains(status)
+                || !BotConfig.isMacroReviewEnabledFor(task.scopeGroupId())) return;
+
+        String groupId = task.scopeGroupId();
+        long target = result.path("to_message_id").asLong(0);
+        long processedThrough = result.path("processed_through_message_id").asLong(0);
+        long nextTarget = target;
+        if (processedThrough >= target) {
+            var latest = messageRepository.findLatestGroupMessageId(groupId);
+            if (!latest.isSuccess() || latest.getData() == null) {
+                throw new SQLException("无法获取实时宏观审查最新消息: " + latest.getError());
+            }
+            nextTarget = nextLiveReviewTarget(target, processedThrough, latest.getData());
+        }
+
+        var queued = nextTarget > processedThrough
+                ? messageRepository.enqueueMacroReviewPageTask(groupId, nextTarget, processedThrough)
+                : messageRepository.enqueueMacroReviewTriggerTask(groupId,
+                        MessageRepository.macroReviewTriggerTaskKey(groupId, task.id()),
+                        LIVE_REVIEW_INTERVAL_SECONDS);
+        if (!queued.isSuccess()) {
+            throw new SQLException("实时宏观审查后续任务入队失败 group=" + groupId + ": " + queued.getError());
         }
     }
 
+    static long nextLiveReviewTarget(long target, long processedThrough, long latestMessageId) {
+        return processedThrough < target ? target : Math.max(processedThrough, latestMessageId);
+    }
+
+    static int liveReviewWindowLimit(int configured) {
+        return Math.max(1, Math.min(MAX_LIVE_REVIEW_MESSAGES, configured));
+    }
+
+    private void enqueueNextHistoricalReviewTask(String groupId) {
+        try {
+            MacroReviewRepository.HistoryCursor cursor = macroReviewRepository.findHistoryCursor(groupId);
+            if (!cursor.initialized() || "COMPLETE".equals(cursor.status())
+                    || cursor.lastMessageId() >= cursor.targetMessageId()) return;
+            var queued = messageRepository.enqueueMacroHistoryReviewTask(groupId);
+            if (!queued.isSuccess()) {
+                logger.warn("历史宏观审查下一页入队失败 group={}: {}", groupId, queued.getError());
+            }
+        } catch (Exception e) {
+            logger.warn("历史宏观审查下一页检查失败 group={}: {}", groupId, e.getMessage());
+        }
+    }
+
+    private void reviewMacroHistoryBatch(AnalysisTask task, ObjectNode result) throws Exception {
+        String groupId = task.scopeGroupId();
+        if (!BotConfig.isMacroReviewHistoryEnabledFor(groupId)) {
+            result.put("status", "SKIPPED").put("reason", "MACRO_REVIEW_HISTORY_DISABLED_FOR_GROUP");
+            return;
+        }
+        MacroReviewRepository.HistoryCursor cursor = macroReviewRepository.findHistoryCursor(groupId);
+        if (!cursor.initialized() || cursor.targetMessageId() <= 0) {
+            result.put("status", "NOOP").put("line", "HISTORY_BACKFILL").put("reason", "NO_HISTORY_SNAPSHOT");
+            return;
+        }
+        if (cursor.lastMessageId() >= cursor.targetMessageId()) {
+            macroReviewRepository.advanceHistoryCursor(groupId, cursor.targetMessageId(), true);
+            result.put("status", "NOOP").put("line", "HISTORY_BACKFILL").put("reason", "HISTORY_COMPLETE");
+            return;
+        }
+
+        int windowLimit = BotConfig.getMacroReviewHistoryWindowMessages();
+        int overlapLimit = BotConfig.getMacroReviewHistoryOverlapMessages();
+        var contextResult = messageRepository.findMacroReviewHistoryMessages(
+                groupId, cursor.lastMessageId(), cursor.targetMessageId(),
+                BotConfig.getMacroReviewHistoryStartAt(), overlapLimit, windowLimit);
+        if (!contextResult.isSuccess() || contextResult.getData() == null) {
+            throw new IllegalStateException(contextResult.getError());
+        }
+        List<Map<String, Object>> window = contextResult.getData();
+        List<Map<String, Object>> fresh = window.stream()
+                .filter(row -> rowId(row) > cursor.lastMessageId()).toList();
+        if (fresh.isEmpty()) {
+            macroReviewRepository.advanceHistoryCursor(groupId, cursor.targetMessageId(), true);
+            result.put("status", "NOOP").put("line", "HISTORY_BACKFILL").put("reason", "NO_USABLE_MESSAGES");
+            return;
+        }
+
+        long processedThrough = fresh.stream().mapToLong(EvidenceAnalysisWorker::rowId)
+                .max().orElse(cursor.lastMessageId());
+        boolean truncated = processedThrough < cursor.targetMessageId();
+        Map<String, List<ProfileFactSummary>> previousFacts = loadPreviousFacts(window, latestMessageTime(window));
+        JsonNode previousReview = loadPreviousReviewSummary(groupId);
+        MacroReviewService.ReviewResult review = macroReviewHistoryService.review(
+                groupId, window, previousFacts, previousReview);
+        ObjectNode validated = validateMacroResult(review.result(), window);
+        if (BotConfig.isMacroReviewActiveFor(groupId)) {
+            validated.set("write_summary", persistMacroObservations(task, groupId, window, validated, review));
+            validated.put("production_write", true);
+        } else {
+            validated.putObject("write_summary").put("mode", "HISTORY_LIVE_SHADOW").put("promoted", 0)
+                    .put("candidates_stored", 0).put("skipped", validated.path("observations").size());
+        }
+        macroReviewRepository.saveRun(new MacroReviewRepository.RunInput(
+                task.id(), groupId, cursor.lastMessageId(), cursor.targetMessageId(), processedThrough,
+                (int) window.stream().filter(row -> rowId(row) <= cursor.lastMessageId()).count(),
+                fresh.size(), truncated, "SUCCEEDED", validated.toString(), review.modelName(),
+                review.promptVersion(), review.inputTokens(), review.outputTokens()));
+        macroReviewRepository.advanceHistoryCursor(groupId, processedThrough, !truncated);
+
+        result.put("status", "SUCCEEDED")
+                .put("line", "HISTORY_BACKFILL")
+                .put("mode", BotConfig.isMacroReviewActiveFor(groupId)
+                        ? "HISTORY_LIVE_ACTIVE" : "HISTORY_LIVE_SHADOW")
+                .put("from_message_id", cursor.lastMessageId())
+                .put("to_message_id", cursor.targetMessageId())
+                .put("processed_through_message_id", processedThrough)
+                .put("window_message_count", window.size())
+                .put("fresh_message_count", fresh.size())
+                .put("window_truncated", truncated)
+                .set("validation", validated.path("validation").deepCopy());
+    }
+
     private Map<String, List<ProfileFactSummary>> loadPreviousFacts(List<Map<String, Object>> window) throws Exception {
+        return loadPreviousFacts(window, null);
+    }
+
+    private Map<String, List<ProfileFactSummary>> loadPreviousFacts(List<Map<String, Object>> window,
+                                                                     LocalDateTime asOf) throws Exception {
         Map<String, List<ProfileFactSummary>> result = new HashMap<>();
         Set<String> users = new HashSet<>();
         for (Map<String, Object> row : window) {
@@ -590,9 +845,24 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
             if (!userId.isBlank()) users.add(userId);
         }
         for (String userId : users) {
-            result.put(userId, factRepository.findActiveByUserId(userId, false, 8));
+            result.put(userId, asOf == null
+                    ? factRepository.findActiveByUserId(userId, false, 8)
+                    : factRepository.findByUserIdAsOf(userId, false, 8, asOf));
         }
         return result;
+    }
+
+    private JsonNode loadPreviousReviewSummary(String groupId) throws Exception {
+        String raw = macroReviewRepository.findLatestSuccessfulHistoryResultJson(groupId);
+        if (raw == null || raw.isBlank()) return null;
+        JsonNode parsed = MAPPER.readTree(raw);
+        if (parsed == null || !parsed.isObject()) return null;
+        ObjectNode summary = MAPPER.createObjectNode();
+        for (String field : List.of("mode", "observations", "stories", "group_state",
+                "validation", "write_summary")) {
+            if (parsed.has(field)) summary.set(field, parsed.get(field).deepCopy());
+        }
+        return summary;
     }
 
     static ObjectNode validateMacroResult(JsonNode raw, List<Map<String, Object>> window) {
@@ -623,6 +893,14 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
                 String subject = item.path("subject_user_id").asText("");
                 ArrayNode errors = item.putArray("validation_errors");
                 if (subject.isBlank() || !participantIds.contains(subject)) errors.add("SUBJECT_NOT_IN_WINDOW");
+                String relationTarget = item.path("relation_target").asText("UNKNOWN");
+                if (!"SELF".equals(relationTarget)) errors.add("NON_SELF_RELATION");
+                String claim = item.path("claim").asText(item.path("value").asText(""));
+                if (claim.isBlank()) errors.add("NO_CLAIM");
+                String status = item.path("status").asText("");
+                if (!Set.of("CANDIDATE", "HOLD", "REJECT", "CONFLICT").contains(status)) {
+                    errors.add("STATUS_INVALID");
+                }
                 JsonNode evidence = item.path("evidence_message_ids");
                 if (!evidence.isArray() || evidence.isEmpty()) errors.add("NO_EVIDENCE_IDS");
                 else {
@@ -662,6 +940,156 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
         validation.put("private_messages_excluded", true);
         validation.put("production_write", false);
         return result;
+    }
+
+    ObjectNode persistMacroObservations(AnalysisTask task, String groupId,
+                                        List<Map<String, Object>> window,
+                                        ObjectNode validated,
+                                        MacroReviewService.ReviewResult review) throws Exception {
+        ObjectNode summary = MAPPER.createObjectNode();
+        summary.put("mode", "LIVE_ACTIVE");
+        int candidatesWritten = 0;
+        int promoted = 0;
+        int skipped = 0;
+        Map<Long, Map<String, Object>> byMessageId = new HashMap<>();
+        for (Map<String, Object> row : window) byMessageId.put(rowId(row), row);
+
+        JsonNode observations = validated.path("observations");
+        if (observations.isArray()) {
+            for (JsonNode node : observations) {
+                if (!node.isObject()) {
+                    skipped++;
+                    continue;
+                }
+                ObjectNode observation = (ObjectNode) node;
+                if (observation.path("validation_errors").isArray()
+                        && !observation.path("validation_errors").isEmpty()) {
+                    observation.put("write_action", "SKIPPED_VALIDATION");
+                    skipped++;
+                    continue;
+                }
+                if (!"CANDIDATE".equals(observation.path("status").asText())
+                        || "JOKE".equals(observation.path("speech_act").asText())
+                        || "QUOTE".equals(observation.path("speech_act").asText())) {
+                    observation.put("write_action", "SKIPPED_STATUS");
+                    skipped++;
+                    continue;
+                }
+
+                String subject = observation.path("subject_user_id").asText("").trim();
+                String rawKind = observation.path("kind").asText("");
+                if (rawKind.isBlank()) rawKind = observation.path("predicate").asText("");
+                String kind = enumOr(rawKind, Set.of("interest", "preference", "habit", "identity", "birthday",
+                        "age", "occupation", "location", "relationship", "personality", "recent_state", "event"), "recent_state");
+                String claim = observation.path("claim").asText("");
+                if (claim.isBlank()) claim = observation.path("value").asText("");
+                claim = limit(claim.trim(), 600);
+                String claimKey = observation.path("claim_key").asText("");
+                if (claimKey.isBlank()) claimKey = rawKind.isBlank() ? kind : rawKind;
+                claimKey = normalizeClaimKey(claimKey);
+                if (subject.isBlank() || claim.isBlank() || claimKey.isBlank()) {
+                    observation.put("write_action", "SKIPPED_EMPTY_CLAIM");
+                    skipped++;
+                    continue;
+                }
+
+                List<Long> evidenceIds = new ArrayList<>();
+                JsonNode ids = observation.path("evidence_message_ids");
+                if (ids.isArray()) {
+                    for (JsonNode id : ids) {
+                        long value = id.asLong(0);
+                        if (byMessageId.containsKey(value)) evidenceIds.add(value);
+                    }
+                }
+                if (evidenceIds.isEmpty()) {
+                    observation.put("write_action", "SKIPPED_NO_EVIDENCE");
+                    skipped++;
+                    continue;
+                }
+
+                LocalDateTime observedAt = LocalDateTime.MIN;
+                for (Long evidenceId : evidenceIds) {
+                    LocalDateTime at = timestamp(byMessageId.get(evidenceId).get("created_at"));
+                    if (at.isAfter(observedAt)) observedAt = at;
+                }
+                if (observedAt.equals(LocalDateTime.MIN)) observedAt = LocalDateTime.now();
+
+                String speechAct = observation.path("speech_act").asText("OTHER");
+                String epistemic = observation.path("epistemic_type").asText("");
+                if (epistemic.isBlank()) {
+                    epistemic = Set.of("SELF_ASSERTION", "ANSWER", "CORRECTION", "PLAN").contains(speechAct)
+                            ? "SELF_REPORTED" : "OBSERVED_BEHAVIOR";
+                }
+                epistemic = enumOr(epistemic,
+                        Set.of("SELF_REPORTED", "OBSERVED_BEHAVIOR", "MODEL_INFERENCE"), "MODEL_INFERENCE");
+                String polarity = enumOr(observation.path("polarity").asText("ASSERT"),
+                        Set.of("ASSERT", "DENY"), "ASSERT");
+                double confidence = clamp(observation.path("confidence").asDouble(0.25));
+                if ("MODEL_INFERENCE".equals(epistemic)) confidence = Math.min(confidence, 0.55);
+                if ("personality".equals(kind)) confidence = Math.min(confidence, 0.40);
+                LocalDateTime validUntil = parseTime(observation.path("valid_until").asText(null));
+                boolean invalidValidity = validUntil != null && !validUntil.isAfter(observedAt);
+                ObjectNode quote = MAPPER.createObjectNode();
+                quote.put("claim", claim);
+                quote.put("speech_act", speechAct);
+                quote.put("temporal_scope", observation.path("temporal_scope").asText("UNKNOWN"));
+                quote.set("evidence_message_ids", MAPPER.valueToTree(evidenceIds));
+                ProfileFactCandidateInput input = new ProfileFactCandidateInput(
+                        subject, groupId, kind, epistemic, claimKey, claim, polarity, "ONE_OFF",
+                        confidence, groupId == null || groupId.isBlank() ? "PRIVATE_ONLY" : "PERSONAL",
+                        observedAt, validUntil, limit(observation.path("reason").asText("宏观审查候选"), 1000),
+                        task.id(), review.modelName(), evidenceIds, "text", quote.toString(), "AVAILABLE");
+                long candidateId = factRepository.upsertCandidate(input);
+                boolean hasEvidence = false;
+                for (Long evidenceId : evidenceIds) {
+                    Map<String, Object> source = byMessageId.get(evidenceId);
+                    String sourceText = string(source.get("raw_content"));
+                    if (sourceText.isBlank()) sourceText = string(source.get("content"));
+                    hasEvidence |= addUsableEvidence(candidateId, evidenceId, sourceText,
+                            quote.toString(), "SELF_REPORTED".equals(epistemic) ? 1.0 : 0.6);
+                }
+                if (!hasEvidence) {
+                    observation.put("write_action", "CANDIDATE_WITHOUT_USABLE_EVIDENCE");
+                    skipped++;
+                    continue;
+                }
+
+                boolean explicitCorrection = "CORRECTION".equals(speechAct);
+                String temporalScope = observation.path("temporal_scope").asText("UNKNOWN");
+                boolean nonCurrentObservation = "FUTURE_PLAN".equals(temporalScope)
+                        || "PLAN".equals(speechAct) || "WISH".equals(speechAct);
+                candidatesWritten++;
+                if (nonCurrentObservation) {
+                    observation.put("candidate_id", candidateId);
+                    observation.put("write_action", "CANDIDATE_STORED_NON_CURRENT");
+                    continue;
+                }
+                if (invalidValidity) {
+                    observation.put("candidate_id", candidateId);
+                    observation.put("write_action", "CANDIDATE_STORED_INVALID_VALIDITY");
+                    continue;
+                }
+                if (requiresExplicitValidity(kind, temporalScope, validUntil)) {
+                    observation.put("candidate_id", candidateId);
+                    observation.put("write_action", "CANDIDATE_STORED_REQUIRES_VALIDITY");
+                    continue;
+                }
+                long factId = factRepository.promoteCandidate(candidateId, explicitCorrection);
+                observation.put("candidate_id", candidateId);
+                if (factId > 0) {
+                    observation.put("write_action", "PROMOTED");
+                    observation.put("fact_id", factId);
+                    promoted++;
+                } else {
+                    observation.put("write_action", "CANDIDATE_STORED");
+                }
+            }
+        }
+        summary.put("candidate_rows_written", candidatesWritten);
+        summary.put("promoted", promoted);
+        summary.put("skipped", skipped);
+        summary.put("production_write", true);
+        return summary;
     }
 
     private void expandForward(AnalysisTask task, ObjectNode result) throws Exception {
@@ -829,7 +1257,7 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
                 一次性事件只能是 recent_state 或 event、stability=ONE_OFF；性格只能 MODEL_INFERENCE 且低置信度。
                 只使用输入里已有的 message_id 作为 evidence_message_ids，不能编造 ID。没有可靠事实时返回空 facts。
                 只输出严格 JSON，不要 Markdown，格式：
-                {"facts":[{"kind":"interest|preference|habit|occupation|location|relationship|personality|recent_state|event",
+                {"facts":[{"kind":"interest|preference|habit|identity|birthday|age|occupation|location|relationship|personality|recent_state|event",
                 "epistemic_type":"SELF_REPORTED|OBSERVED_BEHAVIOR|MODEL_INFERENCE","claim_key":"稳定规范键",
                 "claim":"短事实","polarity":"ASSERT|DENY","confidence":0.0,"scope":"PERSONAL|PRIVATE_ONLY",
                 "source_modalities":["text","image","audio","video","link","forward","file"],
@@ -1078,7 +1506,25 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
     private static double clamp(double value) { return Math.max(0.0, Math.min(1.0, value)); }
     private static String enumOr(String value, Set<String> allowed, String fallback) { return allowed.contains(value) ? value : fallback; }
     private static LocalDateTime timestamp(Object value) { return value instanceof Timestamp t ? t.toLocalDateTime() : LocalDateTime.now(); }
+    private static LocalDateTime latestMessageTime(List<Map<String, Object>> rows) {
+        LocalDateTime latest = null;
+        if (rows == null) return null;
+        for (Map<String, Object> row : rows) {
+            Object value = row == null ? null : row.get("created_at");
+            LocalDateTime current = value instanceof Timestamp t ? t.toLocalDateTime()
+                    : value instanceof LocalDateTime t ? t
+                    : parseTime(string(value));
+            if (current != null && (latest == null || current.isAfter(latest))) latest = current;
+        }
+        return latest;
+    }
     private static LocalDateTime parseTime(String value) { try { return value == null || value.isBlank() || "null".equals(value) ? null : LocalDateTime.parse(value); } catch (Exception ignored) { return null; } }
+    private static boolean requiresExplicitValidity(String kind, String temporalScope, LocalDateTime validUntil) {
+        if (validUntil != null) return false;
+        return "recent_state".equals(kind) || "age".equals(kind)
+                || ("event".equals(kind) && !"PAST".equals(temporalScope)
+                && !"STABLE_PATTERN".equals(temporalScope));
+    }
     private static String normalizeClaimKey(String value) { return limit(value == null ? "" : value.trim().toLowerCase(Locale.ROOT).replaceAll("[^\\p{L}\\p{N}_:-]", "_"), 255); }
     private static String firstGroup(Pattern pattern, String text) { Matcher m = pattern.matcher(text == null ? "" : text); return m.find() ? m.group(1).trim() : ""; }
     private static String cleanHtml(String value) { return limit(value == null ? "" : value.replaceAll("<[^>]+>", "").replaceAll("\\s+", " ").trim(), 1000); }
@@ -1086,7 +1532,10 @@ public final class EvidenceAnalysisWorker implements AutoCloseable {
     private static boolean hasProfileSignal(String text) { return text != null && (text.length() >= 4 && List.of("我", "我的", "喜欢", "讨厌", "最近", "正在", "打算", "想", "我是", "今天", "昨天").stream().anyMatch(text::contains)); }
     private static String sha256(String value) throws Exception { byte[] d = MessageDigest.getInstance("SHA-256").digest((value == null ? "" : value).getBytes(StandardCharsets.UTF_8)); StringBuilder s = new StringBuilder(64); for (byte b : d) s.append(String.format("%02x", b)); return s.toString(); }
 
-    @Override public synchronized void close() { if (scheduler != null) { scheduler.shutdownNow(); scheduler = null; } }
+    @Override public synchronized void close() {
+        if (scheduler != null) { scheduler.shutdownNow(); scheduler = null; }
+        if (historyScheduler != null) { historyScheduler.shutdownNow(); historyScheduler = null; }
+    }
 
     private static final class PermanentAnalysisException extends Exception {
         private final String code;

@@ -20,6 +20,16 @@ class GroupDialogueAnalyzerParsingTest {
     }
 
     @Test
+    void transcriptDistinguishesTheKnownPeerBot() throws Exception {
+        var messages = MAPPER.readTree(GroupDialogueAnalyzer.buildTranscript(java.util.List.of(
+                new BaiLianService.PublicMessage("101", "3111651836", "大肥鱼", "我来看看")))).path("messages");
+
+        assertEquals(true, messages.get(0).path("is_peer_bot").asBoolean());
+        assertEquals("OTHER_BOT", messages.get(0).path("sender_role").asText());
+        assertEquals(false, messages.get(0).path("is_bot").asBoolean());
+    }
+
+    @Test
     void unaddressedMessageWithoutBotEvidenceCannotBecomeSecondPersonTurn() {
         var relation = new GroupDialoguePlan.Relation(
                 "u1", java.util.List.of(), "矮人笑话", "u1发出请求",
@@ -31,6 +41,57 @@ class GroupDialogueAnalyzerParsingTest {
 
         assertEquals(false, constrained.botHasNextTurn());
         assertEquals(GroupDialoguePlan.BotRole.OUTSIDER, constrained.botRole());
+    }
+
+    @Test
+    void botMessageEarlierInContextDoesNotGiveBotTheNextTurn() {
+        var relation = new GroupDialoguePlan.Relation(
+                "u2", java.util.List.of(), "没什么玩的", "甲和乙继续聊天",
+                GroupDialoguePlan.BotRole.ACTIVE_SECOND_PERSON, true, "u2", "103",
+                "模型把糖果熊之前的发言误当成当前承接", java.util.List.of());
+
+        var constrained = GroupDialogueAnalyzer.applyTurnEvidenceConstraint(relation, java.util.List.of(
+                new BaiLianService.PublicMessage("101", String.valueOf(com.start.config.BotConfig.getBotQq()), "糖果熊", "之前我说过一句"),
+                new BaiLianService.PublicMessage("102", "u1", "甲", "我最近没啥玩的"),
+                new BaiLianService.PublicMessage("103", "u2", "乙", "星露谷物语")));
+
+        assertEquals(false, constrained.botHasNextTurn());
+        assertEquals(GroupDialoguePlan.BotRole.OUTSIDER, constrained.botRole());
+    }
+
+    @Test
+    void leadingThirdPartyAddressOverridesBotMessageEarlierInContext() {
+        var relation = new GroupDialoguePlan.Relation(
+                "u2", java.util.List.of(), "身份确认", "u2问小鲸鱼",
+                GroupDialoguePlan.BotRole.ACTIVE_SECOND_PERSON, true, "u2", "102",
+                "模型把你误认成糖果熊", java.util.List.of());
+
+        var constrained = GroupDialogueAnalyzer.applyTurnEvidenceConstraint(relation, java.util.List.of(
+                new BaiLianService.PublicMessage("101", String.valueOf(com.start.config.BotConfig.getBotQq()), "糖果熊", "在呢"),
+                new BaiLianService.PublicMessage("102", "u2", "乙", "小鲸鱼，这是你吗？")));
+
+        assertEquals(false, constrained.botHasNextTurn());
+        assertEquals(GroupDialoguePlan.BotRole.OUTSIDER, constrained.botRole());
+    }
+
+    @Test
+    void transcriptCarriesLeadingAddressAsTurnEvidence() throws Exception {
+        var messages = MAPPER.readTree(GroupDialogueAnalyzer.buildTranscript(java.util.List.of(
+                new BaiLianService.PublicMessage("101", "u2", "乙", "小鲸鱼，你看得到这个吗？")))).path("messages");
+
+        assertEquals("小鲸鱼", messages.get(0).path("leading_address").asText());
+        assertEquals(false, messages.get(0).path("leading_address_is_bot").asBoolean());
+        assertTrue(messages.get(0).path("pronoun_reference_hint").asText().contains("其他对象"));
+    }
+
+    @Test
+    void transcriptKeepsDifferentSpeakersSeparateWithoutProtocolLink() throws Exception {
+        var messages = MAPPER.readTree(GroupDialogueAnalyzer.buildTranscript(java.util.List.of(
+                new BaiLianService.PublicMessage("101", "u1", "甲", "我最近没啥玩的"),
+                new BaiLianService.PublicMessage("102", "u2", "乙", "星露谷物语")))).path("messages");
+
+        assertEquals("SPEAKER_CHANGED_NO_PROTOCOL_LINK",
+                messages.get(1).path("relation_to_previous").asText());
     }
     private static final ObjectMapper MAPPER = new ObjectMapper();
 

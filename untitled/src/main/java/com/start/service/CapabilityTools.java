@@ -61,12 +61,16 @@ final class CapabilityTools implements Tool {
                 || attachedImage && matches(text, "改成|改为|换成|替换|去掉|去除|去水印|加上")) pending.add(Capability.IMAGE);
         if (matches(text, "生成.{0,12}(视频|动画|短片)|做.{0,8}(视频|动画|短片)|生视频")) pending.add(Capability.VIDEO);
         if (matches(text, "语音|朗读|念给|读给|说句话|念一遍")) pending.add(Capability.VOICE);
-        if (matches(text, "幸运值|运势|职业|战力|排行榜|排名|\\bpk\\b")) pending.add(Capability.SOCIAL);
+        // “抽取” alone is the exact daily-profession command. In a longer
+        // sentence it can mean extracting text/settings, so do not preload
+        // the social tools unless the profession intent is explicit.
+        if (matches(text, "幸运值|运势|职业|战力|排行榜|排名|\\bpk\\b")
+                || isExactProfessionDrawCommand(text)) pending.add(Capability.SOCIAL);
         if (matches(text, "三角洲|特勤处|脑机")) pending.add(Capability.DELTA);
         if (matches(text, "洛克|蛋组|查蛋|远行商人")) pending.add(Capability.LOKO);
         if (activeParty || matches(text, "谁是卧底|猜数字|成语接龙")) pending.add(Capability.PARTY);
         // Continuation hints only: bounded, scoped and never evidence that an operation succeeded.
-        if (matches(text, "再来|再试|刚才|上[一个张次]|那[个张]|这[个张]|换成|改成|改为|保留|背景|画风|温柔点|快一点|慢一点")) {
+        if (matches(text, "再来|再试|刚才|上[一个张次]|那[个张]|这[个张]|换成|改成|改为|保留|背景|画风|温柔点|快一点|慢一点|自由发挥|你[来想定]|你想.{0,16}就行|按你.{0,8}(想|定)|开始吧")) {
             pending.addAll(recent);
         }
         pending.retainAll(supported);
@@ -75,6 +79,10 @@ final class CapabilityTools implements Tool {
 
     private static boolean matches(String text, String regex) {
         return Pattern.compile(regex, Pattern.CASE_INSENSITIVE).matcher(text).find();
+    }
+
+    private static boolean isExactProfessionDrawCommand(String text) {
+        return text.trim().equals("抽取");
     }
 
     RuleSet baseRules() {
@@ -159,6 +167,8 @@ final class CapabilityTools implements Tool {
             if (c == null) return "拒绝加载：包含未知或不可用能力；请使用能力目录中的名称";
             requested.add(c);
         }
+        requested.removeAll(selected);
+        if (requested.isEmpty()) return "所请求的能力已经加载，工具和规则已在本轮提供。不要重复加载；根据当前用户意图直接使用对应工具，或回答/澄清。加载本身没有执行操作。";
         pending.addAll(requested);
         return "能力已安排加载：" + requested.stream().map(c -> c.id).toList() + "。下一轮按系统规则和实际提供的工具执行。";
     }

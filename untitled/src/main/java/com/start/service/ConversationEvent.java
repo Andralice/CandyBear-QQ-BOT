@@ -15,7 +15,7 @@ public enum ConversationEvent {
     AI_COMMENTED,
     /** 异步等待回复 */
     AWAIT_REPLY,
-    /** 概率性主动插话 */
+    /** 旧主动话题关键词命中的候选；主模型可以选择沉默 */
     PROBABILISTIC,
     /** 并行认知确认糖果熊拥有下一轮话权 */
     COGNITIVE_CONTINUE,

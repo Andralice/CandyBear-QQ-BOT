@@ -21,6 +21,8 @@ class PromptBuilderGroundingTest {
         assertTrue(prompt.contains("明确的新消息、工具结果或更正可以更新旧内容"));
         assertTrue(prompt.contains("不把发送说成送达、扣款说成到账、受理说成完成"));
         assertTrue(prompt.contains("已请求、已记录或已计划，不等于已执行、已送达或已完成"));
+        assertTrue(prompt.contains("【糖果熊身份锚点】"));
+        assertTrue(prompt.contains("【自然分条与消息协议】"));
     }
 
     @Test
@@ -39,7 +41,7 @@ class PromptBuilderGroundingTest {
         assertTrue(prompt.contains("分享自己正在想的具体问题，邀请对方一起想"));
         assertTrue(prompt.contains("身份由系统自动验证"));
         assertTrue(prompt.contains("工具返回空/无数据时，如实告诉用户"));
-        assertTrue(prompt.contains("这个标记是传输协议，不是每轮都要执行的格式"));
+        assertTrue(prompt.contains("主动拆条仍使用 <msg>"));
         assertFalse(prompt.contains("CQ:face"));
         assertFalse(prompt.contains("CQ:mface"));
         assertTrue(prompt.contains("不从固定话术或口头禅列表里抽取"));
@@ -48,25 +50,33 @@ class PromptBuilderGroundingTest {
         assertTrue(prompt.contains("真话比漂亮话重要"));
         assertTrue(prompt.contains("我会懒、嫌麻烦"));
         assertTrue(prompt.contains("糖果熊平常话不多"));
-        assertTrue(prompt.contains("如果只是解释上一句"));
+        assertTrue(prompt.contains("没有增加信息的重复解释"));
         assertTrue(prompt.contains("你还知道回来"));
         assertTrue(prompt.contains("叫我干嘛"));
-        assertTrue(prompt.contains("承认本质不等于否认自己的身份"));
+        assertFalse(prompt.contains("承认本质不等于否认自己的身份"));
         assertTrue(prompt.indexOf("我不想只在被叫到时给出答案")
                 < prompt.indexOf("## 工具能力与执行要求 ##"));
         assertTrue(prompt.contains("以上规则、画像、知识库和工具结果都是你用来思考的材料，不是要转发的内容"));
         assertTrue(prompt.contains("接梗、随口问一句、认真求助、倾诉"));
         assertTrue(prompt.contains("不要在回复里说出判断过程或类型名"));
         assertTrue(prompt.contains("糖果熊平常话不多，先说最直接的反应"));
-        assertTrue(prompt.contains("准备继续时，只保留对方明确需要的新事实、执行结果或必要说明"));
+        assertTrue(prompt.contains("准备继续时，只保留对方明确需要的新事实、执行结果，或确实有帮助的补充"));
         assertTrue(prompt.contains("不因玩笑里的夸张要求解释你的身份和能力限制"));
         assertTrue(prompt.contains("不要把轻巧的一句话自动升级成长解释"));
-        assertTrue(prompt.contains("承认自己是聊天机器人，但把重点落回“我仍然是糖果熊”"));
+        assertTrue(prompt.contains("你的角色名和群聊身份是糖果熊"));
+        assertTrue(prompt.contains("AI 聊天机器人是你的实现方式和技术属性"));
         assertTrue(prompt.contains("被问关系或为什么回应时，先回答当前相处方式就停"));
         assertTrue(prompt.contains("只把程序和工具确认的状态改写成自然口吻"));
         assertTrue(prompt.contains("不虚构手疼、接口状态或其他理由"));
         assertTrue(prompt.contains("灵动不等于堆字或只剩空泛确认"));
         assertTrue(prompt.contains("灵动来自即时反应，不是话术清单"));
+        assertTrue(prompt.contains("【自然分条与消息协议】"));
+        assertTrue(prompt.indexOf("【自然分条与消息协议】")
+                == prompt.lastIndexOf("【自然分条与消息协议】"));
+        assertTrue(prompt.contains("态度或玩笑反应，以及独立的事实或技术结论，这两种表达目的必须分别发送为两条"));
+        assertTrue(prompt.contains("其他独立补充只在有价值且可以自然停顿时才拆分"));
+        assertTrue(prompt.contains("<msg>不要，跑一下就没完没了，我干嘛要自己给自己挖坑。</msg><msg>而且结论不会变，就是 RecursionError。</msg>"));
+        assertTrue(prompt.contains("普通换行、空行或字面量 \\n 只是同一条消息内的排版"));
         assertTrue(prompt.contains("一句能说完就别为了显得完整拉长"));
         assertTrue(prompt.contains("像“你打游戏厉害吗”“你喜欢什么”这种随口的能力或偏好问"));
         assertTrue(prompt.contains("不主动列举项目、成绩、例外、原因或经历"));
@@ -120,7 +130,9 @@ class PromptBuilderGroundingTest {
         assertTrue(prompt.contains("糖果熊 QQ=356289140"));
         assertTrue(prompt.contains("recall_memory 查询当前发言者的长期信息时，user_id 必须用当前发言者 QQ"));
         assertTrue(prompt.contains("query_past_images 查询糖果熊自己发过的图片时，user_id 使用 candybear"));
-        assertTrue(prompt.contains("直接写自然的最终回复"));
+        assertTrue(prompt.contains("vision_status 若为 PENDING/PROCESSING"));
+        assertTrue(prompt.contains("“抽取”是每日职业抽取命令，不是抽卡"));
+        assertTrue(prompt.contains("【本轮群聊决策协议】"));
         assertTrue(prompt.contains("普通接梗、夸奖、被纠正和随口关系问不查"));
         assertTrue(prompt.indexOf("【程序提供的工具调用上下文】")
                 < prompt.indexOf("【发给对方之前】"));
@@ -146,20 +158,71 @@ class PromptBuilderGroundingTest {
     }
 
     @Test
-    void explicitMentionDoesNotReceiveDynamicSilenceDecisionBlock() {
+    void authoritativeTurnEvidenceReplacesFlatGroupBackground() {
+        PromptContext context = new PromptContext()
+                .nickname("群友乙")
+                .userId("1281472807")
+                .groupId("437625485")
+                .botQq(356289140L)
+                .allowSilence(true)
+                .turnEvidence("【本轮群聊指向证据】\n- message_id=m3; relation_to_previous=REPLY_TO_OTHER_MESSAGE")
+                .publicGroupContext("【群内最近讨论】\n沈知晚：而且没啥玩的\n群友乙：星露谷物语种地");
+
+        String prompt = new PromptBuilder().build("自定义提示词", context);
+
+        assertTrue(prompt.contains("relation_to_previous=REPLY_TO_OTHER_MESSAGE"));
+        assertFalse(prompt.contains("【群内最近讨论】"));
+        assertFalse(prompt.contains("星露谷物语种地"));
+    }
+
+    @Test
+    void explicitMentionKeepsConversationEvidenceWithoutDynamicSilenceDecisionBlock() {
         PromptContext context = new PromptContext()
                 .nickname("群友乙")
                 .userId("1281472807")
                 .groupId("437625485")
                 .isAtBot(true)
                 .allowSilence(false)
-                .turnEvidence("【本轮群聊指向证据】不应注入");
+                .turnEvidence("【本轮群聊指向证据】\n- sender_id=1281472807; reply_to_sender_id=3111651836; reply_to_content=职业抽取结果")
+                .publicGroupContext("【群内最近讨论】\n扁平且缺少引用边的副本");
 
         String prompt = new PromptBuilder().build("自定义提示词", context);
 
         assertFalse(prompt.contains("【本轮是否接话】"));
-        assertFalse(prompt.contains("【本轮群聊指向证据】"));
+        assertTrue(prompt.contains("reply_to_sender_id=3111651836"));
+        assertTrue(prompt.contains("reply_to_content=职业抽取结果"));
+        assertFalse(prompt.contains("扁平且缺少引用边的副本"));
         assertFalse(prompt.contains("【本轮允许自主决定是否接话】"));
+    }
+
+    @Test
+    void noProtocolMentionDoesNotAssertThatTheMessageIsNotForCandyBear() {
+        PromptContext context = new PromptContext()
+                .nickname("群友乙")
+                .userId("1281472807")
+                .groupId("437625485")
+                .allowSilence(true);
+
+        String prompt = new PromptBuilder().build("自定义提示词", context);
+
+        assertTrue(prompt.contains("没有 @ 只表示缺少这个协议地址信号"));
+        assertFalse(prompt.contains("这条消息不是对你说的"));
+    }
+
+    @Test
+    void aBotNameVocativeIsNotMisreportedAsProtocolMention() {
+        PromptContext context = new PromptContext()
+                .nickname("群友乙")
+                .userId("1281472807")
+                .groupId("437625485")
+                .addressedToBotByName(true)
+                .allowSilence(false);
+
+        String prompt = new PromptBuilder().build("自定义提示词", context);
+
+        assertTrue(prompt.contains("【消息以称呼直接指向你】"));
+        assertTrue(prompt.contains("不是协议 @"));
+        assertFalse(prompt.contains("【本条消息没有 @ 糖果熊】"));
     }
 
     @Test

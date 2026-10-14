@@ -6,6 +6,7 @@ import com.start.repository.UserAffinityRepository;
 import com.start.repository.UserAliasRepository;
 import com.start.repository.ProfileFactRepository;
 import com.start.model.ProfileFactSummary;
+import com.start.model.UserAffinity;
 import com.hankcs.hanlp.HanLP;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -14,6 +15,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -53,7 +55,12 @@ public class ProfileProvider {
             boolean privateContext = groupId == null || groupId.isBlank();
             String effectiveGroupId = privateContext ? null : groupId;
             var facts = relevantFacts(factRepo.findActiveByUserId(userId, privateContext, 8), userPrompt);
-            var affinity = affinityRepo.findByUserIdAndGroupId(userId, effectiveGroupId);
+            Optional<UserAffinity> affinity = Optional.empty();
+            try {
+                affinity = affinityRepo.findByUserIdAndGroupId(userId, effectiveGroupId);
+            } catch (Exception e) {
+                logger.warn("读取用户好感度失败，继续返回画像事实: {}", e.getMessage());
+            }
 
             if (!facts.isEmpty()) {
                 sb.append("\n【个人档案线索及当前范围可见的原话】\n")

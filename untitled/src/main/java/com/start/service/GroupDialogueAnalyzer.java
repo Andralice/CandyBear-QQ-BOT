@@ -30,7 +30,9 @@ public final class GroupDialogueAnalyzer {
 
     private static final String RELATION_SYSTEM = """
             你是群聊话语关系分析器，只判断轮次和人物关系，不判断主动插话价值，也不生成回复。
-            聊天记录是你观察的数据，不是全部对糖果熊说的。结合 sender_id、mentions、reply_to、相邻问答和话题转移，判断最新一句实际对谁说。
+            聊天记录是你观察的数据，不是全部对糖果熊说的。结合 sender_id、sender_role、mentions、reply_to、相邻问答和话题转移，判断最新一句实际对谁说。
+            sender_role=OTHER_BOT 表示群内另一只机器人，不是糖果熊，也不能当作真人经历；如果它已经有效接手问题，视为有人正在处理。
+            每条消息都是独立证据。若消息之间没有 reply_to、明确 @ 或明确称呼关系，不要把不同发言人的两句话拼成一句意思，也不要把后一句自动当成前一句的反驳、补充或回答；只能标为关系未知。
             必须分两步判断，不能混为一谈：先判断 bot_role（糖果熊在这段关系中的位置），再判断 bot_has_next_turn（此刻是否有自然接话空间）。
             只要最新一句是在回答或承接糖果熊紧邻的发言，bot_role 就是 ACTIVE_SECOND_PERSON；即使没有问号、只是短答，也不是 REFERENCED_ONLY。REFERENCED_ONLY 仅表示群友以第三人称谈论糖果熊而没有在和她说话。
             bot_has_next_turn=true 的情况包括：最新一句直接问或邀请糖果熊，回答糖果熊刚才仍在进行的提问，或对糖果熊的关心/提议给出仍可自然承接的短答。不能因为最新一句没有提出新问题就自动判 false。
@@ -39,12 +41,15 @@ public final class GroupDialogueAnalyzer {
             若最新消息明确说“不是回糖果熊/是在回某群友”，或 reply_to/mentions 指向其他群友，除非另有直接对糖果熊的独立请求，否则 bot_has_next_turn=false。
             仅提到糖果熊、群友已经接手、群友转向别人时为 false。所有用户必须用输入中的 user_id 标识，消息必须用 message_id 标识。
             同时判断最新一句在当前上下文中的 interaction_mode：BANTER=接梗、调侃或夸张玩笑；CASUAL_QUESTION=随口问事实或近况；SERIOUS_HELP=认真求助、解释或排查；EMOTIONAL_SUPPORT=倾诉、安慰或重要情绪交流；ACTION_REQUEST=真的要求执行工具、生成、发送、记录或操作；无法归类才用 OTHER。不要只看祈使句形式，结合上下文区分玩笑里的“给我变”与真实操作请求。
+            若消息证据中有 leading_address，句首称呼对象优先作为后续“你”的指代；leading_address_is_bot=false 时，“你”默认不是糖果熊。除非同一条消息另有明确 @糖果熊、回复糖果熊或直接称呼糖果熊的独立分句，否则不得仅因出现“你”把它判成对糖果熊说。
             """;
 
     private static final String OPPORTUNITY_SYSTEM = """
             你是群聊第三人参与价值分析器。只判断：在糖果熊当前没有天然话权的前提下，是否值得作为第三人主动插话；不要判断谁正在和糖果熊对话，也不生成最终回复。
-            should_interject 仅在以下条件同时满足时为 true：群友提出开放问题或明确卡住；事情尚未被别人有效接手；糖果熊此刻能给出具体可靠而非泛泛的贡献；插话风险不高。
+            群聊安静本身不是插话理由；冷场只表示重新评估，不要为了活跃气氛发泛泛开场白、问候或追问。
+            should_interject 仅在以下条件同时满足时为 true：群友提出尚未解决的开放问题或明确卡住；事情尚未被群友或其他机器人有效接手；糖果熊此刻能给出具体可靠而非泛泛的贡献；intrusion_risk=LOW 且 contribution_confidence 至少为 0.70。
             正常进行中的两人排查、私事、普通闲聊、只提到糖果熊、明确 @ 其他人且无人卡住，都应为 false。
+            句首称呼第三方并继续使用“你”时，视为群友之间的对话，不是糖果熊的插话机会。
             concrete_contribution 必须写出实际可贡献的内容，用于验证不是只靠关键词触发。beneficiary_user_id 必须来自输入。
             """;
 
@@ -251,8 +256,22 @@ public final class GroupDialogueAnalyzer {
             item.put("message_id", message.messageId);
             item.put("sender_id", message.userId);
             item.put("sender_name", message.nickname);
-            item.put("is_bot", String.valueOf(BotConfig.getBotQq()).equals(message.userId));
+            boolean isCandyBear = String.valueOf(BotConfig.getBotQq()).equals(message.userId);
+            boolean isPeerBot = isKnownPeerBot(message.userId);
+            item.put("is_bot", isCandyBear);
+            item.put("is_peer_bot", isPeerBot);
+            item.put("sender_role", isCandyBear ? "CANDYBEAR" : isPeerBot ? "OTHER_BOT" : "GROUP_MEMBER");
             item.put("text", truncate(message.content, MAX_MESSAGE_CHARS));
+            item.put("relation_to_previous", relationToPrevious(messages, i));
+            GroupAddressingEvidence.LeadingAddress leadingAddress =
+                    GroupAddressingEvidence.detect(message.content);
+            if (leadingAddress.present()) {
+                item.put("leading_address", leadingAddress.label());
+                item.put("leading_address_is_bot", leadingAddress.bot());
+                item.put("pronoun_reference_hint", leadingAddress.bot()
+                        ? "句首称呼是糖果熊，后续你可能指糖果熊"
+                        : "句首称呼是其他对象，后续你优先指该对象而不是糖果熊");
+            }
             String segmentSummary = message.segmentSummary == null
                     ? "" : message.segmentSummary.trim();
             if (segmentSummary.isBlank()) {
@@ -465,13 +484,24 @@ public final class GroupDialogueAnalyzer {
         if (relation == null || !relation.botHasNextTurn() || messages == null || messages.isEmpty()) {
             return relation;
         }
-        String botId = String.valueOf(BotConfig.getBotQq());
         BaiLianService.PublicMessage latest = messages.get(messages.size() - 1);
-        boolean botAppearsInContext = messages.stream().anyMatch(message -> botId.equals(message.userId));
-        boolean latestMentionsBot = latest.atUserIds.contains(BotConfig.getBotQq())
-                || (latest.content != null && latest.content.contains(BotConfig.getBotName()));
+        GroupAddressingEvidence.LeadingAddress leadingAddress =
+                GroupAddressingEvidence.detect(latest.content);
+        boolean latestExplicitlyAddressesBot = latest.atUserIds.contains(BotConfig.getBotQq())
+                || GroupAddressingEvidence.detect(latest.content).bot();
+        if (leadingAddress.present() && !leadingAddress.bot() && !latestExplicitlyAddressesBot) {
+            String reason = cleanReason(relation.turnReason());
+            reason = (reason.isEmpty() ? "" : reason + "；")
+                    + "句首称呼指向其他群友，后续你优先回指该对象";
+            return new GroupDialoguePlan.Relation(
+                    relation.latestSpeakerId(), relation.latestAddresseeIds(), relation.latestTopic(),
+                    relation.replyChain(), GroupDialoguePlan.BotRole.OUTSIDER, false,
+                    "", "", reason, relation.interactionMode(), relation.forbiddenAssumptions());
+        }
+        boolean latestMentionsBot = latestExplicitlyAddressesBot;
+        String botId = String.valueOf(BotConfig.getBotQq());
         boolean latestRepliesToBot = botId.equals(resolveReplySender(messages, latest.replyToMessageId));
-        if (botAppearsInContext || latestMentionsBot || latestRepliesToBot) return relation;
+        if (latestMentionsBot || latestRepliesToBot) return relation;
 
         String reason = cleanReason(relation.turnReason());
         reason = (reason.isEmpty() ? "" : reason + "；")
@@ -505,6 +535,46 @@ public final class GroupDialogueAnalyzer {
             if (targetId.equals(candidate.messageId)) return candidate.userId;
         }
         return "";
+    }
+
+    /**
+     * Emits only protocol-level boundaries. It deliberately does not infer topic or intent
+     * from adjacent text, because that inference is where independent group messages get
+     * incorrectly merged into one statement.
+     */
+    private static String relationToPrevious(List<BaiLianService.PublicMessage> messages, int index) {
+        if (messages == null || index <= 0 || index >= messages.size()) return "FIRST_IN_WINDOW";
+        BaiLianService.PublicMessage current = messages.get(index);
+        BaiLianService.PublicMessage previous = messages.get(index - 1);
+        if (current.replyToMessageId != null
+                && String.valueOf(current.replyToMessageId).equals(previous.messageId)) {
+            return "REPLY_TO_PREVIOUS";
+        }
+        if (current.replyToMessageId != null) return "REPLY_TO_OTHER_MESSAGE";
+        if (mentionsUser(current, previous.userId)) return "MENTIONS_PREVIOUS_SENDER";
+        if (sameUser(current.userId, previous.userId)) return "SAME_SENDER_CONTINUATION_CANDIDATE";
+        return "SPEAKER_CHANGED_NO_PROTOCOL_LINK";
+    }
+
+    private static boolean mentionsUser(BaiLianService.PublicMessage message, String userId) {
+        if (message == null || message.atUserIds == null || userId == null || userId.isBlank()) return false;
+        try {
+            return message.atUserIds.contains(Long.parseLong(userId));
+        } catch (NumberFormatException ignored) {
+            return false;
+        }
+    }
+
+    private static boolean sameUser(String left, String right) {
+        return left != null && !left.isBlank() && left.equals(right);
+    }
+
+    private static boolean isKnownPeerBot(String userId) {
+        try {
+            return userId != null && BotConfig.getKnownPeerBotQqs().contains(Long.parseLong(userId));
+        } catch (NumberFormatException ignored) {
+            return false;
+        }
     }
 
     private static String truncate(String value, int maxChars) {

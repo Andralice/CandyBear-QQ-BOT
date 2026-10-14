@@ -7,6 +7,8 @@ import org.slf4j.LoggerFactory;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeParseException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Properties;
@@ -20,6 +22,7 @@ public class BotConfig {
     private static long botQq;
     private static long adminQq;
     private static String botName;
+    private static Set<Long> knownPeerBotQqs = Collections.emptySet();
     private static boolean privateWhitelistEnabled = false;
     private static Set<Long> ALLOWED_GROUPS = Collections.emptySet();
     private static Set<Long> ALLOWED_PRIVATE_USERS = Collections.emptySet();
@@ -35,6 +38,7 @@ public class BotConfig {
     private static String baiLianChatModel;
     private static boolean baiLianMultimodalEnabled;
     private static int baiLianTimeoutMs;
+    private static int baiLianImageSearchTimeoutMs;
     private static int baiLianMaxRetries;
     private static String baiLianReasoningEffort;
     private static boolean baiLianPoolEnabled;
@@ -75,6 +79,12 @@ public class BotConfig {
     private static int macroReviewTimeoutMs;
     private static int macroReviewWindowMessages;
     private static int macroReviewOverlapMessages;
+    private static boolean macroReviewHistoryEnabled;
+    private static int macroReviewHistoryIntervalHours;
+    private static int macroReviewHistoryWindowMessages;
+    private static int macroReviewHistoryOverlapMessages;
+    private static int macroReviewHistoryTimeoutMs;
+    private static LocalDateTime macroReviewHistoryStartAt;
 
     private static String visionApiKey;
     private static String visionBaseUrl;
@@ -158,6 +168,8 @@ public class BotConfig {
             wsUrl = resolveOrEmpty(props.getProperty("ws.url", wsBaseUrl));
             oneBotAccessToken = resolveOrEmpty(props.getProperty("onebot.access-token", ""));
             botName = props.getProperty("bot.name", "糖果熊").trim();
+            knownPeerBotQqs = parseLongSet(resolveOrEmpty(
+                    props.getProperty("bot.peer-bot-qqs", "${BOT_PEER_BOT_QQS:3111651836}")));
             privateWhitelistEnabled = Boolean.parseBoolean(resolveOrEmpty(props.getProperty("private.whitelist.enabled", "false")));
             ALLOWED_GROUPS = parseLongSet(resolveOrEmpty(props.getProperty("allowed.groups", "")));
             ALLOWED_PRIVATE_USERS = parseLongSet(resolveOrEmpty(props.getProperty("allowed.private.users", "")));
@@ -169,8 +181,10 @@ public class BotConfig {
             baiLianChatModel = resolveOrEmpty(props.getProperty("bailian.chat-model", "deepseek-v4-pro"));
             baiLianMultimodalEnabled = Boolean.parseBoolean(
                     resolveOrEmpty(props.getProperty("bailian.multimodal.enabled",
-                            "${BAILIAN_MULTIMODAL_ENABLED:false}")));
+                            "${BAILIAN_MULTIMODAL_ENABLED:true}")));
             baiLianTimeoutMs = parseInt(resolveOrEmpty(props.getProperty("bailian.timeout-ms", "90000")), 90000);
+            baiLianImageSearchTimeoutMs = parseInt(resolveOrEmpty(props.getProperty(
+                    "bailian.image-search-timeout-ms", "${BAILIAN_IMAGE_SEARCH_TIMEOUT_MS:8000}")), 8000);
             baiLianMaxRetries = parseInt(resolveOrEmpty(props.getProperty("bailian.max-retries", "2")), 2);
             baiLianReasoningEffort = resolveOrEmpty(props.getProperty("bailian.reasoning-effort", ""));
             baiLianPoolEnabled = Boolean.parseBoolean(resolveOrEmpty(
@@ -239,6 +253,19 @@ public class BotConfig {
                     resolveOrEmpty(props.getProperty("macro-review.window-messages", "32")), 32);
             macroReviewOverlapMessages = parseInt(
                     resolveOrEmpty(props.getProperty("macro-review.overlap-messages", "8")), 8);
+            macroReviewHistoryEnabled = Boolean.parseBoolean(resolveOrEmpty(
+                    props.getProperty("macro-review.history.enabled", "false")));
+            macroReviewHistoryIntervalHours = parseInt(
+                    resolveOrEmpty(props.getProperty("macro-review.history.interval-hours", "5")), 5);
+            macroReviewHistoryWindowMessages = parseInt(
+                    resolveOrEmpty(props.getProperty("macro-review.history.window-messages", "160")), 160);
+            macroReviewHistoryOverlapMessages = parseInt(
+                    resolveOrEmpty(props.getProperty("macro-review.history.overlap-messages", "16")), 16);
+            macroReviewHistoryTimeoutMs = parseInt(
+                    resolveOrEmpty(props.getProperty("macro-review.history.timeout-ms", "300000")), 300000);
+            macroReviewHistoryStartAt = parseLocalDateTime(
+                    resolveOrEmpty(props.getProperty("macro-review.history.start-at", "2026-05-01T00:00:00")),
+                    LocalDateTime.of(2026, 5, 1, 0, 0));
 
             visionEnabled = Boolean.parseBoolean(resolveOrEmpty(props.getProperty("vision.enabled", "true")));
             // Vision 与主聊天解耦：默认走已配置的辅助 Luna 线路，避免旧的独立余额线路耗尽。
@@ -319,6 +346,10 @@ public class BotConfig {
                     groupCognitionMode, groupCognitionGroups, groupCognitionModel);
             logger.info("🔎 宏观审查: mode={}, groups={}, model={}",
                     macroReviewMode, macroReviewGroups, macroReviewModel);
+            logger.info("🗂️ 历史认知线: enabled={}, continuous=true, start-at={}, window={}, overlap={}, timeout={}ms",
+                    macroReviewHistoryEnabled, macroReviewHistoryStartAt,
+                    getMacroReviewHistoryWindowMessages(), getMacroReviewHistoryOverlapMessages(),
+                    getMacroReviewHistoryTimeoutMs());
             logger.info("🖼️ 聊天图片模式: {}", baiLianMultimodalEnabled
                     ? "主模型多模态"
                     : "独立 Vision 描述（主聊天不发送原图）");
@@ -375,6 +406,16 @@ public class BotConfig {
         try {
             return Integer.parseInt(trimmed);
         } catch (NumberFormatException e) {
+            return defaultValue;
+        }
+    }
+
+    private static LocalDateTime parseLocalDateTime(String value, LocalDateTime defaultValue) {
+        if (value == null || value.isBlank() || isUnresolvedPlaceholder(value)) return defaultValue;
+        try {
+            return LocalDateTime.parse(value.trim());
+        } catch (DateTimeParseException e) {
+            logger.warn("⚠️ 配置值无法解析为时间: '{}', 使用默认值 {}", value, defaultValue);
             return defaultValue;
         }
     }
@@ -441,6 +482,10 @@ public class BotConfig {
         return botName;
     }
 
+    public static Set<Long> getKnownPeerBotQqs() {
+        return knownPeerBotQqs;
+    }
+
     public static boolean isPrivateWhitelistEnabled() {
         return privateWhitelistEnabled;
     }
@@ -494,6 +539,10 @@ public class BotConfig {
 
     public static int getBaiLianTimeoutMs() {
         return baiLianTimeoutMs;
+    }
+
+    public static int getBaiLianImageSearchTimeoutMs() {
+        return baiLianImageSearchTimeoutMs;
     }
 
     public static int getBaiLianMaxRetries() {
@@ -575,13 +624,41 @@ public class BotConfig {
     public static int getMacroReviewOverlapMessages() {
         return Math.max(0, Math.min(getMacroReviewWindowMessages() - 1, macroReviewOverlapMessages));
     }
-    public static boolean isMacroReviewShadowFor(String groupId) {
-        if (macroReviewMode != MacroReviewMode.LIVE_SHADOW || groupId == null || groupId.isBlank()) return false;
+    public static boolean isMacroReviewHistoryEnabled() { return macroReviewHistoryEnabled; }
+    public static int getMacroReviewHistoryIntervalHours() {
+        return Math.max(1, Math.min(168, macroReviewHistoryIntervalHours));
+    }
+    public static int getMacroReviewHistoryWindowMessages() {
+        return Math.max(100, Math.min(200, macroReviewHistoryWindowMessages));
+    }
+    public static int getMacroReviewHistoryOverlapMessages() {
+        return Math.max(0, Math.min(getMacroReviewHistoryWindowMessages() - 1,
+                macroReviewHistoryOverlapMessages));
+    }
+    public static int getMacroReviewHistoryTimeoutMs() {
+        return Math.max(1_000, Math.min(600_000, macroReviewHistoryTimeoutMs));
+    }
+    public static LocalDateTime getMacroReviewHistoryStartAt() { return macroReviewHistoryStartAt; }
+
+    public static boolean isMacroReviewEnabledFor(String groupId) {
+        if (!macroReviewMode.enabled() || groupId == null || groupId.isBlank()) return false;
         try {
             return macroReviewGroups.contains(Long.parseLong(groupId.trim()));
         } catch (NumberFormatException ignored) {
             return false;
         }
+    }
+
+    public static boolean isMacroReviewShadowFor(String groupId) {
+        return macroReviewMode == MacroReviewMode.LIVE_SHADOW && isMacroReviewEnabledFor(groupId);
+    }
+
+    public static boolean isMacroReviewActiveFor(String groupId) {
+        return macroReviewMode == MacroReviewMode.LIVE_ACTIVE && isMacroReviewEnabledFor(groupId);
+    }
+
+    public static boolean isMacroReviewHistoryEnabledFor(String groupId) {
+        return macroReviewHistoryEnabled && isMacroReviewEnabledFor(groupId);
     }
 
     public static int getWorkingMemoryDefaultExpireHours() {

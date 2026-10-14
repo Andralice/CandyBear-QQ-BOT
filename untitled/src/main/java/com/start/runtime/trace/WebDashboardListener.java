@@ -1,10 +1,12 @@
 package com.start.runtime.trace;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.start.runtime.RuntimeEvent;
 import com.start.runtime.RuntimeListener;
+import com.start.service.ManualMessageReplayService;
 import com.start.service.StickerIngestService;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -41,7 +43,10 @@ public class WebDashboardListener implements RuntimeListener {
     private static final ObjectMapper mapper = new ObjectMapper();
 
     private static final int DEFAULT_PORT = 8765;
+    private static final int DEFAULT_REPLAY_PORT = 8766;
     private static final int MAX_DECISIONS = 300;
+    private static final String REPLAY_SCOPE =
+            "primary model and rulebook with replay transcript; no auto-trigger, live profile/knowledge lookup, or tools";
 
     // —— 内部数据记录 ——
     static final class DecisionEntry {
@@ -56,10 +61,15 @@ public class WebDashboardListener implements RuntimeListener {
         final long latencyMs;
         final long generation;
         final long revision;
+        final List<String> inputMessageIds;
+        final String replyToMessageId;
+        final List<String> evidenceMessageIds;
 
         DecisionEntry(long timestamp, String groupId, String userId, String eventType,
                       String decision, String reason, int toolCalls, int tokensUsed,
-                      long latencyMs, long generation, long revision) {
+                      long latencyMs, long generation, long revision,
+                      List<String> inputMessageIds, String replyToMessageId,
+                      List<String> evidenceMessageIds) {
             this.timestamp = timestamp;
             this.groupId = groupId;
             this.userId = userId;
@@ -71,6 +81,9 @@ public class WebDashboardListener implements RuntimeListener {
             this.latencyMs = latencyMs;
             this.generation = generation;
             this.revision = revision;
+            this.inputMessageIds = inputMessageIds == null ? List.of() : List.copyOf(inputMessageIds);
+            this.replyToMessageId = replyToMessageId == null ? "" : replyToMessageId;
+            this.evidenceMessageIds = evidenceMessageIds == null ? List.of() : List.copyOf(evidenceMessageIds);
         }
     }
 
@@ -102,16 +115,29 @@ public class WebDashboardListener implements RuntimeListener {
     private final int port;
     private final String host;
     private final String token;   // null = 不需要鉴权
+    private final boolean replayOnly;
     private volatile java.util.function.Supplier<com.start.service.GroupSerialExecutor.ExecutorMetrics> executorMetricsProvider;
     private volatile java.util.function.Supplier<com.start.Main.BotHealth> healthProvider;
+    private volatile ManualMessageReplayService replayService;
 
     public WebDashboardListener() {
-        this.host = System.getProperty("dashboard.host",
-                System.getenv().getOrDefault("DASHBOARD_HOST", "127.0.0.1"));
-        this.port = Integer.parseInt(System.getProperty("dashboard.port",
-                System.getenv().getOrDefault("DASHBOARD_PORT", String.valueOf(DEFAULT_PORT))));
-        String t = System.getProperty("dashboard.token",
-                System.getenv("DASHBOARD_TOKEN"));
+        this(false);
+    }
+
+    public WebDashboardListener(boolean replayOnly) {
+        this.replayOnly = replayOnly;
+        String hostProperty = replayOnly ? "dashboard.replay.host" : "dashboard.host";
+        String hostEnv = replayOnly ? "DASHBOARD_REPLAY_HOST" : "DASHBOARD_HOST";
+        String portProperty = replayOnly ? "dashboard.replay.port" : "dashboard.port";
+        String portEnv = replayOnly ? "DASHBOARD_REPLAY_PORT" : "DASHBOARD_PORT";
+        String tokenProperty = replayOnly ? "dashboard.replay.token" : "dashboard.token";
+        String tokenEnv = replayOnly ? "DASHBOARD_REPLAY_TOKEN" : "DASHBOARD_TOKEN";
+        this.host = System.getProperty(hostProperty,
+                System.getenv().getOrDefault(hostEnv, "127.0.0.1"));
+        int defaultPort = replayOnly ? DEFAULT_REPLAY_PORT : DEFAULT_PORT;
+        this.port = Integer.parseInt(System.getProperty(portProperty,
+                System.getenv().getOrDefault(portEnv, String.valueOf(defaultPort))));
+        String t = System.getProperty(tokenProperty, System.getenv(tokenEnv));
         this.token = (t != null && !t.isBlank()) ? t : null;
     }
 
@@ -131,11 +157,14 @@ public class WebDashboardListener implements RuntimeListener {
                 t.setDaemon(true);
                 return t;
             }));
-            server.createContext("/", this::serveHtml);
-            server.createContext("/api/decisions", this::serveDecisions);
-            server.createContext("/api/groups", this::serveGroups);
-            server.createContext("/api/system", this::serveSystem);
-            server.createContext("/api/stickers", this::serveStickers);
+            if (!replayOnly) {
+                server.createContext("/", this::serveHtml);
+                server.createContext("/api/decisions", this::serveDecisions);
+                server.createContext("/api/groups", this::serveGroups);
+                server.createContext("/api/system", this::serveSystem);
+                server.createContext("/api/stickers", this::serveStickers);
+            }
+            server.createContext("/api/replay", this::serveReplay);
             server.start();
             instance = this;
             logger.info("WebDashboard 已启动: http://{}:{}{}", host, port,
@@ -152,6 +181,8 @@ public class WebDashboardListener implements RuntimeListener {
             server = null;
             instance = null;
         }
+        ManualMessageReplayService replay = replayService;
+        if (replay != null) replay.close();
     }
 
     /** 获取当前实例，供 EventBus 注册。 */
@@ -175,6 +206,10 @@ public class WebDashboardListener implements RuntimeListener {
         this.healthProvider = provider;
     }
 
+    public void setReplayService(ManualMessageReplayService replayService) {
+        this.replayService = replayService;
+    }
+
     // ===== RuntimeListener 实现 =====
 
     @Override
@@ -188,10 +223,29 @@ public class WebDashboardListener implements RuntimeListener {
     public static void recordDecision(String groupId, String userId, String eventType,
                                        String decision, String reason, int toolCalls,
                                        int tokensUsed, long latencyMs) {
+        recordDecision(groupId, userId, eventType, decision, reason, toolCalls, tokensUsed,
+                latencyMs, 0, 0, List.of(), "", List.of());
+    }
+
+    public static void recordDecision(String groupId, String userId, String eventType,
+                                      String decision, String reason, int toolCalls,
+                                      int tokensUsed, long latencyMs,
+                                      List<String> inputMessageIds, String replyToMessageId,
+                                      List<String> evidenceMessageIds) {
+        recordDecision(groupId, userId, eventType, decision, reason, toolCalls, tokensUsed,
+                latencyMs, 0, 0, inputMessageIds, replyToMessageId, evidenceMessageIds);
+    }
+
+    public static void recordDecision(String groupId, String userId, String eventType,
+                                      String decision, String reason, int toolCalls,
+                                      int tokensUsed, long latencyMs, long generation, long revision,
+                                      List<String> inputMessageIds, String replyToMessageId,
+                                      List<String> evidenceMessageIds) {
         WebDashboardListener inst = instance;
         if (inst == null) return;
         inst.addDecision(new DecisionEntry(System.currentTimeMillis(), groupId, userId,
-                eventType, decision, reason, toolCalls, tokensUsed, latencyMs, 0, 0));
+                eventType, decision, reason, toolCalls, tokensUsed, latencyMs, generation, revision,
+                inputMessageIds, replyToMessageId, evidenceMessageIds));
         GroupSummary gs = inst.groups.computeIfAbsent(groupId, k -> new GroupSummary(k));
         switch (decision) {
             case "REPLY" -> { inst.totalReplies.incrementAndGet(); gs.replies.incrementAndGet(); }
@@ -285,6 +339,11 @@ public class WebDashboardListener implements RuntimeListener {
             o.put("latencyMs", d.latencyMs);
             o.put("generation", d.generation);
             o.put("revision", d.revision);
+            ArrayNode inputIds = o.putArray("inputMessageIds");
+            d.inputMessageIds.forEach(inputIds::add);
+            o.put("replyToMessageId", d.replyToMessageId);
+            ArrayNode evidenceIds = o.putArray("evidenceMessageIds");
+            d.evidenceMessageIds.forEach(evidenceIds::add);
             arr.add(o);
         }
         sendJson(ex, arr.toString());
@@ -444,6 +503,246 @@ public class WebDashboardListener implements RuntimeListener {
             logger.warn("表情包面板请求失败: {} {}", ex.getRequestMethod(), ex.getRequestURI(), e);
             sendJson(ex, 500, "{\"error\":\"sticker_request_failed\"}");
         }
+    }
+
+    private void serveReplay(HttpExchange ex) throws IOException {
+        if (!checkAuth(ex)) return;
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
+            sendMethodNotAllowed(ex, "POST");
+            return;
+        }
+        String rawBody;
+        try {
+            rawBody = readBody(ex, 64 * 1024);
+        } catch (IOException e) {
+            sendJson(ex, 413, "{\"error\":\"request_body_too_large_or_unreadable\"}");
+            return;
+        }
+        JsonNode body;
+        try {
+            body = mapper.readTree(rawBody);
+        } catch (Exception e) {
+            sendJson(ex, 400, "{\"error\":\"invalid_json\"}");
+            return;
+        }
+        if (!body.path("test").isBoolean() || !body.path("test").asBoolean()) {
+            sendJson(ex, 400, "{\"error\":\"test_flag_required\"}");
+            return;
+        }
+        ManualMessageReplayService service = replayService;
+        if (service == null) {
+            sendJson(ex, 503, "{\"error\":\"replay_service_unavailable\"}");
+            return;
+        }
+
+        try {
+            switch (body.path("action").asText("")) {
+                case "start" -> {
+                    String groupId = body.path("groupId").asText("");
+                    long fromId = requiredLong(body, "fromLocalMessageId");
+                    long toId = requiredLong(body, "toLocalMessageId");
+                    var mode = ManualMessageReplayService.ReplayMode.parse(body.path("mode").asText("HISTORICAL"));
+                    ManualMessageReplayService.StartResult result = service.start(groupId, fromId, toId, mode);
+                    sendJson(ex, replayStartJson(result));
+                }
+                case "advance" -> {
+                    String replayId = body.path("replayId").asText("");
+                    long messageId = requiredLong(body, "localMessageId");
+                    ManualMessageReplayService.AdvanceResult result = service.advance(replayId, messageId);
+                    sendJson(ex, replayAdvanceJson(result));
+                }
+                case "inject" -> {
+                    String replayId = body.path("replayId").asText("");
+                    long messageId = requiredLong(body, "localMessageId");
+                    JsonNode proactiveCandidate = body.get("evaluateProactiveCandidate");
+                    if (proactiveCandidate != null && !proactiveCandidate.isBoolean()) {
+                        throw new IllegalArgumentException("invalid evaluateProactiveCandidate");
+                    }
+                    ManualMessageReplayService.InjectionResult result = service.inject(replayId, messageId,
+                            proactiveCandidate != null && proactiveCandidate.asBoolean());
+                    sendJson(ex, replayInjectionJson(result));
+                }
+                case "close" -> {
+                    boolean closed = service.close(body.path("replayId").asText(""));
+                    sendJson(ex, "{\"closed\":" + closed + "}");
+                }
+                default -> sendJson(ex, 400, "{\"error\":\"invalid_action\"}");
+            }
+        } catch (ManualMessageReplayService.ReplayException e) {
+            ObjectNode error = mapper.createObjectNode();
+            error.put("error", e.code());
+            if (!e.details().isEmpty()) error.set("details", replayErrorDetails(e.details()));
+            sendJson(ex, e.status(), error.toString());
+        } catch (IllegalArgumentException e) {
+            sendJson(ex, 400, "{\"error\":\"invalid_request\"}");
+        } catch (Exception e) {
+            logger.warn("Manual replay request failed: {}", e.getClass().getSimpleName());
+            sendJson(ex, 500, "{\"error\":\"replay_request_failed\"}");
+        }
+    }
+
+    private static long requiredLong(JsonNode body, String field) {
+        JsonNode value = body.get(field);
+        if (value == null || !value.canConvertToLong() || value.asLong() <= 0) {
+            throw new IllegalArgumentException("invalid " + field);
+        }
+        return value.asLong();
+    }
+
+    private static String replayStartJson(ManualMessageReplayService.StartResult result) {
+        ObjectNode root = mapper.createObjectNode();
+        root.put("test", true);
+        root.put("executionScope", REPLAY_SCOPE);
+        root.put("replayId", result.replayId());
+        root.put("groupId", result.groupId());
+        root.put("mode", result.mode());
+        root.put("fromLocalMessageId", result.fromLocalMessageId());
+        root.put("toLocalMessageId", result.toLocalMessageId());
+        root.put("modelId", result.modelId());
+        root.put("candidateId", result.candidateId());
+        root.put("endpoint", result.endpoint());
+        root.put("protocol", result.protocol());
+        root.put("apiKeyEnv", result.apiKeyEnv());
+        root.put("snapshotAt", result.snapshotAt().toString());
+        root.put("nextLocalMessageId", result.nextLocalMessageId());
+        ArrayNode messages = root.putArray("messages");
+        for (ManualMessageReplayService.MessageView message : result.messages()) {
+            ObjectNode item = messages.addObject();
+            item.put("localMessageId", message.localMessageId());
+            item.put("userId", message.userId());
+            item.put("nickname", message.nickname());
+            item.put("content", message.content());
+            item.put("contentTruncated", message.contentTruncated());
+            item.put("bot", message.bot());
+            if (message.replyToLocalMessageId() != null) item.put("replyToLocalMessageId", message.replyToLocalMessageId());
+            if (message.replyProviderMessageId() != null) {
+                item.put("replyProviderMessageId", message.replyProviderMessageId());
+            }
+            if (message.replyToRawId() != null) item.put("replyToRawId", message.replyToRawId());
+            if (message.replyReference() != null) item.put("replyReference", message.replyReference());
+            item.put("replyReferenceSource", message.replyReferenceSource());
+            item.put("replyResolutionStatus", message.replyResolutionStatus());
+            if (message.createdAt() != null) item.put("createdAt", message.createdAt().toString());
+            item.put("hasImage", message.hasImage());
+            item.put("imageDescription", message.imageDescription());
+            writeImageEvidence(item, "imageEvidence", message.images());
+            ArrayNode ats = item.putArray("atUserIds");
+            message.atUserIds().forEach(ats::add);
+        }
+        return root.toString();
+    }
+
+    private static String replayInjectionJson(ManualMessageReplayService.InjectionResult result) {
+        ObjectNode root = mapper.createObjectNode();
+        root.put("test", true);
+        root.put("executionScope", REPLAY_SCOPE);
+        root.put("mode", result.mode());
+        root.put("localMessageId", result.localMessageId());
+        root.put("decision", result.decision());
+        root.put("reply", result.reply());
+        root.put("replyToCurrentMessage", result.replyToCurrentMessage());
+        if (result.groupAssessment() != null) {
+            root.set("groupAssessment", mapper.valueToTree(result.groupAssessment()));
+        }
+        root.put("modelId", result.modelId());
+        root.put("candidateId", result.candidateId());
+        root.put("endpoint", result.endpoint());
+        root.put("apiKeyEnv", result.apiKeyEnv());
+        root.put("latencyMs", result.latencyMs());
+        root.put("protocol", result.protocol());
+        root.put("attachedImageCount", result.attachedImageCount());
+        root.put("modelCallMade", result.modelCallMade());
+        root.put("triggerEvent", result.triggerEvent());
+        root.put("proactiveCandidate", result.proactiveCandidate());
+        root.put("requestBodySha256", result.requestBodySha256());
+        root.put("snapshotAt", result.snapshotAt().toString());
+        if (result.nextLocalMessageId() != null) root.put("nextLocalMessageId", result.nextLocalMessageId());
+        else root.putNull("nextLocalMessageId");
+        ArrayNode ids = root.putArray("contextMessageIds");
+        result.contextMessageIds().forEach(ids::add);
+        root.put("transcript", result.transcript());
+        root.put("modelUserText", result.modelUserText());
+        root.put("systemPrompt", result.systemPrompt());
+        root.put("turnEvidence", result.turnEvidence());
+        if (result.replyProviderMessageId() != null) {
+            root.put("replyProviderMessageId", result.replyProviderMessageId());
+        }
+        if (result.replyToRawId() != null) root.put("replyToRawId", result.replyToRawId());
+        if (result.replyReference() != null) root.put("replyReference", result.replyReference());
+        root.put("replyReferenceSource", result.replyReferenceSource());
+        if (result.replyToLocalMessageId() != null) {
+            root.put("replyToLocalMessageId", result.replyToLocalMessageId());
+        }
+        root.put("replyResolutionStatus", result.replyResolutionStatus());
+        writeImageEvidence(root, "imageEvidence", result.imageEvidence());
+        ArrayNode omitted = root.putArray("omittedContextMessageIds");
+        result.omittedContextMessageIds().forEach(omitted::add);
+        return root.toString();
+    }
+
+    private static String replayAdvanceJson(ManualMessageReplayService.AdvanceResult result) {
+        ObjectNode root = mapper.createObjectNode();
+        root.put("test", true);
+        root.put("executionScope", REPLAY_SCOPE);
+        root.put("mode", result.mode());
+        root.put("localMessageId", result.localMessageId());
+        root.put("decision", "OBSERVED");
+        root.put("modelCallMade", false);
+        root.put("snapshotAt", result.snapshotAt().toString());
+        if (result.nextLocalMessageId() != null) root.put("nextLocalMessageId", result.nextLocalMessageId());
+        else root.putNull("nextLocalMessageId");
+        return root.toString();
+    }
+
+    private static void writeImageEvidence(com.fasterxml.jackson.databind.node.ObjectNode target, String name,
+                                           java.util.List<ManualMessageReplayService.ImageEvidenceView> images) {
+        ArrayNode array = target.putArray(name);
+        for (ManualMessageReplayService.ImageEvidenceView image : images) {
+            ObjectNode item = array.addObject();
+            item.put("messageLocalId", image.messageLocalId());
+            if (image.partId() != null) item.put("partId", image.partId());
+            item.put("partIndex", image.partIndex());
+            if (image.artifactId() != null) item.put("artifactId", image.artifactId());
+            item.put("status", image.status());
+            item.put("description", image.description());
+            item.put("errorCode", image.errorCode());
+            item.put("parserName", image.parserName());
+            item.put("parserVersion", image.parserVersion());
+            if (image.completedAt() != null) item.put("completedAt", image.completedAt().toString());
+            item.put("sha256", image.sha256());
+            item.put("sourceReferencePresent", image.sourceReferencePresent());
+            item.put("sourceScheme", image.sourceScheme());
+            item.put("sourceHost", image.sourceHost());
+            item.put("sourceLength", image.sourceLength());
+            ArrayNode queryNames = item.putArray("sourceQueryParameterNames");
+            image.sourceQueryParameterNames().forEach(queryNames::add);
+            item.put("providerFileIdPresent", image.providerFileIdPresent());
+            item.put("providerFileIdLength", image.providerFileIdLength());
+            item.put("storageKeyPresent", image.storageKeyPresent());
+            item.put("storageKeyLength", image.storageKeyLength());
+            item.put("sourceLoadStatus", image.sourceLoadStatus());
+            item.put("sourceLoadErrorCode", image.sourceLoadErrorCode());
+            item.put("descriptionInPrompt", image.descriptionInPrompt());
+            item.put("attachedAsImage", image.attachedAsImage());
+            item.put("inlinePayloadStatus", image.inlinePayloadStatus());
+            item.put("inlinePayloadBytes", image.inlinePayloadBytes());
+        }
+    }
+
+    private static ObjectNode replayErrorDetails(java.util.Map<String, Object> details) {
+        ObjectNode result = mapper.createObjectNode();
+        details.forEach((key, value) -> {
+            if ("imageEvidence".equals(key) && value instanceof java.util.List<?> values
+                    && values.stream().allMatch(ManualMessageReplayService.ImageEvidenceView.class::isInstance)) {
+                @SuppressWarnings("unchecked")
+                java.util.List<ManualMessageReplayService.ImageEvidenceView> images =
+                        (java.util.List<ManualMessageReplayService.ImageEvidenceView>) values;
+                writeImageEvidence(result, key, images);
+            } else {
+                result.set(key, mapper.valueToTree(value));
+            }
+        });
+        return result;
     }
 
     private void serveStickerList(HttpExchange ex) throws IOException {
@@ -667,6 +966,7 @@ public class WebDashboardListener implements RuntimeListener {
                               border-bottom:1px solid var(--border); position:sticky; top:0;
                               background:var(--card); }
             .trail-table td { padding:3px 6px; border-bottom:1px solid #1e1e36; }
+            .trail-table .trace-ids { max-width:360px; overflow-wrap:anywhere; color:var(--muted); }
             .trail-table .REPLY { color:var(--green); }
             .trail-table .SILENT { color:var(--muted); }
             .trail-table .ERROR { color:var(--red); }
@@ -725,7 +1025,7 @@ public class WebDashboardListener implements RuntimeListener {
                     <table class="trail-table">
                     <thead><tr>
                         <th>时间</th><th>群</th><th>用户</th><th>事件</th><th>决策</th>
-                        <th>原因</th><th>工具</th><th>Token</th><th>延迟</th>
+                        <th>原因</th><th>工具</th><th>Token</th><th>延迟</th><th>消息链 IDs</th>
                     </tr></thead>
                     <tbody id="trailBody"></tbody>
                     </table>
@@ -841,6 +1141,7 @@ public class WebDashboardListener implements RuntimeListener {
                             <td>${d.toolCalls||0}</td>
                             <td>${d.tokensUsed||0}</td>
                             <td>${d.latencyMs}ms</td>
+                            <td class="trace-ids">输入:${esc((d.inputMessageIds||[]).join(','))}<br>引用:${esc(d.replyToMessageId||'-')}<br>证据:${esc((d.evidenceMessageIds||[]).join(','))}</td>
                         </tr>`
                     ).join('');
 

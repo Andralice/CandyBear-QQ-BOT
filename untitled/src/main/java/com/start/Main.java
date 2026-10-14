@@ -683,6 +683,11 @@ public class Main extends WebSocketClient {
 
     /** 第二阶段 2.2：发群聊并显式指定 sessionId 持久化 */
     public boolean sendGroupReply(long groupId, String reply, String sessionId) {
+        return sendGroupReply(groupId, reply, sessionId, null);
+    }
+
+    /** 发送群聊回复，并可在 OneBot 层绑定本轮回答的入站消息。 */
+    public boolean sendGroupReply(long groupId, String reply, String sessionId, Long replyToMessageId) {
         reply = sanitizeOutgoingMessage(reply);
         if (reply.isBlank()) return false;
         String traceId = "send_" + System.currentTimeMillis() + "_" + ThreadLocalRandom.current().nextInt(1000);
@@ -690,7 +695,9 @@ public class Main extends WebSocketClient {
         try {
             ObjectNode params = MAPPER.createObjectNode();
             params.put("group_id", groupId);
-            params.put("message", reply);
+            // OneBot 11 renders a quote as a reply message segment. The top-level
+            // `reply` field is not portable and NapCat silently ignored it.
+            params.put("message", withReplyReference(reply, replyToMessageId));
             JsonNode receipt = sendWithReceipt("send_group_msg", params, receiptTimeoutSeconds(reply));
             if (receipt == null) {
                 return false;
@@ -701,7 +708,8 @@ public class Main extends WebSocketClient {
                 if (this.messageService != null) {
                     this.messageService.saveAIReply(sessionId,
                             String.valueOf(groupId), reply, null, false,
-                            sentMessageId, receipt.toString(), null);
+                            sentMessageId, receipt.toString(),
+                            replyToMessageId == null ? null : String.valueOf(replyToMessageId));
                 }
             } catch (Exception e) {
                 logger.warn("群消息已发送，但消息持久化失败: {}", e.getMessage());
@@ -712,7 +720,7 @@ public class Main extends WebSocketClient {
                     String gid = String.valueOf(groupId);
                     this.baiLianService.recordGroupContext(
                             gid, "candybear", "糖果熊", reply, "bot_reply");
-                    this.baiLianService.recordBotOwnGroupMessage(gid, reply, sentMessageId);
+                    this.baiLianService.recordBotOwnGroupMessage(gid, reply, sentMessageId, replyToMessageId);
                     this.baiLianService.getBotMemory().record(
                             String.valueOf(groupId), BotMemoryService.EntryType.SAID, null,
                             reply.length() > 100 ? reply.substring(0, 100) + "..." : reply);
@@ -736,8 +744,16 @@ public class Main extends WebSocketClient {
         return isMediaPayload(reply) ? IMAGE_RECEIPT_TIMEOUT_SECONDS : 5;
     }
 
+    static String withReplyReference(String message, Long replyToMessageId) {
+        if (message == null || message.isBlank() || replyToMessageId == null || replyToMessageId <= 0) {
+            return message;
+        }
+        return "[CQ:reply,id=" + replyToMessageId + "]" + message;
+    }
+
     static String sanitizeOutgoingMessage(String message) {
         if (message == null || message.isEmpty()) return "";
+        message = String.join("\n", message.lines().filter(line -> !line.isBlank()).toList());
         message = BaiLianService.normalizeBareAtCqCodes(message);
         // 普通出站允许 @ 和真实媒体，但 QQ 内置 face/mface 属于表情输出，统一丢弃。
         message = BaiLianService.stripDisallowedCqCodes(message);
@@ -848,6 +864,10 @@ public class Main extends WebSocketClient {
      * 主方法：创建机器人实例，连接 WebSocket 并初始化服务。
      */
     public static void main(String[] args) throws Exception {
+        if (args != null && java.util.Arrays.asList(args).contains("--replay-only")) {
+            ReplayOnlyApplication.run();
+            return;
+        }
         // 必须先检查配置，再初始化数据库/服务并连接 OneBot，避免缺配置时产生外部副作用。
         BotBootstrap.validateConfiguration();
         Main bot = new Main(new URI(BotConfig.getWsUrl()));

@@ -1,7 +1,5 @@
 package com.start.repository;
 
-import com.start.config.DatabaseConfig;
-
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
@@ -19,7 +17,20 @@ public class EvidenceQueryRepository extends BaseRepository {
                 "FROM messages WHERE " + scope + " AND id<=? AND (?=0 OR id<?) AND retracted_at IS NULL " +
                 "ORDER BY id DESC LIMIT ?";
         return query(sql, groupId != null && !groupId.isBlank() ? groupId : sessionId, centerId,
-                cursor, bounded);
+                cursor, cursor, bounded);
+    }
+
+    /** Reads messages that arrived after a local message cursor in the same scope. */
+    public List<Map<String, Object>> messageContextAfter(String groupId, String sessionId,
+                                                          long afterMessageId, int limit) throws SQLException {
+        int bounded = Math.max(1, Math.min(limit, 20));
+        String scope = groupId != null && !groupId.isBlank() ? "group_id=?" : "group_id IS NULL AND session_id=?";
+        String sql = "SELECT id, provider_message_id, user_id, sender_type, group_id, session_id, content, " +
+                "raw_content, reply_to_id, reply_provider_message_id, availability_status, created_at " +
+                "FROM messages WHERE " + scope + " AND id>? AND retracted_at IS NULL " +
+                "ORDER BY id ASC LIMIT ?";
+        return query(sql, groupId != null && !groupId.isBlank() ? groupId : sessionId,
+                Math.max(0L, afterMessageId), bounded);
     }
 
     public List<Map<String, Object>> thread(String groupId, String sessionId, String providerMessageId,
@@ -89,7 +100,7 @@ public class EvidenceQueryRepository extends BaseRepository {
 
     private List<Map<String, Object>> query(String sql, Object... values) throws SQLException {
         List<Map<String, Object>> result = new ArrayList<>();
-        try (Connection conn = DatabaseConfig.getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+        try (Connection conn = getDataSource().getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
             for (int i = 0; i < values.length; i++) ps.setObject(i + 1, values[i]);
             try (ResultSet rs = ps.executeQuery()) {
                 ResultSetMetaData meta = rs.getMetaData();

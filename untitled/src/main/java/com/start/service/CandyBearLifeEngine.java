@@ -600,12 +600,12 @@ public class CandyBearLifeEngine {
                 }
                 sb.append("在线习惯=经常使用手机聊天；性格倾向=有活力但偶尔懒，数学相对弱，语文和英语较好。 ");
                 sb.append("资料用于生成生活记录，不要求在对话中逐项复述。");
-                return sb.toString();
+                return sb.append("\n\n").append(RuleSetDefaults.LIFE_BOUNDARY_GUIDANCE).toString();
             }
         } catch (Exception e) {
             logger.error("[LifeEngine] LifeState读取失败，使用默认: " + e.getMessage());
         }
-        return HARDCODED_LIFE_STATE;
+        return HARDCODED_LIFE_STATE + "\n\n" + RuleSetDefaults.LIFE_BOUNDARY_GUIDANCE;
     }
 
     /** 把逗号分隔的朋友列表格式化为可读文本 */

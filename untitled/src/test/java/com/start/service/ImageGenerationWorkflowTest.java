@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.start.agent.GenerateMediaTool;
 import com.start.agent.QueryImagesTool;
+import com.start.agent.Tool;
+import com.start.config.BotConfig;
 import com.start.repository.MessageRepository;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.*;
@@ -11,6 +13,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.sql.Timestamp;
@@ -83,6 +86,29 @@ class ImageGenerationWorkflowTest {
         assertEquals(1, submissions.get());
         assertEquals("data:image/png;base64," + PNG, submitted.path("extra_body").path("image").get(0).asText());
         assertTrue(submitted.path("prompt").asText().contains("只将背景改成蓝色"));
+    }
+
+    @Test void selectedPastImageIsReturnedAsARequestLocalModelAttachment() throws Exception {
+        Field flag = BotConfig.class.getDeclaredField("baiLianMultimodalEnabled");
+        flag.setAccessible(true);
+        boolean previous = flag.getBoolean(null);
+        try {
+            flag.setBoolean(null, true);
+            QueryImagesTool modelImageQuery = new QueryImagesTool(repo, "group", "session", "alice", service);
+            JsonNode found = JSON.readTree(modelImageQuery.execute(Map.of("provider_message_id", "qq42")));
+            assertEquals("42:1", found.path("items").get(0).path("image_id").asText());
+
+            Tool.ExecutionResult result = modelImageQuery.executeForModel(
+                    Map.of("image_ids", List.of("42:1")));
+
+            assertTrue(result.text().contains("原图"));
+            assertEquals(1, result.images().size());
+            assertEquals("42:1", result.images().get(0).label());
+            assertEquals("data:image/png;base64," + PNG, result.images().get(0).dataUri());
+            assertFalse(result.text().contains(PNG), "图像字节不能进入工具文本");
+        } finally {
+            flag.setBoolean(null, previous);
+        }
     }
 
     @Test void preloadedImageRulesAllowFirstRealCallAndKeepOriginalLookup() {
@@ -165,6 +191,28 @@ class ImageGenerationWorkflowTest {
         assertEquals("42:2", items.get(1).path("image_id").asText());
         assertEquals("蓝色大海", items.get(1).path("description").asText());
         assertFalse(items.toString().contains("https://"));
+    }
+
+    @Test void imageQueryExposesVisionStatusInsteadOfMakingPendingLookLikeFailure() throws Exception {
+        Map<String, Object> row = row(43, 1);
+        row.put("image_vision_status", "1:PENDING");
+        repo.rows.clear(); repo.rows.add(row);
+
+        JsonNode items = JSON.readTree(query.execute(Map.of("message_id", "43", "wait_for_vision", false)))
+                .path("items");
+        assertEquals("PENDING", items.get(0).path("vision_status").asText());
+    }
+
+    @Test void imageCaptionIsNotFalselyReturnedAsVisionDescription() throws Exception {
+        Map<String, Object> row = row(44, 1);
+        row.put("content", "你看得到吗");
+        row.put("image_data", "[{\"url\":\"https://example.com/a.png\"}]");
+        repo.rows.clear(); repo.rows.add(row);
+
+        JsonNode item = JSON.readTree(query.execute(Map.of("message_id", "44")))
+                .path("items").get(0);
+        assertEquals("", item.path("description").asText());
+        assertEquals("你看得到吗", row.get("content"));
     }
 
     @Test void loaderRejectsLocalNetworkNonImagesAndArbitraryLocalFiles() throws Exception {

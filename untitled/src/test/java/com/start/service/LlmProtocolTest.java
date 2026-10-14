@@ -201,6 +201,31 @@ class LlmProtocolTest {
                 LlmProtocol.endpoint(baseUrl + "/v1", LlmProtocol.Type.ANTHROPIC));
         assertEquals(baseUrl + "/v1/messages",
                 LlmProtocol.endpoint(baseUrl + "/v1/chat/completions", LlmProtocol.Type.ANTHROPIC));
+        assertEquals(baseUrl + "/v1/responses", LlmProtocol.responsesEndpoint(baseUrl + "/v1"));
+        assertEquals(baseUrl + "/v1/responses", LlmProtocol.responsesEndpoint(baseUrl + "/v1/chat/completions"));
+        assertEquals(baseUrl + "/v1/responses", LlmProtocol.responsesEndpoint(baseUrl + "/v1/responses"));
+    }
+
+    @Test
+    void serializesToolImagesForOpenAiAndAnthropicWithoutFlatteningThemToText() {
+        Tool.ImageAttachment image = new Tool.ImageAttachment("42:1", "data:image/png;base64,AQID");
+
+        Map<String, Object> openAiImage = LlmProtocol.buildImageContent(image.dataUri(), LlmProtocol.Type.OPENAI);
+        assertEquals("image_url", openAiImage.get("type"));
+        assertEquals(image.dataUri(), ((Map<?, ?>) openAiImage.get("image_url")).get("url"));
+
+        Map<String, Object> anthropicResult = LlmProtocol.buildAnthropicToolResult(
+                "toolu-image", "已选中原图", List.of(image));
+        List<?> blocks = (List<?>) anthropicResult.get("content");
+        assertEquals("tool_result", anthropicResult.get("type"));
+        assertEquals("toolu-image", anthropicResult.get("tool_use_id"));
+        assertEquals("text", ((Map<?, ?>) blocks.get(0)).get("type"));
+        assertEquals("image_id=42:1", ((Map<?, ?>) blocks.get(1)).get("text"));
+        assertEquals("image", ((Map<?, ?>) blocks.get(2)).get("type"));
+        Map<?, ?> source = (Map<?, ?>) ((Map<?, ?>) blocks.get(2)).get("source");
+        assertEquals("base64", source.get("type"));
+        assertEquals("image/png", source.get("media_type"));
+        assertEquals("AQID", source.get("data"));
     }
 
     @Test

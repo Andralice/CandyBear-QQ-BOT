@@ -1,6 +1,7 @@
 package com.start.agent;
 
 import java.util.Map;
+import java.util.List;
 
 public interface Tool {
     String getName();
@@ -22,4 +23,18 @@ public interface Tool {
     }
 
     String execute(Map<String, Object> args);
+
+    /** Text-only tools keep their existing behavior; multimodal tools may attach request-local images. */
+    default ExecutionResult executeForModel(Map<String, Object> args) {
+        return new ExecutionResult(execute(args), List.of());
+    }
+
+    record ImageAttachment(String label, String dataUri) {}
+
+    record ExecutionResult(String text, List<ImageAttachment> images) {
+        public ExecutionResult {
+            text = text == null ? "" : text;
+            images = images == null ? List.of() : List.copyOf(images);
+        }
+    }
 }

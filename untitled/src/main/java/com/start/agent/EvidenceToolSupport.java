@@ -66,11 +66,16 @@ abstract class EvidenceToolSupport {
             root.put("source", "raw_or_derived_evidence");
             root.put("scope_group_id", currentGroupId == null ? "" : currentGroupId);
             root.put("scope_session_id", currentSessionId == null ? "" : currentSessionId);
+            root.put("caller_user_id", callerUserId == null ? "" : callerUserId);
             root.put("kind", kind);
             ArrayNode items = root.putArray("items");
             long next = descending ? Long.MAX_VALUE : 0;
             for (Map<String, Object> row : rows) {
                 ObjectNode item = items.addObject();
+                if (row.get("user_id") != null) {
+                    item.put("is_current_requester", callerUserId != null
+                            && callerUserId.equals(String.valueOf(row.get("user_id"))));
+                }
                 for (Map.Entry<String, Object> entry : row.entrySet()) {
                     String key = entry.getKey();
                     Object value = entry.getValue();

@@ -13,6 +13,46 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ToolAuditServiceTest {
 
     @Test
+    void executionStatusUsesTopLevelEnvelopeRatherThanChatContents() {
+        assertEquals("查询消息上下文失败", ToolAuditService.failureReason("query_message_context",
+                "{\"status\":\"ERROR\",\"error\":\"查询消息上下文失败\"}"));
+        assertEquals("暂不可用", ToolAuditService.failureReason("query_thread",
+                "{\"success\":false,\"error\":\"暂不可用\"}"));
+        assertNull(ToolAuditService.failureReason("query_message_context",
+                "{\"status\":\"OK\",\"items\":[{\"content\":\"失败了，黑名单不可用\",\"status\":\"ERROR\"}]}"));
+        assertNull(ToolAuditService.failureReason("query_message_context", "没有消息"));
+        assertEquals("画图失败：服务超时", ToolAuditService.failureReason("generate_image", "画图失败：服务超时"));
+        assertNull(ToolAuditService.failureReason("search_chat_history", "画图失败：服务超时"));
+    }
+
+    @Test
+    void auditPersistsReturnedErrorAsFailureEvenWhenCallerSaysSuccess() throws Exception {
+        var captured = new java.util.concurrent.LinkedBlockingQueue<com.start.model.ToolAuditLog>();
+        var repo = new com.start.repository.ToolAuditLogRepository(null) {
+            @Override public void insert(com.start.model.ToolAuditLog log) { captured.add(log); }
+        };
+        var field = ToolAuditService.class.getDeclaredField("instance");
+        field.setAccessible(true);
+        Object previous = field.get(null);
+        var constructor = ToolAuditService.class.getDeclaredConstructor(com.start.repository.ToolAuditLogRepository.class);
+        constructor.setAccessible(true);
+        var service = constructor.newInstance(repo);
+        field.set(null, service);
+        try {
+            service.record("query_message_context", "u", "g", "s", "{}",
+                    "{\"status\":\"ERROR\",\"error\":\"查询消息上下文失败\"}", false, true, null, 5);
+            var log = captured.poll(3, java.util.concurrent.TimeUnit.SECONDS);
+            org.junit.jupiter.api.Assertions.assertNotNull(log);
+            org.junit.jupiter.api.Assertions.assertFalse(log.isSuccess());
+            org.junit.jupiter.api.Assertions.assertFalse(log.isRejected());
+            assertEquals("查询消息上下文失败", log.getErrorMessage());
+        } finally {
+            ToolAuditService.shutdown();
+            field.set(null, previous);
+        }
+    }
+
+    @Test
     void truncateShortStringReturnsAsIs() {
         assertEquals("hello", ToolAuditService.truncate("hello", 10));
         assertNull(ToolAuditService.truncate(null, 10));

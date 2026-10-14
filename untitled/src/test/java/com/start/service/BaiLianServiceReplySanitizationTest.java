@@ -9,6 +9,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class BaiLianServiceReplySanitizationTest {
 
     @Test
+    void internalWorkspaceContextIsDroppedRatherThanPartiallySent() {
+        String leaked = "唉 AI税\nFor context:\nWORKSPACE: `/home/user/workspace/agentic-coding`\nISSUE OR TASK:";
+        assertEquals("", BaiLianService.sanitizePublicReply("唉 AI税", leaked));
+    }
+
+    @Test
     void selfIntroductionDoesNotExposeSettingMarkdown() {
         String leaked = "### 背景与相处\n- 角色名：糖果熊\n- 年龄：17岁\n- 系统身份：聊天机器人";
 

@@ -194,12 +194,12 @@ public class AIDatabaseService {
      * 检查糖果熊是否应该主动参与话题
      */
     public boolean shouldJoinTopic(String message, String groupId) {
-        Set<String> interestTopics = Set.of("文学", "诗歌", "音乐", "艺术", "哲学", "思考","游戏");
+        if (message == null || message.isBlank()) return false;
+        Set<String> interestTopics = Set.of("文学", "诗歌", "音乐", "艺术", "哲学", "思考", "游戏");
         String topics = extractTopics(message);
-        logger.debug("candyBear: {}, groupId: {}", topics, interestTopics);        for (String interest : interestTopics) {
-            if (topics.contains(interest)) {
-                return true;
-            }
+        logger.debug("candyBear: {}, groupId: {}", topics, interestTopics);
+        for (String interest : interestTopics) {
+            if (topics.contains(interest)) return true;
         }
         return message.contains("最近") || message.contains("大家") || message.contains("你们")
                 || message.contains("推荐") || message.contains("好看") || message.contains("好玩");

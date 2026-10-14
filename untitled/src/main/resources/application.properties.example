@@ -9,6 +9,7 @@ NAPCT_WS_URL=ws://127.0.0.1:5701/?access_token=your_token
 NAPCT_WS_BASE_URL=ws://127.0.0.1:5700
 ONEBOT_HTTP_BASE_URL=http://127.0.0.1:5700
 ONEBOT_ACCESS_TOKEN=your_access_token
+bot.peer-bot-qqs=${BOT_PEER_BOT_QQS:3111651836}
 
 # AI 服务配置 (OpenAI 兼容 API)
 BAILIAN_API_KEY=sk-your-key
@@ -18,9 +19,11 @@ BAILIAN_BASE_URL=https://api.deepseek.com/v1/chat/completions
 # openai（默认）或 anthropic；Anthropic 可填服务的 /v1 根地址，程序会请求 /v1/messages
 BAILIAN_PROTOCOL=openai
 BAILIAN_CHAT_MODEL=deepseek-v4-pro
-# 默认只用独立 Vision 描述图片；确认主模型兼容 image_url 后再设为 true，主聊天才会同时收到本轮原图
-BAILIAN_MULTIMODAL_ENABLED=false
+  # 主模型直接接收本轮原图及显式选中的历史原图；设为 false 时退回独立 Vision 描述
+  BAILIAN_MULTIMODAL_ENABLED=true
 BAILIAN_TIMEOUT_MS=90000
+# 每张图片联网核验的独立等待上限，程序限制在 1-30 秒。
+BAILIAN_IMAGE_SEARCH_TIMEOUT_MS=8000
 BAILIAN_MAX_RETRIES=2
 
 # 图片视觉处理只在表情包入库或用户明确需要时调用；默认复用辅助 Luna 线路
@@ -31,7 +34,8 @@ VISION_MODEL=gpt-5.6-luna
 VISION_TIMEOUT_MS=60000
 
 # 主模型候选池（可选）：启动探测一次；当前线路变慢/失败时并发短探测，后续新请求使用最快成功线路
-# 格式：id|base_url|model|protocol|api_key_env，多条线路用分号分隔；最后一列只能写环境变量名
+# 格式：id|base_url|model|protocol|api_key_env[|tier=N][|thinking=disabled]，多条线路用分号分隔；密钥字段只能写环境变量名
+# tier 默认是 1，数字越小优先级越高；同一等级内才按健康状态和延迟选择
 # 运行时增删：将完整候选串写入运行时配置 main_model_pool_candidates；下一次请求热重载，留空回退本配置
 # PROBE_INTERVAL_MS 现表示两次非强制探测之间的最短冷却时间
 # 启用前请把 Gemini 所用 YeToken 密钥注入 YETOKEN_API_KEY，把 Claude 测试密钥注入 YETOKEN_CLAUDE_API_KEY，
@@ -39,7 +43,7 @@ VISION_TIMEOUT_MS=60000
 BAILIAN_POOL_ENABLED=false
 BAILIAN_POOL_PROBE_INTERVAL_MS=600000
 BAILIAN_POOL_PROBE_TIMEOUT_MS=15000
-BAILIAN_POOL_CANDIDATES=claude-opus-4-6-yetoken|https://yetoken.vip/v1|claude-opus-4-6|anthropic|YETOKEN_CLAUDE_API_KEY;claude-haiku-4-5-20251001-yetoken|https://yetoken.vip/v1|claude-haiku-4-5-20251001|anthropic|YETOKEN_CLAUDE_API_KEY;claude-opus-4-7-yetoken|https://yetoken.vip/v1|claude-opus-4-7|anthropic|YETOKEN_CLAUDE_API_KEY;claude-fable-5-yetoken|https://yetoken.vip/v1|claude-fable-5|anthropic|YETOKEN_CLAUDE_API_KEY;claude-opus-5-yetoken|https://yetoken.vip/v1|claude-opus-5|anthropic|YETOKEN_CLAUDE_API_KEY;gemini-3.1-flash-lite|https://yetoken.vip/v1|gemini-3.1-flash-lite|anthropic|YETOKEN_API_KEY;gemini-3-flash|https://yetoken.vip/v1|gemini-3-flash|anthropic|YETOKEN_API_KEY;gemini-2.5-flash-lite|https://yetoken.vip/v1|gemini-2.5-flash-lite|anthropic|YETOKEN_API_KEY;gpt-5.6-luna-wyy-1|https://www.wyy22.com/v1|gpt-5.6-luna|openai|WYY22_API_KEY_1;gpt-5.6-luna-wyy-2|https://www.wyy22.com/v1|gpt-5.6-luna|openai|WYY22_API_KEY_2;deepseek-flash-official|https://api.deepseek.com/v1|deepseek-flash|openai|DEEPSEEK_FLASH_API_KEY|thinking=disabled
+BAILIAN_POOL_CANDIDATES=claude-opus-4-6-yetoken|https://yetoken.vip/v1|claude-opus-4-6|anthropic|YETOKEN_CLAUDE_API_KEY|tier=1;claude-haiku-4-5-20251001-yetoken|https://yetoken.vip/v1|claude-haiku-4-5-20251001|anthropic|YETOKEN_CLAUDE_API_KEY|tier=2;claude-opus-4-7-yetoken|https://yetoken.vip/v1|claude-opus-4-7|anthropic|YETOKEN_CLAUDE_API_KEY|tier=2;claude-fable-5-yetoken|https://yetoken.vip/v1|claude-fable-5|anthropic|YETOKEN_CLAUDE_API_KEY|tier=2;claude-opus-5-yetoken|https://yetoken.vip/v1|claude-opus-5|anthropic|YETOKEN_CLAUDE_API_KEY|tier=1;gemini-3.1-flash-lite|https://yetoken.vip/v1|gemini-3.1-flash-lite|anthropic|YETOKEN_API_KEY|tier=2;gemini-3-flash|https://yetoken.vip/v1|gemini-3-flash|anthropic|YETOKEN_API_KEY|tier=2;gemini-2.5-flash-lite|https://yetoken.vip/v1|gemini-2.5-flash-lite|anthropic|YETOKEN_API_KEY|tier=2;gpt-5.6-luna-wyy-1|https://www.wyy22.com/v1|gpt-5.6-luna|openai|WYY22_API_KEY_1|tier=2;gpt-5.6-luna-wyy-2|https://www.wyy22.com/v1|gpt-5.6-luna|openai|WYY22_API_KEY_2|tier=2;gpt-6-luna-wyy-3|https://www.wyy22.com/v1|gpt-6-luna|openai|WYY22_API_KEY_1|tier=1;deepseek-flash-official|https://api.deepseek.com/v1|deepseek-flash|openai|DEEPSEEK_FLASH_API_KEY|tier=1|thinking=disabled
 
 # 后台文本分析模型（不占用主聊天模型池）
 AUXILIARY_API_KEY=
@@ -77,8 +81,21 @@ AUDIT_TIMEOUT_MS=120000
 # 群认知与宏观审查默认关闭；需要时再显式指定群号和模式
 GROUP_COGNITION_MODE=off
 GROUP_COGNITION_GROUPS=
+# off=关闭；live_shadow=只审查不写事实；live_active=通过证据校验后写入人物事实
 MACRO_REVIEW_MODE=off
 MACRO_REVIEW_GROUPS=
+MACRO_REVIEW_API_KEY=
+MACRO_REVIEW_BASE_URL=https://www.wyy22.com/v1
+MACRO_REVIEW_MODEL=gpt-5.6-luna
+MACRO_REVIEW_TIMEOUT_MS=120000
+MACRO_REVIEW_WINDOW_MESSAGES=32
+MACRO_REVIEW_OVERLAP_MESSAGES=8
+# 历史回填线：显式开启后从起点回填固定历史快照，成功一批后立即继续，直到完成
+MACRO_REVIEW_HISTORY_ENABLED=false
+MACRO_REVIEW_HISTORY_START_AT=2026-05-01T00:00:00
+MACRO_REVIEW_HISTORY_WINDOW_MESSAGES=160
+MACRO_REVIEW_HISTORY_OVERLAP_MESSAGES=16
+MACRO_REVIEW_HISTORY_TIMEOUT_MS=300000
 
 # 兼容旧版
 DASHSCOPE_API_KEY=sk-your-key
@@ -94,6 +111,12 @@ DEBUG=false
 DASHBOARD_HOST=127.0.0.1
 DASHBOARD_PORT=8765
 DASHBOARD_TOKEN=replace-with-a-long-random-token
+
+# 独立回放测试：java -jar untitled-1.0-SNAPSHOT.jar --replay-only
+# 默认只监听本机 127.0.0.1:8766，不连接 NapCat，也不运行生产后台任务
+# DASHBOARD_REPLAY_HOST=127.0.0.1
+# DASHBOARD_REPLAY_PORT=8766
+# DASHBOARD_REPLAY_TOKEN=replace-with-a-long-random-token
 
 # 私聊白名单
 PRIVATE_WHITELIST_ENABLED=false

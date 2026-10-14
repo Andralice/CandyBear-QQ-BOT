@@ -52,6 +52,7 @@ class DatabaseMigrationIdempotentIntegrationTest {
             assertTableExists(conn, "profile_fact_candidates");
             assertTableExists(conn, "profile_facts");
             assertTableExists(conn, "model_analysis_tasks");
+            assertTableExists(conn, "macro_review_history_cursors");
         }
     }
 

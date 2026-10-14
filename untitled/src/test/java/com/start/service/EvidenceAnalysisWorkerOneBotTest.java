@@ -7,16 +7,20 @@ import com.start.config.MacroReviewMode;
 import com.start.model.AnalysisTask;
 import com.start.model.MediaPartInput;
 import com.start.repository.AnalysisTaskRepository;
+import com.start.repository.BaseRepository;
 import com.start.repository.MediaArtifactRepository;
 import com.start.repository.MessageRepository;
 import com.start.repository.ProfileFactRepository;
+import com.start.model.ProfileFactCandidateInput;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiFunction;
@@ -187,10 +191,115 @@ class EvidenceAnalysisWorkerOneBotTest {
     }
 
     @Test
+    void legacyProfileTaskForActiveGroupIsAlsoSkippedBeforeExtraction() {
+        AnalysisTask task = task("EXTRACT_PROFILE_FACTS", "{}", "437625485");
+
+        assertTrue(EvidenceAnalysisWorker.shouldSkipLegacyProfileExtraction(
+                task, MacroReviewMode.LIVE_ACTIVE, java.util.Set.of(437625485L)));
+    }
+
+    @Test
     void legacyProfileTaskForOtherGroupIsNotSkipped() {
         assertFalse(EvidenceAnalysisWorker.shouldSkipLegacyProfileExtraction(
                 task("EXTRACT_PROFILE_FACTS", "{}", "group-1"),
                 MacroReviewMode.LIVE_SHADOW, java.util.Set.of(437625485L)));
+    }
+
+    @Test
+    void liveReviewContinuesPagesBeforeSchedulingAndIncludesMessagesArrivingDuringCatchup() {
+        assertEquals(24, EvidenceAnalysisWorker.liveReviewWindowLimit(96));
+        assertEquals(16, EvidenceAnalysisWorker.liveReviewWindowLimit(16));
+        assertEquals(900, EvidenceAnalysisWorker.nextLiveReviewTarget(900, 24, 1100));
+        assertEquals(1100, EvidenceAnalysisWorker.nextLiveReviewTarget(900, 900, 1100));
+        assertEquals(900, EvidenceAnalysisWorker.nextLiveReviewTarget(900, 900, 850));
+    }
+
+    @Test
+    void activeWriterPromotesCurrentFactButKeepsFuturePlanAsCandidate() throws Exception {
+        FakeTaskRepository tasks = new FakeTaskRepository(task("MACRO_REVIEW_BATCH", "{}", "group-1"));
+        FakeProfileFactRepository facts = new FakeProfileFactRepository();
+        EvidenceAnalysisWorker worker = new EvidenceAnalysisWorker(tasks,
+                new FakeArtifactRepository(filePart("unused")), new FakeMessageRepository(), facts, null, "test-worker");
+        List<Map<String, Object>> window = List.of(
+                messageRow(101L, "u1", LocalDateTime.now().minusMinutes(2), "我喜欢策略游戏"),
+                messageRow(102L, "u1", LocalDateTime.now().minusMinutes(1), "以后我还是用开源软件"));
+        var raw = MacroReviewService.parseJsonObject("""
+                {"observations":[
+                  {"subject_user_id":"u1","relation_target":"SELF","kind":"interest",
+                   "epistemic_type":"SELF_REPORTED","claim_key":"game","claim":"喜欢策略游戏",
+                   "polarity":"ASSERT","temporal_scope":"CURRENT_STATE","speech_act":"SELF_ASSERTION",
+                   "status":"CANDIDATE","confidence":0.9,"evidence_message_ids":[101]},
+                  {"subject_user_id":"u1","relation_target":"SELF","kind":"preference",
+                   "epistemic_type":"SELF_REPORTED","claim_key":"software_plan","claim":"以后使用开源软件",
+                   "polarity":"ASSERT","temporal_scope":"FUTURE_PLAN","speech_act":"PLAN",
+                   "status":"CANDIDATE","confidence":0.9,"evidence_message_ids":[102]}],
+                 "stories":[],"group_state":[]}
+                """);
+        var validated = EvidenceAnalysisWorker.validateMacroResult(raw, window);
+        var summary = worker.persistMacroObservations(tasks.next, "group-1", window, validated,
+                new MacroReviewService.ReviewResult(raw, "test-model", "test-prompt", 1, 1));
+
+        assertEquals(2, summary.path("candidate_rows_written").asInt());
+        assertEquals(1, summary.path("promoted").asInt());
+        assertEquals(List.of(1L), facts.promotedCandidateIds);
+        assertEquals(1L, validated.path("observations").get(0).path("candidate_id").asLong());
+        assertEquals(2L, validated.path("observations").get(1).path("candidate_id").asLong());
+        assertEquals("CANDIDATE_STORED_NON_CURRENT",
+                validated.path("observations").get(1).path("write_action").asText());
+    }
+
+    @Test
+    void activeWriterKeepsUnboundedRecentStateOutOfFormalProfile() throws Exception {
+        FakeTaskRepository tasks = new FakeTaskRepository(task("MACRO_REVIEW_BATCH", "{}", "group-1"));
+        FakeProfileFactRepository facts = new FakeProfileFactRepository();
+        EvidenceAnalysisWorker worker = new EvidenceAnalysisWorker(tasks,
+                new FakeArtifactRepository(filePart("unused")), new FakeMessageRepository(), facts, null, "test-worker");
+        List<Map<String, Object>> window = List.of(
+                messageRow(201L, "u1", LocalDateTime.now(), "我今天在上班"));
+        var raw = MacroReviewService.parseJsonObject("""
+                {"observations":[
+                  {"subject_user_id":"u1","relation_target":"SELF","kind":"recent_state",
+                   "epistemic_type":"SELF_REPORTED","claim_key":"work_now","claim":"今天在上班",
+                   "polarity":"ASSERT","temporal_scope":"CURRENT_STATE","speech_act":"SELF_ASSERTION",
+                   "status":"CANDIDATE","confidence":0.9,"evidence_message_ids":[201]}],
+                 "stories":[],"group_state":[]}
+                """);
+
+        var validated = EvidenceAnalysisWorker.validateMacroResult(raw, window);
+        worker.persistMacroObservations(tasks.next, "group-1", window, validated,
+                new MacroReviewService.ReviewResult(raw, "test-model", "test-prompt", 1, 1));
+
+        assertTrue(facts.promotedCandidateIds.isEmpty());
+        assertEquals("CANDIDATE_STORED_REQUIRES_VALIDITY",
+                validated.path("observations").get(0).path("write_action").asText());
+    }
+
+    @Test
+    void activeWriterDoesNotPromoteAlreadyExpiredValidity() throws Exception {
+        FakeTaskRepository tasks = new FakeTaskRepository(task("MACRO_REVIEW_BATCH", "{}", "group-1"));
+        FakeProfileFactRepository facts = new FakeProfileFactRepository();
+        EvidenceAnalysisWorker worker = new EvidenceAnalysisWorker(tasks,
+                new FakeArtifactRepository(filePart("unused")), new FakeMessageRepository(), facts, null, "test-worker");
+        List<Map<String, Object>> window = List.of(
+                messageRow(301L, "u1", LocalDateTime.now(), "我今天在上班"));
+        var raw = MacroReviewService.parseJsonObject("""
+                {"observations":[
+                  {"subject_user_id":"u1","relation_target":"SELF","kind":"recent_state",
+                   "epistemic_type":"SELF_REPORTED","claim_key":"work_now","claim":"今天在上班",
+                   "polarity":"ASSERT","temporal_scope":"CURRENT_STATE","speech_act":"SELF_ASSERTION",
+                   "status":"CANDIDATE","confidence":0.9,"valid_until":"2020-01-01T00:00:00",
+                   "evidence_message_ids":[301]}],
+                 "stories":[],"group_state":[]}
+                """);
+
+        var validated = EvidenceAnalysisWorker.validateMacroResult(raw, window);
+        worker.persistMacroObservations(tasks.next, "group-1", window, validated,
+                new MacroReviewService.ReviewResult(raw, "test-model", "test-prompt", 1, 1));
+
+        assertTrue(facts.promotedCandidateIds.isEmpty());
+        assertEquals("CANDIDATE_STORED_INVALID_VALIDITY",
+                validated.path("observations").get(0).path("write_action").asText());
+        assertEquals(LocalDateTime.of(2020, 1, 1, 0, 0), facts.candidateInputs.get(0).validUntil());
     }
 
     @Test
@@ -216,6 +325,20 @@ class EvidenceAnalysisWorkerOneBotTest {
     private static AnalysisTask task(String type, String refs, String groupId) {
         return new AnalysisTask(1, "test-task", type, "PROCESSING", 1, groupId, "user-1", refs,
                 1, 3, LocalDateTime.now(), "test-worker", LocalDateTime.now().plusMinutes(1));
+    }
+
+    private static Map<String, Object> messageRow(long id, String userId, LocalDateTime createdAt, String content) {
+        Map<String, Object> row = new HashMap<>();
+        row.put("id", id);
+        row.put("user_id", userId);
+        row.put("sender_type", "USER");
+        row.put("is_robot_reply", false);
+        row.put("is_private", false);
+        row.put("availability_status", "AVAILABLE");
+        row.put("created_at", createdAt);
+        row.put("raw_content", content);
+        row.put("content", content);
+        return row;
     }
 
     private static MediaPartInput filePart(String fileId) {
@@ -245,6 +368,16 @@ class EvidenceAnalysisWorkerOneBotTest {
 
         @Override
         public Optional<AnalysisTask> claimNext(String owner, int leaseSeconds) {
+            return Optional.ofNullable(next);
+        }
+
+        @Override
+        public Optional<AnalysisTask> claimNextExcludingType(String owner, int leaseSeconds, String taskType) {
+            return Optional.ofNullable(next);
+        }
+
+        @Override
+        public Optional<AnalysisTask> claimNextForType(String owner, int leaseSeconds, String taskType) {
             return Optional.ofNullable(next);
         }
 
@@ -293,6 +426,40 @@ class EvidenceAnalysisWorkerOneBotTest {
         private ArtifactCall last() {
             assertFalse(artifacts.isEmpty());
             return artifacts.get(artifacts.size() - 1);
+        }
+    }
+
+    private static final class FakeProfileFactRepository extends ProfileFactRepository {
+        private long nextCandidateId = 1;
+        private final List<Long> promotedCandidateIds = new ArrayList<>();
+        private final List<ProfileFactCandidateInput> candidateInputs = new ArrayList<>();
+
+        private FakeProfileFactRepository() {
+            super(null);
+        }
+
+        @Override
+        public long upsertCandidate(ProfileFactCandidateInput input) {
+            candidateInputs.add(input);
+            return nextCandidateId++;
+        }
+
+        @Override
+        public void addEvidence(long candidateId, long messageId, String modality,
+                                String quoteOrSpanJson, String availabilitySnapshot, double weight) {
+        }
+
+        @Override
+        public long promoteCandidate(long candidateId, boolean explicitCorrection) {
+            promotedCandidateIds.add(candidateId);
+            return candidateId + 100;
+        }
+    }
+
+    private static final class FakeMessageRepository extends MessageRepository {
+        @Override
+        public BaseRepository.DatabaseResult<List<Map<String, Object>>> findMessageParts(long messageId) {
+            return BaseRepository.DatabaseResult.success(List.of());
         }
     }
 

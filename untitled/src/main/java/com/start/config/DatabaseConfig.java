@@ -23,12 +23,27 @@ public class DatabaseConfig {
     public static volatile boolean lastMigrationSuccess = false;
     private static HikariDataSource dataSource;
     private static boolean initialized = false;
+    private static boolean readOnlyPool;
 
     /**
      * 初始化数据库连接池（带重试机制）
      */
     public synchronized static void initConnectionPool() {
-        if (initialized) return;
+        initializeConnectionPool(false);
+    }
+
+    /** 初始化只读连接池；不执行建表或结构迁移。 */
+    public synchronized static void initReadOnlyConnectionPool() {
+        initializeConnectionPool(true);
+    }
+
+    private static void initializeConnectionPool(boolean readOnly) {
+        if (initialized) {
+            if (readOnlyPool != readOnly) {
+                throw new IllegalStateException("数据库连接池已使用不同读写模式初始化");
+            }
+            return;
+        }
 
         logger.info("正在初始化数据库连接池...");
 
@@ -48,6 +63,7 @@ public class DatabaseConfig {
 
                 // 配置HikariCP
                 HikariConfig config = new HikariConfig();
+                config.setReadOnly(readOnly);
 
                 String dbUrl = EnvResolver.resolve(props.getProperty("database.url",
                         "jdbc:mysql://localhost:3307/candybear_db" +
@@ -84,10 +100,11 @@ public class DatabaseConfig {
                 try (Connection conn = dataSource.getConnection()) {
                     logger.info("✅ 数据库连接池初始化成功");
                     logger.info("连接URL: {}", dbUrl);
-                    ensureTables(conn);
+                    initializeSchema(conn, readOnly);
                     logger.info("连接池状态: {}", getPoolStatus());
                 }
 
+                readOnlyPool = readOnly;
                 initialized = true;
                 return;
 
@@ -114,6 +131,10 @@ public class DatabaseConfig {
         }
 
         throw new IllegalStateException("数据库连接池初始化失败，机器人不能以不完整 schema 启动");
+    }
+
+    static void initializeSchema(Connection connection, boolean readOnly) {
+        if (!readOnly) ensureTables(connection);
     }
 
     /**
@@ -481,6 +502,15 @@ public class DatabaseConfig {
             CREATE TABLE IF NOT EXISTS macro_review_cursors (
                 group_id VARCHAR(64) PRIMARY KEY,
                 last_message_id BIGINT NOT NULL DEFAULT 0,
+                updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS macro_review_history_cursors (
+                group_id VARCHAR(64) PRIMARY KEY,
+                last_message_id BIGINT NOT NULL DEFAULT 0,
+                target_message_id BIGINT NOT NULL DEFAULT 0,
+                status VARCHAR(24) NOT NULL DEFAULT 'PENDING',
                 updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """,

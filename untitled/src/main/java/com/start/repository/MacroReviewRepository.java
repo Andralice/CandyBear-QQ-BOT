@@ -38,6 +38,74 @@ public final class MacroReviewRepository {
         }
     }
 
+    public HistoryCursor findHistoryCursor(String groupId) throws SQLException {
+        if (groupId == null || groupId.isBlank()) return HistoryCursor.missing();
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "SELECT last_message_id, target_message_id, status " +
+                             "FROM macro_review_history_cursors WHERE group_id=?")) {
+            ps.setString(1, groupId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next()
+                        ? new HistoryCursor(true, rs.getLong(1), rs.getLong(2), rs.getString(3))
+                        : HistoryCursor.missing();
+            }
+        }
+    }
+
+    /** Captures the historical end point once; later live messages stay on the live cursor. */
+    public void initializeHistoryCursor(String groupId, long targetMessageId) throws SQLException {
+        initializeHistoryCursor(groupId, targetMessageId, 0);
+    }
+
+    /** Captures the end point once and skips everything before the configured history boundary. */
+    public void initializeHistoryCursor(String groupId, long targetMessageId, long initialMessageId)
+            throws SQLException {
+        if (groupId == null || groupId.isBlank() || targetMessageId <= 0) return;
+        String sql = "INSERT INTO macro_review_history_cursors " +
+                "(group_id, last_message_id, target_message_id, status) VALUES (?, ?, ?, 'PENDING') " +
+                "ON DUPLICATE KEY UPDATE group_id=VALUES(group_id), " +
+                "last_message_id=GREATEST(last_message_id, VALUES(last_message_id)), " +
+                "target_message_id=CASE WHEN target_message_id<=0 THEN VALUES(target_message_id) " +
+                "ELSE target_message_id END";
+        try (Connection conn = dataSource.getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, groupId);
+            ps.setLong(2, Math.max(0, initialMessageId));
+            ps.setLong(3, targetMessageId);
+            ps.executeUpdate();
+        }
+    }
+
+    public void advanceHistoryCursor(String groupId, long messageId, boolean complete) throws SQLException {
+        if (groupId == null || groupId.isBlank() || messageId <= 0) return;
+        String sql = "UPDATE macro_review_history_cursors SET " +
+                "last_message_id=GREATEST(last_message_id, ?), " +
+                "status=CASE WHEN ? = 1 THEN 'COMPLETE' ELSE status END, " +
+                "updated_at=CURRENT_TIMESTAMP(3) WHERE group_id=?";
+        try (Connection conn = dataSource.getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, messageId);
+            ps.setBoolean(2, complete);
+            ps.setString(3, groupId);
+            ps.executeUpdate();
+        }
+    }
+
+    public String findLatestSuccessfulHistoryResultJson(String groupId) throws SQLException {
+        if (groupId == null || groupId.isBlank()) return null;
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "SELECT r.result_json FROM macro_review_runs r " +
+                             "JOIN model_analysis_tasks t ON t.id=r.task_id " +
+                             "WHERE r.group_id=? AND r.status='SUCCEEDED' " +
+                             "AND r.result_json IS NOT NULL AND t.task_type='MACRO_REVIEW_HISTORY_BATCH' " +
+                             "ORDER BY r.id DESC LIMIT 1")) {
+            ps.setString(1, groupId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getString(1) : null;
+            }
+        }
+    }
+
     public void saveRun(RunInput input) throws SQLException {
         String sql = "INSERT INTO macro_review_runs " +
                 "(task_id, group_id, from_message_id, to_message_id, processed_through_message_id, " +
@@ -71,4 +139,11 @@ public final class MacroReviewRepository {
                            int processedMessageCount, boolean windowTruncated, String status,
                            String resultJson, String modelName, String promptVersion,
                            Integer inputTokens, Integer outputTokens) {}
+
+    public record HistoryCursor(boolean initialized, long lastMessageId,
+                                long targetMessageId, String status) {
+        static HistoryCursor missing() {
+            return new HistoryCursor(false, 0, 0, "MISSING");
+        }
+    }
 }

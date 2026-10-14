@@ -2,21 +2,25 @@ package com.start.agent;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.start.config.BotConfig;
 import com.start.repository.MessageRepository;
 import com.start.service.AgnesMediaService;
+import com.start.vision.ImageUtils;
 
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.regex.Pattern;
 
-/** Conversation-scoped image lookup. Raw image inputs stay outside the LLM context. */
+/** Conversation-scoped image lookup; raw images enter the model only after explicit selection. */
 public class QueryImagesTool implements Tool {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Pattern CQ_IMAGE = Pattern.compile("\\[CQ:image,file=([^,\\]]+)[^\\]]*]");
+    private static final long DEFAULT_VISION_WAIT_MS = 1800L;
     private final MessageRepository messageRepo;
     private final String groupId, sessionId, callerId;
     private final LocalDateTime requestTime;
+    private final AgnesMediaService mediaService;
     private final Map<String, ImageReference> discovered = new HashMap<>();
 
     public QueryImagesTool(MessageRepository repo, String groupId) {
@@ -24,15 +28,26 @@ public class QueryImagesTool implements Tool {
     }
 
     public QueryImagesTool(MessageRepository repo, String groupId, String sessionId, String callerId) {
-        this(repo, groupId, sessionId, callerId, LocalDateTime.now());
+        this(repo, groupId, sessionId, callerId, LocalDateTime.now(), null);
     }
 
     QueryImagesTool(MessageRepository repo, String groupId, String sessionId, String callerId, LocalDateTime time) {
+        this(repo, groupId, sessionId, callerId, time, null);
+    }
+
+    public QueryImagesTool(MessageRepository repo, String groupId, String sessionId, String callerId,
+                           AgnesMediaService mediaService) {
+        this(repo, groupId, sessionId, callerId, LocalDateTime.now(), mediaService);
+    }
+
+    QueryImagesTool(MessageRepository repo, String groupId, String sessionId, String callerId,
+                    LocalDateTime time, AgnesMediaService mediaService) {
         this.messageRepo = repo;
         this.groupId = groupId;
         this.sessionId = sessionId;
         this.callerId = callerId;
         this.requestTime = time;
+        this.mediaService = mediaService;
     }
 
     @Override public String getName() { return "query_past_images"; }
@@ -40,8 +55,8 @@ public class QueryImagesTool implements Tool {
     @Override public String getDescription() {
         return "自主查找当前会话图片。可无关键词搜索，默认当前用户五分钟内的图；可按QQ、关键词、回复消息ID或游标定位。"
                 + "查旧图用 include_older=true；查糖果熊生成的图必须用 user_id=candybear。返回每张图的 image_id、消息内 image_index、发送者、完整时间、"
-                + "描述和原图来源状态，供 generate_image 的 reference_image_ids 使用。没有明确发送者时，按消息时间、引用关系和 image_index 判断，必要时用 user_id=all；"
-                + "原图未实际下载前不保证可用；多候选须判断指代，超过五分钟先询问用户。";
+                + "描述、vision_status（PENDING/PROCESSING/SUCCEEDED/FAILED 等）和原图来源状态，供主模型判断是否要等待及供 generate_image 的 reference_image_ids 使用。没有明确发送者时，按消息时间、引用关系和 image_index 判断，必要时用 user_id=all；"
+                + "多候选先判断指代，再次调用时将选中的 image_id 放入 image_ids，主模型会直接收到这些原图；超过五分钟的图片必须先询问用户并在 confirmed_image_ids 中确认。";
     }
 
     @Override public Map<String, Object> getParameters() {
@@ -53,7 +68,41 @@ public class QueryImagesTool implements Tool {
         p.put("include_older", Map.of("type", "boolean", "description", "自主搜索五分钟之前图片，默认false；找到后仍须用户确认"));
         p.put("before_id", Map.of("type", "string", "description", "上一页 next_cursor，可继续查找"));
         p.put("limit", Map.of("type", "integer", "description", "消息条数，默认5，最多10；一条消息可有多张图片"));
+        p.put("wait_for_vision", Map.of("type", "boolean", "description", "图片会影响当前回答时默认等待识图短暂完成；明确不需要画面内容时可传false"));
+        p.put("vision_wait_ms", Map.of("type", "integer", "description", "最多等待识图毫秒数，默认1800，最多4000"));
+        p.put("image_ids", Map.of("type", "array", "items", Map.of("type", "string"), "maxItems", 3,
+                "description", "从此前查询结果中选择要让主模型直接查看的图片 image_id，最多3张"));
+        p.put("confirmed_image_ids", Map.of("type", "array", "items", Map.of("type", "string"), "maxItems", 3,
+                "description", "用户明确确认可查看的较早图片 image_id"));
         return Map.of("type", "object", "properties", p);
+    }
+
+    @Override public ExecutionResult executeForModel(Map<String, Object> args) {
+        List<String> ids = stringList(args.get("image_ids"));
+        if (ids.isEmpty()) return Tool.super.executeForModel(args);
+        if (ids.size() > 3) return new ExecutionResult("一次最多查看3张原图", List.of());
+        if (!BotConfig.isBaiLianMultimodalEnabled()) {
+            return new ExecutionResult("主模型多模态输入未启用，原图没有发送；请检查 BAILIAN_MULTIMODAL_ENABLED。", List.of());
+        }
+        if (mediaService == null) return new ExecutionResult("当前图片查询未配置原图读取服务", List.of());
+        try {
+            List<String> uniqueIds = new ArrayList<>(new LinkedHashSet<>(ids));
+            List<String> confirmed = stringList(args.get("confirmed_image_ids"));
+            List<String> dataUris = resolveInputs(uniqueIds, confirmed, mediaService);
+            List<ImageAttachment> attachments = new ArrayList<>();
+            for (int i = 0; i < dataUris.size(); i++) {
+                String id = uniqueIds.get(i);
+                for (String prepared : ImageUtils.prepareMultimodalDataUris(List.of(dataUris.get(i)))) {
+                    attachments.add(new ImageAttachment(id, prepared));
+                }
+            }
+            if (attachments.isEmpty()) return new ExecutionResult("所选图片没有可发送的原图", List.of());
+            return new ExecutionResult("已按 image_id 选中原图，图像内容已附在本次工具结果中；请直接查看后回答："
+                    + String.join("、", uniqueIds), attachments);
+        } catch (Exception e) {
+            return new ExecutionResult("读取所选原图失败，请确认图片仍可用后重试（"
+                    + e.getClass().getSimpleName() + "）", List.of());
+        }
     }
 
     @Override public String execute(Map<String, Object> args) {
@@ -73,6 +122,21 @@ public class QueryImagesTool implements Tool {
                     Boolean.parseBoolean(value(args.get("include_older"))), requestTime,
                     number(args.get("before_id"), 0), (int) Math.max(1, Math.min(10, number(args.get("limit"), 5))));
             if (!result.isSuccess() || result.getData() == null) return "图片查询失败，不能据此判定没有图片";
+            boolean waitForVision = !args.containsKey("wait_for_vision")
+                    || Boolean.parseBoolean(value(args.get("wait_for_vision")));
+            long waitMs = Math.max(0, Math.min(4000, number(args.get("vision_wait_ms"), DEFAULT_VISION_WAIT_MS)));
+            if (waitForVision && hasPendingVision(result.getData()) && waitMs > 0) {
+                long deadline = System.currentTimeMillis() + waitMs;
+                do {
+                    long remaining = deadline - System.currentTimeMillis();
+                    if (remaining <= 0) break;
+                    Thread.sleep(Math.min(200, remaining));
+                    result = messageRepo.searchImageMessages(groupId, sessionId, sender, value(args.get("keyword")),
+                            number(args.get("message_id"), 0), value(args.get("provider_message_id")),
+                            Boolean.parseBoolean(value(args.get("include_older"))), requestTime,
+                            number(args.get("before_id"), 0), (int) Math.max(1, Math.min(10, number(args.get("limit"), 5))));
+                } while (result.isSuccess() && result.getData() != null && hasPendingVision(result.getData()));
+            }
             List<Map<String, Object>> items = new ArrayList<>();
             long cursor = 0;
             for (Map<String, Object> row : result.getData()) {
@@ -90,6 +154,7 @@ public class QueryImagesTool implements Tool {
                     item.put("sent_at", ref.sentAt() == null ? "UNKNOWN" : ref.sentAt().toString());
                     item.put("requires_confirmation", requiresConfirmation(ref));
                     item.put("description", ref.description());
+                    item.put("vision_status", visionStatus(row, ref.imageIndex()));
                     item.put("source_status", hasUsableSource(ref) ? "RECORDED_NOT_DOWNLOADED" : "UNAVAILABLE");
                     items.add(item);
                 }
@@ -180,7 +245,9 @@ public class QueryImagesTool implements Tool {
                 : row.get("created_at") instanceof LocalDateTime dt ? dt : null;
         int index = 0;
         for (ImageCandidate image : ordered) {
-            String desc = image.description().isBlank() ? value(row.get("content")) : image.description();
+            // The message text is not a description of the attached picture.
+            // Falling back to it made "你看得到吗" look like visual evidence.
+            String desc = image.description();
             // CQ paths and large text are not useful image descriptions.
             desc = CQ_IMAGE.matcher(desc).replaceAll("[图片]");
             if (desc.length() > 600) desc = desc.substring(0, 600) + "…";
@@ -198,6 +265,32 @@ public class QueryImagesTool implements Tool {
     }
     private static String value(Object value) { return value == null ? "" : String.valueOf(value).trim(); }
 
+    private static String visionStatus(Map<String, Object> row, int imageIndex) {
+        String encoded = value(row.get("image_vision_status"));
+        if (!encoded.isBlank()) {
+            for (String entry : encoded.split(",")) {
+                String[] pair = entry.split(":", 2);
+                if (pair.length == 2 && number(pair[0], -1) == imageIndex) return pair[1];
+            }
+        }
+        String legacy = value(row.get("availability_status"));
+        return legacy.isBlank() ? "UNKNOWN" : legacy;
+    }
+
+    private static boolean hasPendingVision(List<Map<String, Object>> rows) {
+        for (Map<String, Object> row : rows) {
+            String encoded = value(row.get("image_vision_status"));
+            if (encoded.isBlank()) continue;
+            for (String entry : encoded.split(",")) {
+                String[] pair = entry.split(":", 2);
+                if (pair.length == 2 && ("PENDING".equalsIgnoreCase(pair[1])
+                        || "PROCESSING".equalsIgnoreCase(pair[1])
+                        || "RETRY".equalsIgnoreCase(pair[1]))) return true;
+            }
+        }
+        return false;
+    }
+
     private static boolean isHttpUrl(String value) {
         if (value == null) return false;
         String trimmed = value.trim().toLowerCase(Locale.ROOT);
@@ -206,6 +299,15 @@ public class QueryImagesTool implements Tool {
 
     private static long number(Object value, long fallback) {
         try { return Long.parseLong(value(value)); } catch (Exception ignored) { return fallback; }
+    }
+    private static List<String> stringList(Object raw) {
+        if (!(raw instanceof Collection<?> values)) return List.of();
+        List<String> result = new ArrayList<>();
+        for (Object value : values) {
+            String item = value(value);
+            if (!item.isBlank()) result.add(item);
+        }
+        return result;
     }
     private record ImageCandidate(String source, String description) {}
     private record ImageReference(String id, long messageId, LocalDateTime sentAt, String source,
