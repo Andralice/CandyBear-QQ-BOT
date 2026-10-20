@@ -160,15 +160,11 @@ class ManualMessageReplayServiceTest {
         var start = replay.start("437625485", 6, 6);
         var result = replay.inject(start.replayId(), 6, true);
 
-        assertEquals("PROBABILISTIC", result.triggerEvent());
-        assertTrue(result.proactiveCandidate());
-        assertTrue(result.modelCallMade());
-        assertEquals("REPLY", result.decision());
-        assertTrue(turns.get(0).allowSilence());
-        assertTrue(turns.get(0).prompt().contains("旧主动话题关键词命中的候选"));
-        assertTrue(result.modelUserText().contains("大家最近推荐什么游戏？"));
-        assertTrue(result.turnEvidence().contains("大家最近推荐什么游戏？"));
-        assertEquals(1, generated.get());
+        assertEquals("NOTHING", result.triggerEvent());
+        assertFalse(result.proactiveCandidate());
+        assertFalse(result.modelCallMade());
+        assertEquals("NO_CANDIDATE", result.decision());
+        assertEquals(0, generated.get());
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement();
              var rows = statement.executeQuery("SELECT COUNT(*) FROM messages")) {
             rows.next();

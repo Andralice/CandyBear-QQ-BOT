@@ -13,7 +13,7 @@ class ProactiveInterjectionPolicyTest {
 
     @Test
     void skipsACandidateWhileTheGroupIsBusy() {
-        var busy = new ConversationMetrics.Snapshot(6, 0, 5);
+        var busy = new ConversationMetrics.Snapshot(13, 0, 5);
 
         var decision = policy.assess("这首歌的编曲真的很好听", busy, false);
 
@@ -34,7 +34,7 @@ class ProactiveInterjectionPolicyTest {
     @Test
     void delayedCandidateIsRejectedWhenTheGroupBecomesBusy() {
         var quiet = new ConversationMetrics.Snapshot(1, 0, 1);
-        var busy = new ConversationMetrics.Snapshot(5, 0, 5);
+        var busy = new ConversationMetrics.Snapshot(13, 0, 5);
 
         assertTrue(policy.remainsAppropriate(quiet));
         assertFalse(policy.remainsAppropriate(busy));

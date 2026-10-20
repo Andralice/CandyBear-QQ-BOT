@@ -224,18 +224,11 @@ class WebDashboardReplayApiTest {
 
         assertEquals(200, candidate.statusCode());
         JsonNode response = JSON.readTree(candidate.body());
-        assertEquals("PROBABILISTIC", response.path("triggerEvent").asText());
-        assertTrue(response.path("proactiveCandidate").asBoolean());
-        assertTrue(response.path("modelCallMade").asBoolean());
-        assertEquals("SILENT", response.path("decision").asText());
-        assertEquals("", response.path("reply").asText());
-        assertTrue(generatedTurn.get().allowSilence());
-        assertTrue(generatedTurn.get().prompt().contains("旧主动话题关键词命中的候选"));
-        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement();
-             var rows = statement.executeQuery("SELECT COUNT(*) FROM messages")) {
-            rows.next();
-            assertEquals(2, rows.getInt(1));
-        }
+        assertEquals("NOTHING", response.path("triggerEvent").asText());
+        assertFalse(response.path("proactiveCandidate").asBoolean());
+        assertFalse(response.path("modelCallMade").asBoolean());
+        assertEquals("NO_CANDIDATE", response.path("decision").asText());
+        assertEquals(0, generationCalls.get());
     }
 
     @Test

@@ -8,6 +8,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConversationInterpreterPromptTest {
@@ -99,7 +100,7 @@ class ConversationInterpreterPromptTest {
     }
 
     @Test
-    void legacyTopicKeywordCreatesOnlyAnOptionalCandidateForTheMainModel() {
+    void legacyTopicKeywordDoesNotCreateAProactiveCandidate() {
         var store = new InMemoryConversationStateStore(
                 new java.util.HashMap<>(), new java.util.HashMap<>(),
                 new java.util.HashMap<>(), new java.util.HashMap<>());
@@ -118,15 +119,11 @@ class ConversationInterpreterPromptTest {
         var openGroupInvitation = interpreter.interpret(
                 "777", "10002", "丙", "大家最近推荐什么游戏？", List.of());
 
-        assertEquals(ConversationEvent.PROBABILISTIC, addressedToSomeoneUnknown.event());
-        assertEquals(ConversationEvent.PROBABILISTIC, topicStatement.event());
-        assertEquals(ConversationEvent.PROBABILISTIC, openGroupInvitation.event());
+        assertEquals(ConversationEvent.NOTHING, addressedToSomeoneUnknown.event());
+        assertEquals(ConversationEvent.NOTHING, topicStatement.event());
+        assertEquals(ConversationEvent.NOTHING, openGroupInvitation.event());
         for (var candidate : List.of(addressedToSomeoneUnknown, topicStatement, openGroupInvitation)) {
-            assertTrue(candidate.event().allowsSilence());
-            assertTrue(candidate.prompt().contains("只表示话题可能相关"));
-            assertTrue(candidate.prompt().contains("明确是在与其他群友对话"));
-            assertTrue(candidate.prompt().contains("开放群聊话题或邀请"));
-            assertTrue(candidate.prompt().contains("<NO_REPLY>"));
+            assertNull(candidate.prompt());
         }
     }
 }
