@@ -202,6 +202,11 @@ public class PromptBuilder {
             sb.append("\n\n").append(ctx.turnEvidence);
         }
 
+        if (ctx.groupId != null && ctx.pastGroupMemory != null && !ctx.pastGroupMemory.isBlank()) {
+            sb.append("\n\n【与本轮相关的群内过往线索】\n").append(ctx.pastGroupMemory)
+                    .append("\n这些是过去群聊的有限线索，只能按附带的原始发言理解。不得把它们当成当前状态、糖果熊自己的经历或群友对本轮的暗示；不得主动复述无关个人信息，也不得据此补写对方没说过的动机、关系或后续。当前消息没有明确承接这些线索时，不要硬套；证据不够就按当前可见内容回应或询问。");
+        }
+
         // 游戏状态
         if (ctx.spyGameDesc != null && !ctx.spyGameDesc.isEmpty()) sb.append(ctx.spyGameDesc);
         if (ctx.numberGameDesc != null && !ctx.numberGameDesc.isEmpty()) sb.append(ctx.numberGameDesc);

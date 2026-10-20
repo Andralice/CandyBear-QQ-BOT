@@ -313,6 +313,63 @@ public class DatabaseConfig {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """,
             """
+            CREATE TABLE IF NOT EXISTS group_conversation_sessions (
+                session_id VARCHAR(191) PRIMARY KEY,
+                group_id VARCHAR(64) NOT NULL,
+                thread_id VARCHAR(128) NOT NULL,
+                lifecycle_state VARCHAR(32) NOT NULL,
+                bot_position VARCHAR(40) NOT NULL,
+                topic VARCHAR(255) NULL,
+                last_message_id VARCHAR(128) NULL,
+                last_bot_message_id VARCHAR(128) NULL,
+                close_reason VARCHAR(128) NULL,
+                last_activity_at BIGINT NOT NULL DEFAULT 0,
+                last_bot_message_at BIGINT NOT NULL DEFAULT 0,
+                participant_ids TEXT NULL,
+                evidence_message_ids TEXT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_group_session (group_id, lifecycle_state),
+                INDEX idx_session_activity (last_activity_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS group_conversation_evidence (
+                evidence_id VARCHAR(191) PRIMARY KEY,
+                session_id VARCHAR(191) NOT NULL,
+                evidence_type VARCHAR(40) NOT NULL,
+                source_message_id VARCHAR(128) NULL,
+                image_message_id VARCHAR(128) NULL,
+                image_index INT NOT NULL DEFAULT 0,
+                content TEXT NULL,
+                source_url VARCHAR(1000) NULL,
+                confidence DECIMAL(5,4) NOT NULL DEFAULT 0,
+                verification_status VARCHAR(24) NOT NULL,
+                created_at BIGINT NOT NULL,
+                allow_summary TINYINT(1) NOT NULL DEFAULT 0,
+                INDEX idx_evidence_session (session_id, created_at),
+                INDEX idx_evidence_source (source_message_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS group_conversation_summaries (
+                session_id VARCHAR(191) PRIMARY KEY,
+                group_id VARCHAR(64) NOT NULL,
+                thread_id VARCHAR(128) NOT NULL,
+                status VARCHAR(24) NOT NULL,
+                summary_text TEXT NULL,
+                confirmed_content TEXT NULL,
+                uncertain_content TEXT NULL,
+                unresolved_questions TEXT NULL,
+                close_reason VARCHAR(128) NULL,
+                evidence_message_ids TEXT NULL,
+                error_detail TEXT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_summary_group (group_id, updated_at),
+                INDEX idx_summary_status (status, updated_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """,
+            """
             CREATE TABLE IF NOT EXISTS model_analysis_tasks (
                 id BIGINT AUTO_INCREMENT PRIMARY KEY,
                 task_key VARCHAR(255) NOT NULL,

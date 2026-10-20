@@ -176,6 +176,21 @@ class PromptBuilderGroundingTest {
     }
 
     @Test
+    void pastGroupMemoryIsPresentedAsBoundedEvidenceAndCannotBecomeCurrentFact() {
+        PromptContext context = new PromptContext()
+                .nickname("群友乙")
+                .userId("1281472807")
+                .groupId("437625485")
+                .pastGroupMemory("source_message_id=12 original_text=周六去南站");
+
+        String prompt = new PromptBuilder().build("自定义提示词", context);
+
+        assertTrue(prompt.contains("【与本轮相关的群内过往线索】"));
+        assertTrue(prompt.contains("不得把它们当成当前状态、糖果熊自己的经历"));
+        assertTrue(prompt.contains("不得据此补写对方没说过的动机"));
+    }
+
+    @Test
     void explicitMentionKeepsConversationEvidenceWithoutDynamicSilenceDecisionBlock() {
         PromptContext context = new PromptContext()
                 .nickname("群友乙")

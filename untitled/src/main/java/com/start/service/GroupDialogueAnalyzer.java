@@ -45,12 +45,12 @@ public final class GroupDialogueAnalyzer {
             """;
 
     private static final String OPPORTUNITY_SYSTEM = """
-            你是群聊第三人参与价值分析器。只判断：在糖果熊当前没有天然话权的前提下，是否值得作为第三人主动插话；不要判断谁正在和糖果熊对话，也不生成最终回复。
-            群聊安静本身不是插话理由；冷场只表示重新评估，不要为了活跃气氛发泛泛开场白、问候或追问。
-            should_interject 仅在以下条件同时满足时为 true：群友提出尚未解决的开放问题或明确卡住；事情尚未被群友或其他机器人有效接手；糖果熊此刻能给出具体可靠而非泛泛的贡献；intrusion_risk=LOW 且 contribution_confidence 至少为 0.70。
-            正常进行中的两人排查、私事、普通闲聊、只提到糖果熊、明确 @ 其他人且无人卡住，都应为 false。
-            句首称呼第三方并继续使用“你”时，视为群友之间的对话，不是糖果熊的插话机会。
-            concrete_contribution 必须写出实际可贡献的内容，用于验证不是只靠关键词触发。beneficiary_user_id 必须来自输入。
+            你是糖果熊的群聊兴趣与参与判断器。只判断：在最新一句没有明确把糖果熊当作第二人时，糖果熊是否会因为自己的性格、兴趣、长期事实或当前可确认的知识而自然想参与；不要生成最终回复。
+            糖果熊的性格：安静、文艺、内向、思考型；偏好文学、音乐、艺术、自然、哲学，也会关注群里真实出现的游戏和网络话题。她不是每个话题都感兴趣，但有兴趣时可以用一句简短、具体、像群友的反应加入。
+            should_interject 可以在以下任一条件成立且证据足够时为 true：话题与糖果熊的兴趣或已知事实有明确交集；群友分享了她能理解或补充的内容；这是自然的接梗、问候、情绪回应或轻松闲聊，糖果熊会有真实反应。不能要求群友先卡住、提问或等待帮助。
+            仍然必须为 false 的情况：明确 @ 或回复其他人且内容明显只对其他人说；私密或敏感的两人对话；群友已经明确拒绝插话；糖果熊没有可靠知识或具体感受可说；只能靠猜测图片、人物、经历或事实；插话会打断正在进行的严肃交流。
+            普通闲聊不自动为 false；先判断糖果熊是否有兴趣和自然反应，再判断是否需要保持安静。intrusion_risk=HIGH 时必须为 false；MEDIUM 可以在贡献具体且简短时考虑；contribution_confidence 至少为 0.55。
+            open_need 可以为空。concrete_contribution 必须写出糖果熊此刻实际能贡献的兴趣点、事实或情绪反应，用于验证不是只靠关键词触发。beneficiary_user_id 有明确对象时填写，否则留空。
             """;
 
     private static final JsonNode RELATION_FORMAT = parseConstant("""
@@ -245,6 +245,11 @@ public final class GroupDialogueAnalyzer {
         ObjectNode bot = root.putObject("bot_identity");
         bot.put("user_id", String.valueOf(BotConfig.getBotQq()));
         bot.put("nickname", BotConfig.getBotName());
+        ObjectNode personality = bot.putObject("personality");
+        personality.putArray("traits").add("安静").add("文艺").add("内向").add("思考型");
+        personality.putArray("interests").add("文学").add("音乐").add("艺术")
+                .add("自然").add("哲学").add("群内真实出现的游戏和网络话题");
+        personality.put("participation_rule", "有兴趣或有可靠知识时可以自然参与；没有事实和具体感受时保持安静");
         ArrayNode array = root.putArray("messages");
         if (messages == null || messages.isEmpty()) return root.toString();
 

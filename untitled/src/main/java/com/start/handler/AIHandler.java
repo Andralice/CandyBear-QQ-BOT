@@ -23,6 +23,10 @@ import com.start.service.GroupCognitionMode;
 import com.start.service.GroupAddressingEvidence;
 import com.start.service.GroupDialogueAnalyzer;
 import com.start.service.GroupDialoguePlan;
+import com.start.service.GroupConversationSession;
+import com.start.service.GroupConversationEvidence;
+import com.start.service.GroupConversationSessionManager;
+import com.start.service.GroupConversationSessionSummaryService;
 import com.start.service.LinkPreviewService;
 import com.start.service.MainModelPool;
 import com.start.service.ProactiveFeedbackDetector;
@@ -38,6 +42,7 @@ import com.start.runtime.ConversationRuntime;
 import com.start.runtime.conversation.ConversationRuntimeConfig;
 import com.start.runtime.conversation.ConversationSession;
 import com.start.runtime.RuntimeEvent;
+import com.start.thread.SceneState;
 import com.start.runtime.trace.WebDashboardListener;
 import com.start.util.MessageUtil;
 import com.start.vision.ImageUtils;
@@ -86,6 +91,8 @@ public class AIHandler implements MessageHandler {
     private final ConversationRuntime runtime;
     private final ConversationRuntimeConfig config;
     private final GroupDialogueAnalyzer dialogueAnalyzer;
+    private final GroupConversationSessionManager sessionManager;
+    private final GroupConversationSessionSummaryService sessionSummaryService;
     /** 长期记忆仓库：rate_limited 时的快速记忆查询用（不调 LLM） */
     private final LongTermMemoryRepository memoryRepo = new LongTermMemoryRepository(DatabaseConfig.getDataSource());
     private final Random random = new Random();
@@ -129,12 +136,27 @@ public class AIHandler implements MessageHandler {
     public AIHandler(BaiLianService aiService, GroupSerialExecutor groupExecutor, ConversationManager conversationManager,
                      ConversationInterpreter interpreter, ConversationRuntime runtime, ConversationRuntimeConfig config) {
         this(aiService, groupExecutor, conversationManager, interpreter, runtime, config,
-                GroupDialogueAnalyzer.fromConfig());
+                GroupDialogueAnalyzer.fromConfig(), new GroupConversationSessionManager(), null);
     }
 
     public AIHandler(BaiLianService aiService, GroupSerialExecutor groupExecutor, ConversationManager conversationManager,
                      ConversationInterpreter interpreter, ConversationRuntime runtime, ConversationRuntimeConfig config,
                      GroupDialogueAnalyzer dialogueAnalyzer) {
+        this(aiService, groupExecutor, conversationManager, interpreter, runtime, config,
+                dialogueAnalyzer, new GroupConversationSessionManager(), null);
+    }
+
+    public AIHandler(BaiLianService aiService, GroupSerialExecutor groupExecutor, ConversationManager conversationManager,
+                     ConversationInterpreter interpreter, ConversationRuntime runtime, ConversationRuntimeConfig config,
+                     GroupDialogueAnalyzer dialogueAnalyzer, GroupConversationSessionManager sessionManager) {
+        this(aiService, groupExecutor, conversationManager, interpreter, runtime, config,
+                dialogueAnalyzer, sessionManager, null);
+    }
+
+    public AIHandler(BaiLianService aiService, GroupSerialExecutor groupExecutor, ConversationManager conversationManager,
+                     ConversationInterpreter interpreter, ConversationRuntime runtime, ConversationRuntimeConfig config,
+                     GroupDialogueAnalyzer dialogueAnalyzer, GroupConversationSessionManager sessionManager,
+                     GroupConversationSessionSummaryService sessionSummaryService) {
         this.aiService = aiService;
         this.moodService = aiService.getMoodService();
         this.groupExecutor = groupExecutor;
@@ -143,6 +165,8 @@ public class AIHandler implements MessageHandler {
         this.runtime = runtime;
         this.config = config;
         this.dialogueAnalyzer = dialogueAnalyzer;
+        this.sessionManager = sessionManager == null ? new GroupConversationSessionManager() : sessionManager;
+        this.sessionSummaryService = sessionSummaryService;
     }
 
     @Override
@@ -253,10 +277,11 @@ public class AIHandler implements MessageHandler {
         String gid = String.valueOf(groupId);
         String uid = String.valueOf(userId);
         GroupCognitionMode cognitionMode = dialogueAnalyzer.modeFor(gid);
+        List<BaiLianService.PublicMessage> publicHistory = aiService.getPublicGroupHistorySnapshot(gid, 12);
 
         // A new group message means an earlier interjection candidate is no longer timely.
         cancelPendingProactive(gid);
-        cancelPendingCognition(gid);
+        cancelPendingCognition(gid, uid);
 
         if (cognitionMode == GroupCognitionMode.SHADOW && !plainText.isBlank()) {
             scheduleShadowCognition(gid, uid, messageId, plainText);
@@ -298,7 +323,29 @@ public class AIHandler implements MessageHandler {
 
         // Thread 更新：每条群消息都维护群级 Thread 状态，保持群级顺序且不阻塞 WebSocket 线程。
         groupExecutor.execute(gid, () -> {
-            aiService.processThreadMessage(gid, uid, plainText);
+            if (sessionSummaryService != null) {
+                List<BaiLianService.PublicMessage> summaryHistory =
+                        aiService.getPublicGroupHistorySnapshot(gid, 30);
+                for (GroupConversationSession closed : sessionManager.expireAndCollect(System.currentTimeMillis())) {
+                    sessionSummaryService.schedule(closed, summaryHistory);
+                }
+            }
+            SceneState scene = aiService.processThreadMessage(gid, uid, plainText);
+            String threadId = resolveSessionThreadId(scene, uid, !plainText.isBlank());
+            boolean replyToBot = isReplyToBot(replyId, publicHistory);
+            boolean botMentioned = ats.contains(BotConfig.getBotQq());
+            boolean addressedOther = ats.stream().anyMatch(q -> q != null && q != BotConfig.getBotQq())
+                    || GroupAddressingEvidence.addressesOtherThanBot(plainText);
+            GroupConversationSession.Decision sessionDecision = sessionManager.observe(new GroupConversationSession.Observation(
+                    gid, threadId, messageId, uid, plainText, botMentioned, replyToBot,
+                    addressedOther, !imageInfos.isEmpty()));
+            recordObservedImagePlaceholders(gid, messageId, imageInfos);
+            if (sessionDecision.action() == GroupConversationSession.Action.CLOSE
+                    && sessionSummaryService != null) {
+                sessionManager.get(gid, threadId).ifPresent(session ->
+                        sessionSummaryService.schedule(session,
+                                aiService.getPublicGroupHistorySnapshot(gid, 30)));
+            }
         });
 
         // 明确触发（#ai / !ai / @）
@@ -325,7 +372,6 @@ public class AIHandler implements MessageHandler {
         ConversationInterpreter.InterpretResult result = interpreter.interpret(
                 gid, uid, senderNick, plainText, rawMessage, ats);
 
-        List<BaiLianService.PublicMessage> publicHistory = aiService.getPublicGroupHistorySnapshot(gid, 12);
         boolean addressGuardRejected = wasAddressGuardRejected(
                 result, plainText, messageId, replyId, ats, publicHistory);
 
@@ -343,18 +389,9 @@ public class AIHandler implements MessageHandler {
                 && hasBotTurnEvidenceOrUnresolvedReply(plainText, messageId, replyId, ats, publicHistory)
                 && aiService.isWithinFollowUpWindow(gid, uid);
 
-        // 程序只筛出有协议或语言指向迹象的模糊候选；是否真的该接话交给同一次主模型调用。
-        // 普通群聊仍在这里直接结束，不为每条消息额外调用模型。
-        if (result.isNothing() && !imageFollowUp && !mentionsAnotherUser
-                && !addressGuardRejected
-                && isImplicitGroupCandidate(plainText, messageId, replyId,
-                !imageInfos.isEmpty(), conv, publicHistory)) {
-            result = ConversationInterpreter.InterpretResult.of(
-                    ConversationEvent.IMPLICIT_CANDIDATE, plainText);
-        }
-
-        // Keep protocol/direct and explicit await behavior intact. ENFORCE lets cognition
-        // decide every ordinary message, including messages that matched legacy keywords.
+        // Keep protocol/direct and explicit await behavior intact. In ENFORCE mode,
+        // every ordinary text message reaches cognition; legacy keyword and implicit
+        // candidate gates must not decide whether the model gets to judge the turn.
         if (cognitionMode.controlsOrdinaryTriggers()
                 && !plainText.isBlank()
                 && !imageFollowUp
@@ -431,6 +468,7 @@ public class AIHandler implements MessageHandler {
                 boolean delivered = sendSplitGroupReplies(bot, groupId, shortReply, fastSessionId);
                 if (delivered) {
                     recordDeliveredReaction(gid, uid);
+                    markSessionBotReply(gid, conv);
                 }
                 // 留痕：让后续 Interpreter 能识别到这条 ai_reply
                 // （否则 fast path 回复后的 3 分钟内，AI_COMMENTED 事件识别不到）
@@ -448,6 +486,7 @@ public class AIHandler implements MessageHandler {
                     com.start.service.SessionId.groupConversation(gid, uid));
             if (delivered) {
                 recordDeliveredReaction(gid, uid);
+                markSessionBotReply(gid, conv);
             }
             conversationManager.remove(gid, uid);
             logDecision(gid, uid, result.event().name(), delivered ? "REPLY" : "SILENT",
@@ -530,10 +569,15 @@ public class AIHandler implements MessageHandler {
         if (task != null) task.cancel(false);
     }
 
-    private void cancelPendingCognition(String gid) {
-        pendingCognitionIds.remove(gid);
-        ScheduledFuture<?> task = pendingCognitionTasks.remove(gid);
+    private void cancelPendingCognition(String gid, String uid) {
+        String key = cognitionKey(gid, uid);
+        pendingCognitionIds.remove(key);
+        ScheduledFuture<?> task = pendingCognitionTasks.remove(key);
         if (task != null) task.cancel(false);
+    }
+
+    private static String cognitionKey(String gid, String uid) {
+        return String.valueOf(gid) + "\u001f" + String.valueOf(uid);
     }
 
     /** Debounces ordinary group traffic, then lets the two cognition tasks run in parallel. */
@@ -545,15 +589,16 @@ public class AIHandler implements MessageHandler {
 
     private void scheduleShadowCognition(String gid, String uid, String messageId, String plainText) {
         long candidateId = cognitionSequence.incrementAndGet();
-        pendingCognitionIds.put(gid, candidateId);
+        String cognitionKey = cognitionKey(gid, uid);
+        pendingCognitionIds.put(cognitionKey, candidateId);
         ScheduledFuture<?> task = proactiveScheduler.schedule(() -> {
-            if (pendingCognitionIds.getOrDefault(gid, -1L) != candidateId) return;
-            pendingCognitionTasks.remove(gid);
+            if (pendingCognitionIds.getOrDefault(cognitionKey, -1L) != candidateId) return;
+            pendingCognitionTasks.remove(cognitionKey);
             List<BaiLianService.PublicMessage> snapshot = aiService.getPublicGroupHistorySnapshot(gid, 12);
             if (snapshot.isEmpty()) return;
             String expectedLatestMessageId = latestHumanMessageId(snapshot);
             dialogueAnalyzer.analyzeAsync(snapshot).whenComplete((plan, error) -> {
-                if (!pendingCognitionIds.remove(gid, candidateId)) return;
+                if (!pendingCognitionIds.remove(cognitionKey, candidateId)) return;
                 if (!expectedLatestMessageId.equals(latestHumanMessageId(
                         aiService.getPublicGroupHistorySnapshot(gid, 12)))) return;
                 recordShadowCognition(gid, uid, messageId, plainText, plan, error);
@@ -566,7 +611,7 @@ public class AIHandler implements MessageHandler {
                 }
             });
         }, PROACTIVE_SETTLE_MS, TimeUnit.MILLISECONDS);
-        pendingCognitionTasks.put(gid, task);
+        pendingCognitionTasks.put(cognitionKey, task);
     }
 
     private void scheduleCognitionDecision(Main bot, long groupId, String gid, String uid, String nickname,
@@ -575,10 +620,11 @@ public class AIHandler implements MessageHandler {
                                            boolean idleAssessment) {
         long candidateId = cognitionSequence.incrementAndGet();
         long expectedRevision = conv.getMessageRevision();
-        pendingCognitionIds.put(gid, candidateId);
+        String cognitionKey = cognitionKey(gid, uid);
+        pendingCognitionIds.put(cognitionKey, candidateId);
 
         ScheduledFuture<?> task = proactiveScheduler.schedule(() -> {
-            if (pendingCognitionIds.getOrDefault(gid, -1L) != candidateId) return;
+            if (pendingCognitionIds.getOrDefault(cognitionKey, -1L) != candidateId) return;
             List<BaiLianService.PublicMessage> snapshot = aiService.getPublicGroupHistorySnapshot(gid, 12);
             if (snapshot.isEmpty()) return;
             if (idleAssessment && (!moodService.isGroupCold(gid)
@@ -600,7 +646,7 @@ public class AIHandler implements MessageHandler {
                         null, error, idleAssessment));
             }
         }, PROACTIVE_SETTLE_MS, TimeUnit.MILLISECONDS);
-        pendingCognitionTasks.put(gid, task);
+        pendingCognitionTasks.put(cognitionKey, task);
     }
 
     private void completeCognitionDecision(Main bot, long groupId, String gid, String uid, String nickname,
@@ -609,8 +655,9 @@ public class AIHandler implements MessageHandler {
                                            long candidateId, long expectedRevision, String expectedLatestMessageId,
                                            long started, GroupDialoguePlan plan, Throwable error,
                                            boolean idleAssessment) {
-        if (!pendingCognitionIds.remove(gid, candidateId)) return;
-        pendingCognitionTasks.remove(gid);
+        String cognitionKey = cognitionKey(gid, uid);
+        if (!pendingCognitionIds.remove(cognitionKey, candidateId)) return;
+        pendingCognitionTasks.remove(cognitionKey);
 
         ConversationState current = conversationManager.get(gid, uid);
         List<BaiLianService.PublicMessage> latestSnapshot = aiService.getPublicGroupHistorySnapshot(gid, 12);
@@ -734,6 +781,29 @@ public class AIHandler implements MessageHandler {
         return messages.get(messages.size() - 1).messageId;
     }
 
+    /** Resolve the durable ThreadManager id after the serialized thread update. */
+    private static String resolveSessionThreadId(SceneState scene, String userId, boolean hasText) {
+        if (!hasText) return "unresolved";
+        if (scene == null || scene.activeThreads() == null || scene.activeThreads().isEmpty()) {
+            return "unresolved";
+        }
+        return scene.activeThreads().stream()
+                .filter(thread -> thread.getParticipants().contains(userId))
+                .max(java.util.Comparator.comparing(
+                        thread -> thread.getLastMessageAt() == null
+                                ? java.time.Instant.MIN : thread.getLastMessageAt()))
+                .map(thread -> String.valueOf(thread.getId()))
+                .orElseGet(() -> scene.activeThreads().get(0).getId() == null
+                        ? "unresolved" : String.valueOf(scene.activeThreads().get(0).getId()));
+    }
+
+    private static boolean isReplyToBot(Long replyId, List<BaiLianService.PublicMessage> recent) {
+        if (replyId == null || recent == null) return false;
+        String botId = String.valueOf(BotConfig.getBotQq());
+        String target = String.valueOf(replyId);
+        return recent.stream().anyMatch(message -> target.equals(message.messageId) && botId.equals(message.userId));
+    }
+
     private static String latestPendingMessageId(ConversationState state) {
         if (state == null) return "";
         List<String> ids = state.getPendingMessageIds();
@@ -747,15 +817,11 @@ public class AIHandler implements MessageHandler {
         if (plan == null || plan.opportunity() == null) return false;
         GroupDialoguePlan.Opportunity opportunity = plan.opportunity();
         return opportunity.shouldInterject()
-                && (opportunity.humansExplicitlyStalled()
-                    || (opportunity.openNeed() != null && !opportunity.openNeed().isBlank()))
                 && !opportunity.alreadyBeingHandled()
                 && opportunity.concreteContribution() != null
                 && !opportunity.concreteContribution().isBlank()
-                && opportunity.contributionConfidence() >= 0.70
-                && opportunity.intrusionRisk() == GroupDialoguePlan.Risk.LOW
-                && plan.targetUserId() != null
-                && !plan.targetUserId().isBlank();
+                && opportunity.contributionConfidence() >= 0.55
+                && opportunity.intrusionRisk() != GroupDialoguePlan.Risk.HIGH;
     }
 
     private static boolean isKnownBotMessage(BaiLianService.PublicMessage message) {
@@ -1060,6 +1126,25 @@ public class AIHandler implements MessageHandler {
         aiService.recordReaction(gid);
     }
 
+    private void markSessionBotReply(String gid, ConversationState state) {
+        markSessionBotReply(gid, state, Integer.MAX_VALUE);
+    }
+
+    private void markSessionBotReply(String gid, ConversationState state, int messageCountAtGenerationStart) {
+        String inboundMessageId = pendingMessageIdAt(state, messageCountAtGenerationStart);
+        if (inboundMessageId.isBlank()) return;
+        sessionManager.markBotReplyForMessage(gid, inboundMessageId, "", System.currentTimeMillis());
+    }
+
+    private static String pendingMessageIdAt(ConversationState state, int count) {
+        if (state == null) return "";
+        List<String> ids = state.getPendingMessageIds();
+        int index = Math.min(ids.size(), count) - 1;
+        if (index < 0) return "";
+        String id = ids.get(index);
+        return id == null ? "" : id;
+    }
+
     private void recordProactiveDelivery(String gid) {
         lastProactiveReplyTime.put(gid, System.currentTimeMillis());
     }
@@ -1210,6 +1295,7 @@ public class AIHandler implements MessageHandler {
             List<String> promptImageDataUris = multimodalEnabled
                     ? downloadedPromptImages : Collections.emptyList();
             String imageSearchContext = buildImageSearchEvidence(promptImageInfos, List.of());
+            captureSessionImageEvidence(gid, imageInfoMaps, false);
             // 证据链只确认图片的位置和身份，不在每轮对话前默认调用 Vision 或注入描述。
             String imageEvidence = buildImageEvidence(imageInfoMaps);
             String promptImageContext = buildImagePromptContext(state, imageInfoMaps, imageEvidence);
@@ -1217,6 +1303,7 @@ public class AIHandler implements MessageHandler {
                 promptImageContext += "\n\n" + imageSearchContext;
             }
             String linkContext = buildLinkContext(state.getLinksToFetch());
+            captureSessionLinkEvidence(gid, state, state.getLinksToFetch(), linkContext);
 
             for (int attempt = 0; attempt <= config.maxRegenerate(); attempt++) {
                 if (attempt > 0) {
@@ -1274,6 +1361,9 @@ public class AIHandler implements MessageHandler {
                 } finally {
                     aiService.setSuppressSessionWrite(false);
                 }
+                hydrateCachedImageSearchEvidence(promptImageInfos,
+                        aiService.getPublicGroupHistorySnapshot(gid, 30));
+                captureSessionImageEvidence(gid, promptImageInfos, true);
 
                 String reply = genResult.reply();
 
@@ -1324,7 +1414,10 @@ public class AIHandler implements MessageHandler {
                 boolean delivered = failureMessage != null && !failureMessage.isBlank()
                         && sendSplitGroupReplies(bot, groupId, failureMessage, groupSessionId,
                         outboundReplyToMessageId);
-                if (delivered) recordDeliveredReaction(gid, userId);
+                if (delivered) {
+                    recordDeliveredReaction(gid, userId);
+                    markSessionBotReply(gid, state, startMsgCount);
+                }
                 logDecision(gid, userId, event.name(), delivered ? "REPLY" : "SILENT",
                         delivered ? "generation_failed" : "send_failed",
                         genResult.toolCalls(), 0, elapsed, dc, genResult);
@@ -1335,6 +1428,7 @@ public class AIHandler implements MessageHandler {
                         outboundReplyToMessageId);
                 if (delivered) {
                     recordDeliveredReaction(gid, userId);
+                    markSessionBotReply(gid, state, startMsgCount);
                     if (event == ConversationEvent.PROBABILISTIC
                             || event == ConversationEvent.COGNITIVE_INTERJECTION) {
                         recordProactiveDelivery(gid);
@@ -1719,8 +1813,88 @@ public class AIHandler implements MessageHandler {
                         .filter(value -> !value.isBlank())
                         .distinct().collect(java.util.stream.Collectors.joining("；"));
                 if (!webEvidence.isBlank()) description.append("；逐图联网核验：").append(webEvidence);
+                image.put("description", description.toString());
                 aiService.recordPublicGroupImageDescription(groupId, providerId, description.toString());
+                sessionManager.recordEvidenceForMessage(groupId, providerId,
+                        GroupConversationEvidence.Type.IMAGE_DESCRIPTION, providerId,
+                        parseImageIndex(image.get("image_index"), 1), description.toString(), "", 0.85,
+                        GroupConversationEvidence.Status.CONFIRMED, true);
             }
+        }
+    }
+
+    /** Copy message-scoped image results into the session evidence ledger. */
+    private void captureSessionImageEvidence(String groupId, List<Map<String, String>> images,
+                                             boolean recordUnverified) {
+        if (images == null) return;
+        for (Map<String, String> image : images) {
+            if (image == null) continue;
+            String messageId = image.getOrDefault("message_id", "").trim();
+            if (messageId.isBlank()) continue;
+            int imageIndex = parseImageIndex(image.get("image_index"), 1);
+            String description = image.getOrDefault("description", "").trim();
+            String webEvidence = image.getOrDefault("web_search_evidence", "").trim();
+            if (!description.isBlank() && !description.startsWith(BaiLianService.CACHED_IMAGE_WEB_EVIDENCE_PREFIX)) {
+                sessionManager.recordEvidenceForMessage(groupId, messageId,
+                        GroupConversationEvidence.Type.IMAGE_DESCRIPTION, messageId, imageIndex,
+                        description, "", 0.85, GroupConversationEvidence.Status.CONFIRMED, true);
+            }
+            if (!webEvidence.isBlank()) {
+                sessionManager.recordEvidenceForMessage(groupId, messageId,
+                        GroupConversationEvidence.Type.IMAGE_WEB_SEARCH, messageId, imageIndex,
+                        webEvidence, firstUrl(webEvidence), 0.70,
+                        GroupConversationEvidence.Status.CONFIRMED, true);
+            } else if (recordUnverified) {
+                sessionManager.recordEvidenceForMessage(groupId, messageId,
+                        GroupConversationEvidence.Type.UNVERIFIED_EXTERNAL_CONTENT, messageId, imageIndex,
+                        "图片识别或联网核验未完成；不能据此判断图片内容或糖果熊的个人经历。", "", 0D,
+                        GroupConversationEvidence.Status.UNVERIFIED, true);
+            }
+        }
+    }
+
+    private void captureSessionLinkEvidence(String groupId, ConversationState state,
+                                            List<String> links, String preview) {
+        if (links == null || links.isEmpty() || state == null) return;
+        List<String> ids = state.getPendingMessageIds();
+        if (ids == null || ids.isEmpty()) return;
+        String sourceMessageId = ids.get(ids.size() - 1);
+        if (sourceMessageId == null || sourceMessageId.isBlank()) return;
+        for (String link : links.stream().limit(3).toList()) {
+            if (link == null || link.isBlank()) continue;
+            boolean resolved = preview != null && !preview.isBlank();
+            sessionManager.recordEvidenceForMessage(groupId, sourceMessageId,
+                    resolved ? GroupConversationEvidence.Type.WEB_PAGE
+                            : GroupConversationEvidence.Type.UNVERIFIED_EXTERNAL_CONTENT,
+                    "", 0, resolved ? preview : "网页预览未完成；不能把链接内容当作已确认事实。",
+                    link.trim(), resolved ? 0.65 : 0D,
+                    resolved ? GroupConversationEvidence.Status.CONFIRMED
+                            : GroupConversationEvidence.Status.UNVERIFIED, true);
+        }
+    }
+
+    private static String firstUrl(String value) {
+        if (value == null) return "";
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("https?://[^\\s>]+", java.util.regex.Pattern.CASE_INSENSITIVE)
+                .matcher(value);
+        return matcher.find() ? matcher.group().replaceAll("[),.;；。]$", "") : "";
+    }
+
+    /** Keep passive image messages grounded even when no generation path runs. */
+    private void recordObservedImagePlaceholders(String groupId, String sourceMessageId,
+                                                 List<Map<String, String>> imageInfoMaps) {
+        if (imageInfoMaps == null || imageInfoMaps.isEmpty()
+                || sourceMessageId == null || sourceMessageId.isBlank()) return;
+        for (Map<String, String> image : imageInfoMaps) {
+            if (image == null) continue;
+            String imageMessageId = image.getOrDefault("message_id", sourceMessageId).trim();
+            int imageIndex = parseImageIndex(image.get("image_index"), 1);
+            sessionManager.recordEvidenceForMessage(groupId, sourceMessageId,
+                    GroupConversationEvidence.Type.UNVERIFIED_EXTERNAL_CONTENT,
+                    imageMessageId, imageIndex,
+                    "消息中包含图片，但当前没有可确认的识图或联网结果；不能据此判断图片内容或糖果熊的个人经历。",
+                    "", 0D, GroupConversationEvidence.Status.UNVERIFIED, true);
         }
     }
 

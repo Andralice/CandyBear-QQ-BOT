@@ -32,6 +32,11 @@ public final class MemoryEvidence {
 
     public static String render(LongTermMemoryRepository repo, List<LongTermMemory> memories,
                                 LocalDateTime cutoff) throws Exception {
+        return render(repo, memories, cutoff, true);
+    }
+
+    public static String render(LongTermMemoryRepository repo, List<LongTermMemory> memories,
+                                LocalDateTime cutoff, boolean includeAdjacentContext) throws Exception {
         List<Map<String, Object>> rows = new ArrayList<>();
         Set<Long> emitted = new HashSet<>();
         for (LongTermMemory memory : memories) {
@@ -55,6 +60,9 @@ public final class MemoryEvidence {
             row.put("source", source.get().asMap());
             rows.add(row);
             emitted.add(source.get().id());
+        }
+        if (!includeAdjacentContext) {
+            return GUIDE + "\n" + JSON.writeValueAsString(rows);
         }
         // ponytail: bounded same-speaker context; distant corrections still require another history query.
         Map<String, LongTermMemory> anchors = new LinkedHashMap<>();

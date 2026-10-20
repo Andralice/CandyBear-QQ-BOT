@@ -106,14 +106,14 @@ public record GroupDialoguePlan(
                     .append("确实有助于推进时再问一个关键问题。");
         } else if (entryRole == EntryRole.THIRD_PERSON_INTERJECTION) {
             sb.append("。你是准备加入的第三人，前面的对话不是对你说的；只能以自然补充的姿态加入。")
-                    .append("\n可提供的具体帮助：").append(text(opportunity.concreteContribution()))
-                    .append("\n受益用户QQ：").append(text(targetUserId))
+                    .append("\n你对此感兴趣或能贡献的具体内容：").append(text(opportunity.concreteContribution()))
+                    .append("\n相关群友QQ：").append(text(targetUserId))
                     .append("\n注意：system 中的“当前与你对话的是”只是承载最新消息的会话锚点，")
                     .append("不代表此前所有群聊都在对你说，也不一定是这次帮助的受益者。")
                     .append("不要声称对方刚才问了你，也不要把其他人的经历说成自己的。")
-                    .append("\n本轮允许你插话，是因为上面有一项可能有用的具体帮助。结合原始上下文判断它是否仍适用；")
-                    .append("适用时自然说出最关键部分，不必逐字照搬。信息不足时可以先澄清或说明限制，")
-                    .append("不要只为插话而接梗、附和或重复泛泛安慰；表达仍应简短自然。");
+                    .append("\n本轮允许你参与，是因为上面有与你的兴趣、已知事实或自然反应相关的具体内容。")
+                    .append("结合原始上下文判断它是否仍适用；适用时像普通群友一样简短回应，可以接梗、表达兴趣或补充可靠知识。")
+                    .append("信息不确定时不要猜；没有实际想说的内容就保持安静。");
         } else {
             sb.append("。你只是旁观者，不要认领群友之间的前文。");
         }

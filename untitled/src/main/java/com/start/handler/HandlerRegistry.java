@@ -10,6 +10,13 @@ import com.start.runtime.ConversationRuntime;
 import com.start.runtime.conversation.ConversationRuntimeConfig;
 import com.start.service.BaiLianService;
 import com.start.service.GroupSerialExecutor;
+import com.start.service.GroupConversationSessionManager;
+import com.start.service.GroupConversationSessionRepository;
+import com.start.service.GroupConversationEvidenceRepository;
+import com.start.service.GroupConversationSummaryRepository;
+import com.start.service.GroupConversationSessionSummaryService;
+import com.start.service.GroupDialogueAnalyzer;
+import com.start.config.DatabaseConfig;
 import com.start.service.MerchantApiService;
 import com.start.service.ServerAdminService;
 import org.slf4j.Logger;
@@ -55,7 +62,18 @@ public class HandlerRegistry {
         var stateStore = baiLianService.createSharedStateStore();
         ConversationInterpreter interpreter = new ConversationInterpreter(
                 stateStore, baiLianService.getAiDatabaseService());
-        this.aiHandler = new AIHandler(baiLianService, groupExecutor, conversationManager, interpreter, runtime, config);
+        GroupConversationSessionRepository sessionRepository =
+                new GroupConversationSessionRepository(DatabaseConfig.getDataSource());
+        GroupConversationEvidenceRepository evidenceRepository =
+                new GroupConversationEvidenceRepository(DatabaseConfig.getDataSource());
+        GroupConversationSessionManager sessionManager =
+                new GroupConversationSessionManager(sessionRepository, evidenceRepository);
+        GroupConversationSummaryRepository summaryRepository =
+                new GroupConversationSummaryRepository(DatabaseConfig.getDataSource());
+        GroupConversationSessionSummaryService summaryService =
+                new GroupConversationSessionSummaryService(baiLianService, summaryRepository);
+        this.aiHandler = new AIHandler(baiLianService, groupExecutor, conversationManager, interpreter, runtime,
+                config, GroupDialogueAnalyzer.fromConfig(), sessionManager, summaryService);
         handlers.add(aiHandler);
     }
 

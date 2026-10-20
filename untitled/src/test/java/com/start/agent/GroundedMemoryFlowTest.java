@@ -5,6 +5,7 @@ import com.start.model.LongTermMemory;
 import com.start.model.ProfileFactSummary;
 import com.start.repository.LongTermMemoryRepository;
 import com.start.repository.ProfileFactRepository;
+import com.start.service.GroupMemoryContext;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -145,6 +146,32 @@ class GroundedMemoryFlowTest {
         String rendered = MemoryEvidence.render(repo,List.of(cue(1,"订单已接单")),now);
         assertTrue(rendered.contains("最后已知状态不等于实时状态"));
         assertTrue(rendered.contains("订单已接单"));
+    }
+
+    @Test void ordinaryGroupContextRetrievesOnlyRelatedSameGroupSourceBackedCues() throws Exception {
+        message(1,"u1","g1","周六去南站");
+        LongTermMemory relevant = cue(1,"周六去南站");
+        relevant.setKeywords("南站,车站");
+        sql("UPDATE long_term_memories SET keywords='南站,车站' WHERE id=?", relevant.getId());
+        message(2,"u2","g1","我周末也去南站 OTHER_PERSON_CANARY");
+        var otherPerson = new LongTermMemory(); otherPerson.setUserId("u2"); otherPerson.setGroupId("g1");
+        otherPerson.setSourceMessageId(2L); otherPerson.setContent("南站 OTHER_PERSON_CANARY");
+        otherPerson.setKeywords("南站"); repo.insertGrounded(otherPerson,now);
+        message(3,"u1","g2","OTHER_GROUP_CANARY");
+        var otherGroup = new LongTermMemory(); otherGroup.setUserId("u1"); otherGroup.setGroupId("g2");
+        otherGroup.setSourceMessageId(3L); otherGroup.setContent("南站 OTHER_GROUP_CANARY");
+        otherGroup.setKeywords("南站"); repo.insertGrounded(otherGroup,now);
+        var ungrounded = new LongTermMemory(); ungrounded.setUserId("u1"); ungrounded.setGroupId("g1");
+        ungrounded.setContent("南站 UNGROUNDED_CANARY"); ungrounded.setKeywords("南站"); repo.insert(ungrounded);
+
+        String context = GroupMemoryContext.retrieve(repo,"g1","南站怎么走",List.of("南站"));
+
+        assertTrue(context.contains("周六去南站"));
+        assertTrue(context.contains("OTHER_PERSON_CANARY"));
+        assertTrue(context.contains("原始发言") || context.contains("original_text"));
+        assertFalse(context.contains("OTHER_GROUP_CANARY"));
+        assertFalse(context.contains("UNGROUNDED_CANARY"));
+        assertFalse(GroupMemoryContext.retrieve(repo,"g1","今天吃什么",List.of("午饭")).contains("周六去南站"));
     }
 
     @Test void messageTimeIsExplicitAndExactEventTimeRemainsInOriginalText() throws Exception {

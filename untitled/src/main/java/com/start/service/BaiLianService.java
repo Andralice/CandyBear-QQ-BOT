@@ -221,12 +221,13 @@ public class BaiLianService implements AutoCloseable {
     }
 
     /** AIHandler 调用：按群消息顺序逐条更新 Thread，避免时间节流丢失其他成员的发言。 */
-    public void processThreadMessage(String groupId, String userId, String message) {
-        if (groupId == null) return;
+    public SceneState processThreadMessage(String groupId, String userId, String message) {
+        if (groupId == null) return SceneState.EMPTY;
         try {
-            getThreadManager().processMessage(groupId, userId, message, BOT_QQ);
+            return getThreadManager().processMessage(groupId, userId, message, BOT_QQ);
         } catch (Exception e) {
             logger.warn("Thread processing failed, groupId={}, userId={}", groupId, userId, e);
+            return SceneState.EMPTY;
         }
     }
 
@@ -1358,9 +1359,12 @@ public class BaiLianService implements AutoCloseable {
                 ctx.pendingFilesHint(fb.toString());
             }
 
-            // 关键词提取：供 recall_memory 工具的 autoKeywords 使用
-            // 不再自动注入记忆到 prompt —— 关键词匹配 ≠ 语义相关，LLM 自己判断什么时候该查
+            // 关键词用于召回候选；GroupMemoryContext 会再做相关性和来源校验。
             List<String> hanlpKeywords = extractKeywords(userPrompt);
+            String pastGroupMemory = groupId == null ? "" : GroupMemoryContext.retrieve(
+                    new LongTermMemoryRepository(DatabaseConfig.getDataSource()), groupId,
+                    userPrompt, hanlpKeywords);
+            ctx.pastGroupMemory(pastGroupMemory);
 
             // 所有动态上下文（别称、@ 用户、群成员、文件、节奏等）准备完后再构建 prompt，
             // 否则这些信息只写进 ctx，却不会真正进入发给模型的 system prompt。

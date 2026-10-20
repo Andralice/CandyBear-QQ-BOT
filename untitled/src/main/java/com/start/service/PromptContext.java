@@ -40,6 +40,7 @@ public class PromptContext {
     GroupDialoguePlan dialoguePlan;
     String promptPatch;
     String shortTermGroupScene;
+    String pastGroupMemory;
     List<Long> atUserIds;
     long botQq;
     /** 群成员 QQ → 显示名（@ 时直接拿 userId）。来自 OneBotWsService.getGroupMemberDisplayNamesAsync。 */
@@ -77,6 +78,7 @@ public class PromptContext {
     public PromptContext dialoguePlan(GroupDialoguePlan v) { this.dialoguePlan = v; return this; }
     public PromptContext promptPatch(String v) { this.promptPatch = v; return this; }
     public PromptContext shortTermGroupScene(String v) { this.shortTermGroupScene = v; return this; }
+    public PromptContext pastGroupMemory(String v) { this.pastGroupMemory = v; return this; }
     public PromptContext atUserIds(List<Long> v) { this.atUserIds = v; return this; }
     public PromptContext botQq(long v) { this.botQq = v; return this; }
     public PromptContext groupMembers(Map<String, String> v) { this.groupMembers = v; return this; }

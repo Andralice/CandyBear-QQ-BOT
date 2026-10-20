@@ -243,6 +243,26 @@ public class LongTermMemoryRepository implements Repository {
         }
     }
 
+    /** Search only same-group memory cues that can be checked against an original message. */
+    public List<LongTermMemory> searchGroundedByGroup(String groupId, String keyword, int limit) throws SQLException {
+        if (groupId == null || groupId.isBlank() || keyword == null || keyword.isBlank()) return List.of();
+        String sql = "SELECT * FROM long_term_memories WHERE group_id=? AND source_message_id IS NOT NULL "
+                + "AND source <> 'AUTO_FORMED' AND status NOT IN ('OUTDATED','CONTRADICTED') "
+                + "AND triggered=FALSE AND (expires_at IS NULL OR expires_at>NOW()) "
+                + "AND (content LIKE ? OR keywords LIKE ?) ORDER BY importance DESC, created_at DESC LIMIT ?";
+        try (Connection conn = dataSource.getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, groupId);
+            ps.setString(2, "%" + keyword.trim() + "%");
+            ps.setString(3, "%" + keyword.trim() + "%");
+            ps.setInt(4, Math.max(1, Math.min(limit, 20)));
+            List<LongTermMemory> results = new ArrayList<>();
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) results.add(mapRow(rs));
+            }
+            return results;
+        }
+    }
+
     /** 查询所有到期的定时事件（trigger_at <= NOW() AND triggered = FALSE） */
     public List<LongTermMemory> findDueEvents() throws SQLException {
         String sql = "SELECT * FROM long_term_memories WHERE trigger_at IS NOT NULL AND triggered = FALSE " +
