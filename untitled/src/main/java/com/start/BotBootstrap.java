@@ -131,7 +131,11 @@ public final class BotBootstrap {
         logger.info("糖果熊人生引擎已启动（四层架构：章节->周记->日记->工具查询 + LifeState + 日程表）");
 
         // 今日首次部署：全员职业重抽（脉系+战力每日随机）
-        DailyProfessionHandler.rerollAllProfessions();
+        if (Boolean.getBoolean("candybear.skipStartupProfessionReroll")) {
+            logger.info("本次启动跳过全员职业重抽");
+        } else {
+            DailyProfessionHandler.rerollAllProfessions();
+        }
 
         startLifeEngineThread(bot, lifeEngine);
         // Evidence-first profiles replace the legacy free-text overwrite loop.

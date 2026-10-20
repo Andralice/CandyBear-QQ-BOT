@@ -1,461 +1,410 @@
 package com.start.vision;
 
 import java.awt.*;
+import java.awt.geom.Path2D;
 import java.awt.image.BufferedImage;
+import java.io.IOException;
+import java.io.InputStream;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
+import java.util.Locale;
+import javax.imageio.ImageIO;
 
 /**
- * 职业卡渲染模板 — 暗色企业级布局，大字版。
+ * 横版职业战力卡片。
  */
 public class ProfessionCardTemplate implements ImageTemplate<ProfessionData> {
 
-    private static final int W = 800;
-    private static final int P = 36;
-    private static final int R = 14;
+    private static final int W = 1920;
+    private static final int H = 1080;
+    private static final Color BG = new Color(0x171A18);
+    private static final Color SEAL_BACKGROUND = new Color(0x151614);
+    private static final Color BORDER = new Color(0x404A43);
+    private static final Color TEXT = new Color(0xF4F6F7);
+    private static final Color SUBTEXT = new Color(0xBAC4BD);
+    private static final Color MUTED = new Color(0x95A39B);
+    private static final Color BAR_BG = new Color(0x303B34);
+    private static final Color[] TIER_COLORS = {
+            new Color(0xD0D6DC),
+            new Color(0x54C9B0),
+            new Color(0x70AAFF),
+            new Color(0xC78AFF),
+            new Color(0xF2C35F)
+    };
+    private static final String[] TIER_LABELS = {"普通", "普通", "稀有", "史诗", "传说"};
+    private static final String[] TIER_MATERIALS = {"冷银", "青碧", "宝蓝", "紫晶", "鎏金"};
+    private static final String[] SEAL_RESOURCES = {
+            "assets/rank-seals/rank-1-common-silver.png",
+            "assets/rank-seals/rank-2-common-jade.png",
+            "assets/rank-seals/rank-3-rare-sapphire.png",
+            "assets/rank-seals/rank-4-epic-amethyst.png",
+            "assets/rank-seals/rank-5-legendary-gold.png"
+    };
+    private static final BufferedImage[] SEALS = new BufferedImage[5];
+    private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern("yyyy.MM.dd");
+    private static final int SEAL_CACHE_SIZE = 384;
+    private static final int POWER_BAR_X = 84;
+    private static final int POWER_BAR_Y = 744;
+    private static final int POWER_BAR_W = 1042;
 
-    // ── 基础色 ──
-    private static final Color BG        = new Color(0x0D0F14);
-    private static final Color SURFACE   = new Color(0x161820);
-    private static final Color BORDER    = new Color(0x282A34);
-    private static final Color TEXT      = new Color(0xF2F2F5);
-    private static final Color SUBTEXT   = new Color(0xB0B2BC);
-    private static final Color BAR_BG    = new Color(0x2E303A);
-    private static final Color TICK      = new Color(0x585A64);
-    private static final Color GLOW_EPIC = new Color(180, 80, 255, 30);
-    private static final Color GLOW_LEGEND = new Color(255, 80, 80, 30);
-
-    // ── 位阶色 ──
-    private static final Color T1 = new Color(150, 160, 180);
-    private static final Color T2 = new Color(100, 180, 255);
-    private static final Color T3 = new Color(0, 191, 255);
-    private static final Color T4 = new Color(180, 80, 255);
-    private static final Color T5 = new Color(255, 80, 80);
-
-    // ── 字体 ──
-    private final Font fLabel, fBody, fTitle, fHero, fNumber;
+    private final Font fLabel;
+    private final Font fBody;
+    private final Font fTitle;
+    private final Font fHero;
+    private final Font fNumber;
+    private final Font fSmall;
+    private final Font fTiny;
 
     public ProfessionCardTemplate() {
-        fLabel  = load("HarmonyOS_SansSC_Bold.ttf",   14f);
-        fBody   = load("HarmonyOS_SansSC_Medium.ttf", 17f);
-        fTitle  = load("HarmonyOS_SansSC_Bold.ttf",   24f);
-        fHero   = load("HarmonyOS_SansSC_Black.ttf",  56f);
-        fNumber = load("HarmonyOS_SansSC_Bold.ttf",   34f);
+        ImageRenderer fonts = ImageRenderer.getInstance();
+        fLabel = fonts.loadFont("HarmonyOS_SansSC_Bold.ttf", 31f);
+        fBody = fonts.loadFont("HarmonyOS_SansSC_Medium.ttf", 34f);
+        fTitle = fonts.loadFont("HarmonyOS_SansSC_Bold.ttf", 32f);
+        fHero = fonts.loadFont("HarmonyOS_SansSC_Black.ttf", 104f);
+        fNumber = fonts.loadFont("HarmonyOS_SansSC_Bold.ttf", 214f);
+        fSmall = fonts.loadFont("HarmonyOS_SansSC_Medium.ttf", 24f);
+        fTiny = fonts.loadFont("HarmonyOS_SansSC_Medium.ttf", 20f);
     }
 
-    private Font load(String name, float sz) {
-        try {
-            java.io.InputStream is = getClass().getClassLoader().getResourceAsStream("assets/fonts/" + name);
-            if (is == null) return new Font(Font.SANS_SERIF, Font.PLAIN, (int) sz);
-            return Font.createFont(Font.TRUETYPE_FONT, is).deriveFont(sz);
-        } catch (Exception e) {
-            return new Font(Font.SANS_SERIF, Font.PLAIN, (int) sz);
-        }
-    }
-
-    // ============================================================
     @Override
     public BufferedImage render(Object data) {
         if (!(data instanceof ProfessionData p)) throw new IllegalArgumentException("数据格式错误");
 
-        int headerH = 100;
-        int coreH   = 180;
-        int statsH  = 56;
-        int powerH  = 72;
-        int footerH = 44;
-        int gap     = 24;
-        int descH   = calcDescLines(p.description) * 30;
+        BufferedImage image = new BufferedImage(W, H, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = image.createGraphics();
+        try {
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+            g.setColor(BG);
+            g.fillRect(0, 0, W, H);
 
-        int H = P + headerH + gap + coreH + gap + statsH + gap + powerH + gap + descH + 12 + footerH + P;
+            Color tierColor = tierColor(p.tier);
+            g.setColor(tierColor);
+            g.fillRect(0, 0, W, 8);
+            g.setColor(BORDER);
+            g.setStroke(new BasicStroke(2f));
+            g.drawRoundRect(24, 24, W - 48, H - 48, 40, 40);
 
-        BufferedImage img = new BufferedImage(W, H, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D g = img.createGraphics();
-        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_LCD_HRGB);
-        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-
-        g.setColor(BG);
-        g.fillRoundRect(0, 0, W, H, R, R);
-
-        int y = P;
-        y = header(g, p, y);
-        y += gap;
-        y = coreCard(g, p, y);
-        y += gap;
-        y = statsRow(g, p, y);
-        y += gap;
-        y = powerBar(g, p, y);
-        y += gap;
-        footer(g, p, y, H);
-
-        g.dispose();
-        return img;
+            drawHeader(g, p);
+            drawProfession(g, p, tierColor);
+            drawPower(g, p, tierColor);
+            drawSealPanel(g, p, tierColor);
+            drawTierLegend(g);
+            drawFooter(g, p);
+        } finally {
+            g.dispose();
+        }
+        return image;
     }
 
-    // ============================================================
-    // Header — 标题 + 稀有度 + 脉系 + 变化趋势
-    // ============================================================
-
-    private int header(Graphics2D g, ProfessionData p, int y) {
-        int rw = W - 2 * P;
-        Color tc = tierColor(p.tier);
-
-        // 标题
+    private void drawHeader(Graphics2D g, ProfessionData p) {
+        g.setColor(tierColor(p.tier));
+        g.fillRoundRect(76, 58, 8, 42, 8, 8);
         g.setFont(fTitle);
         g.setColor(TEXT);
-        g.drawString("天命职业鉴定", P, y + 30);
+        g.drawString("天命 · 职业战力档案", 108, 91);
 
-        // 脉系 pill
-        if (p.professionPath != null && !p.professionPath.isEmpty()) {
-            g.setFont(fLabel);
-            FontMetrics fm = g.getFontMetrics();
-            String pathLabel = p.professionPath + "脉";
-            int pw = fm.stringWidth(pathLabel) + 16;
-            g.setColor(new Color(tc.getRed(), tc.getGreen(), tc.getBlue(), 18));
-            g.fillRoundRect(P + 180, y + 10, pw, 26, 13, 13);
-            g.setColor(tc);
-            g.drawString(pathLabel, P + 188, y + 28);
-        }
+        String meta = LocalDate.now().format(DATE_FORMAT);
+        if (p.groupRank > 0) meta += "  /  本群第 " + p.groupRank + " 名";
+        drawRightFit(g, meta, fSmall, 18f, 1840, 90, 570, SUBTEXT);
+        g.setColor(BORDER);
+        g.setStroke(new BasicStroke(2f));
+        g.drawLine(76, 126, 1844, 126);
+    }
 
-        // 右上：稀有度 badge
-        String rarity = p.rarity;
+    private void drawProfession(Graphics2D g, ProfessionData p, Color tierColor) {
         g.setFont(fLabel);
-        FontMetrics fm = g.getFontMetrics();
-        int bw = fm.stringWidth(rarity) + 20;
-        int bx = P + rw - bw;
-        drawPillStroke(g, bx, y + 8, bw, 28, tc);
-        g.setColor(tc);
-        g.drawString(rarity, bx + 10, y + 26);
-
-        // 位阶名
-        g.setFont(fBody);
         g.setColor(SUBTEXT);
-        g.drawString(p.tierName, P, y + 62);
+        g.drawString("职业名称", 84, 207);
 
-        // 变化趋势（位阶名右侧）
-        if (p.changeDesc != null && !p.changeDesc.isEmpty()) {
+        String professionName = safe(p.professionName, "未知职业");
+        drawFit(g, professionName, fHero, 60f, 1030, 80, 330, TEXT);
+
+        g.setColor(new Color(0x424B45));
+        g.setStroke(new BasicStroke(2f));
+        g.drawLine(84, 359, 520, 359);
+        g.setColor(tierColor);
+        g.setStroke(new BasicStroke(5f));
+        g.drawLine(84, 359, 236, 359);
+
+        String path = p.professionPath == null || p.professionPath.isBlank()
+                ? "" : p.professionPath + "脉";
+        if (!path.isEmpty()) {
             g.setFont(fBody);
-            g.setColor(tc);
-            g.drawString(p.changeDesc, P + 200, y + 62);
+            g.setColor(tierColor);
+            g.drawString(path, 84, 420);
         }
+        g.setColor(new Color(0x515B54));
+        g.setStroke(new BasicStroke(2f));
+        g.drawLine(184, 389, 184, 432);
 
-        // 运势（右上 badge 下方）
-        drawLuckBadge(g, tc, bx, bw, y + 40, p.todayLuck);
-
-        // 分隔线
-        int ly = y + 82;
-        g.setColor(BORDER);
-        g.drawLine(P, ly, P + rw, ly);
-
-        return y + 100;
-    }
-
-    private void drawLuckBadge(Graphics2D g, Color tc, int rx, int rw, int y, int luck) {
-        int w = 100;
-        int h = 22;
-        int x = rx + rw - w;
-
-        // BG
-        g.setColor(BAR_BG);
-        g.fillRoundRect(x, y, w, h, 11, 11);
-
-        // fill
-        double ratio = Math.min(1.0, Math.max(0.02, luck / 100.0));
-        int fill = (int) ((w - 4) * ratio);
-        if (fill > 2) {
-            Color lc = luck >= 80 ? new Color(0x4CAF50) : luck >= 50 ? new Color(0xFFC107) : new Color(0xF44336);
-            g.setColor(lc);
-            g.fillRoundRect(x + 2, y + 2, fill, h - 4, 9, 9);
-        }
-
-        // text
-        g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 11));
-        g.setColor(TEXT);
-        String s = "运势 " + luck;
-        FontMetrics fm = g.getFontMetrics();
-        g.drawString(s, x + (w - fm.stringWidth(s)) / 2, y + 15);
-    }
-
-    // ============================================================
-    // Core card — 大位阶数字 + 星 + 职业名 + 战力
-    // ============================================================
-
-    private int coreCard(Graphics2D g, ProfessionData p, int y) {
-        int cw = W - 2 * P;
-        int ch = 180;
-        Color tc = tierColor(p.tier);
-
-        // 稀有度光环
-        if ("史诗".equals(p.rarity) || "传说".equals(p.rarity)) {
-            g.setColor("史诗".equals(p.rarity) ? GLOW_EPIC : GLOW_LEGEND);
-            g.setStroke(new BasicStroke(4f));
-            g.drawRoundRect(P - 2, y - 2, cw + 4, ch + 4, R + 2, R + 2);
-        }
-
-        // 面板
-        g.setColor(SURFACE);
-        g.fillRoundRect(P, y, cw, ch, R, R);
-        g.setColor(BORDER);
-        g.setStroke(new BasicStroke(1f));
-        g.drawRoundRect(P, y, cw, ch, R, R);
-
-        // ── 左列 ──
-        int leftW = 140;
-        // 位阶数字
-        g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 72));
-        g.setColor(tc);
-        String tierStr = String.valueOf(p.tier);
-        FontMetrics tfm = g.getFontMetrics();
-        g.drawString(tierStr, P + (leftW - tfm.stringWidth(tierStr)) / 2, y + 88);
-
-        // 星
-        g.setFont(fLabel);
-        int starY = y + 110;
-        int starStart = P + (leftW - 5 * 20) / 2;
-        for (int i = 0; i < 5; i++) {
-            g.setColor(i < p.tier ? tc : TICK);
-            g.drawString("★", starStart + i * 22, starY);
-        }
-
-        // 连击
-        if (p.streakGood >= 3 || p.streakBad >= 3) {
-            g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 16));
-            boolean good = p.streakGood >= 3;
-            g.setColor(good ? new Color(0xFF9800) : TICK);
-            String icon = good ? "🔥" + p.streakGood + "连升" : "💀" + p.streakBad + "连降";
-            FontMetrics ifm = g.getFontMetrics();
-            g.drawString(icon, P + (leftW - ifm.stringWidth(icon)) / 2, y + 138);
-        }
-
-        // 竖线
-        int sepX = P + leftW;
-        g.setColor(BORDER);
-        g.setStroke(new BasicStroke(1f));
-        g.drawLine(sepX, y + 22, sepX, y + ch - 22);
-
-        // ── 右列 ──
-        int rx = sepX + 28;
-
-        // 职业名
-        g.setFont(fHero);
-        g.setColor(TEXT);
-        g.drawString(p.professionName, rx, y + 68);
-
-        // COMBAT POWER
-        g.setFont(fLabel);
-        g.setColor(SUBTEXT);
-        g.drawString("COMBAT POWER", rx + 2, y + 94);
-
-        // 战力数值
-        g.setFont(fNumber);
-        g.setColor(tc);
-        g.drawString(formatNumber(p.combatPower), rx + 2, y + 130);
-
-        // 右上 pill
-        String pill = "第 " + p.tier + " 阶";
-        g.setFont(fLabel);
-        FontMetrics pfm = g.getFontMetrics();
-        int pw = pfm.stringWidth(pill) + 18;
-        int px = P + cw - pw - 18;
-        drawPillFilled(g, px, y + 16, pw, 28, tc);
-        g.setColor(tc);
-        g.drawString(pill, px + 9, y + 34);
-
-        return y + ch;
-    }
-
-    // ============================================================
-    // Stats row — 排名 + 历史巅峰
-    // ============================================================
-
-    private int statsRow(Graphics2D g, ProfessionData p, int y) {
-        // 左侧标签
-        g.setFont(fLabel);
-        g.setColor(SUBTEXT);
-        g.drawString("排名与成就", P, y + 22);
-
-        // 右侧内容
-        g.setFont(fBody);
-        int items = 0;
-        int curX = P + 140;
-
-        if (p.groupRank > 0) {
-            String rank = "本群第 " + p.groupRank + " 名";
-            g.setColor(TEXT);
-            g.drawString(rank, curX, y + 22);
-            curX += g.getFontMetrics().stringWidth(rank) + 28;
-            items++;
-        }
+        String tierName = safe(p.tierName, "修行者");
+        if (!tierName.startsWith(p.tier + "阶")) tierName = p.tier + "阶 · " + tierName;
+        drawFit(g, tierName, fSmall, 20f, 430, 216, 420, TEXT);
+        drawFit(g, singleLine(p.changeDesc), fTiny, 15f, 520, 610, 420, MUTED);
 
         if (p.bestTier > 0) {
-            g.setColor(BORDER);
-            g.drawLine(curX - 14, y + 4, curX - 14, y + 20); // 竖线分隔
-            String best = "历史巅峰：" + bestTierLabel(p.bestTier);
-            g.setColor(TEXT);
-            g.drawString(best, curX, y + 22);
-            items++;
+            String bestName = safe(p.bestTierName, p.bestTier + "阶");
+            drawFit(g, "历史巅峰 · " + bestName, fTiny, 16f, 900, 84, 464, MUTED);
         }
-
-        if (items == 0) {
-            g.setColor(TICK);
-            g.drawString("暂无数据", curX, y + 22);
-        }
-
-        return y + 56;
     }
 
-    // ============================================================
-    // Power bar
-    // ============================================================
-
-    private int powerBar(Graphics2D g, ProfessionData p, int y) {
-        int bw = W - 2 * P;
-        int barH = 8;
-        Color tc = tierColor(p.tier);
-
-        // 标签 + 数值
-        g.setFont(fLabel);
-        g.setColor(SUBTEXT);
-        g.drawString("战力评估", P, y + 16);
-
-        String val = formatNumber(p.combatPower);
-        g.setFont(fNumber);
-        g.setColor(tc);
-        FontMetrics vfm = g.getFontMetrics();
-        g.drawString(val, P + bw - vfm.stringWidth(val), y + 22);
-
-        // 进度条
-        int barY = y + 38;
-        g.setColor(BAR_BG);
-        g.fillRoundRect(P, barY, bw, barH, 4, 4);
-
-        double ratio = Math.min(1.0, Math.max(0.02, (double) p.combatPower / 10000.0));
-        int fillW = (int) (bw * ratio);
-        if (fillW > 3) {
-            GradientPaint grad = new GradientPaint(P, barY, tc, P + fillW, barY, brighter(tc, 0.5f));
-            g.setPaint(grad);
-            g.fillRoundRect(P, barY, fillW, barH, 4, 4);
-        }
-
-        // 刻度
-        g.setColor(TICK);
-        g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
-        for (int m : new int[]{2000, 4000, 6000, 8000}) {
-            int tx = P + bw * m / 10000;
-            g.drawLine(tx, barY + barH + 6, tx, barY + barH + 12);
-            String label = (m / 1000) + "k";
-            g.drawString(label, tx - g.getFontMetrics().stringWidth(label) / 2, barY + barH + 26);
-        }
-        g.drawString("10k", P + bw - g.getFontMetrics().stringWidth("10k") / 2, barY + barH + 26);
-
-        return y + 72;
-    }
-
-    // ============================================================
-    // Footer
-    // ============================================================
-
-    private void footer(Graphics2D g, ProfessionData p, int y, int H) {
-        int rw = W - 2 * P;
-
-        // 描述
+    private void drawPower(Graphics2D g, ProfessionData p, Color tierColor) {
+        drawPowerIcon(g, 84, 481, tierColor);
         g.setFont(fBody);
         g.setColor(SUBTEXT);
-        String desc = p.description != null ? p.description : "";
-        drawWrapped(g, desc, P, y, rw, 30);
+        g.drawString("战力值", 140, 512);
 
-        // 底部
-        int fy = H - P - 30;
+        String power = formatNumber(p.combatPower);
+        drawFit(g, power, fNumber, 96f, 600, 78, 704, tierColor);
+        g.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 48));
+        g.setColor(new Color(0x94A29A));
+        g.drawString("/ 10,000", 692, 694);
+
+        double ratio = Math.max(0, Math.min(1, p.combatPower / 10000.0));
+        drawRightFit(g, String.format(Locale.ROOT, "%.1f%%", ratio * 100),
+                new Font(Font.SANS_SERIF, Font.BOLD, 49), 36f, 1126, 646, 300, tierColor);
+        drawRightFit(g, "战力进度", fTiny, 18f, 1126, 681, 280, SUBTEXT);
+
+        g.setColor(BAR_BG);
+        g.fillRoundRect(POWER_BAR_X, POWER_BAR_Y, POWER_BAR_W, 20, 20, 20);
+        int fillWidth = (int) (POWER_BAR_W * ratio);
+        if (fillWidth > 0) {
+            g.setPaint(new GradientPaint(POWER_BAR_X, POWER_BAR_Y, tierColor,
+                    POWER_BAR_X + Math.max(1, fillWidth), POWER_BAR_Y, brighter(tierColor, 0.42f)));
+            g.fillRoundRect(POWER_BAR_X, POWER_BAR_Y, fillWidth, 20, 20, 20);
+            int markerX = POWER_BAR_X + fillWidth;
+            Path2D marker = new Path2D.Float();
+            marker.moveTo(markerX, 731);
+            marker.lineTo(markerX + 14, 744);
+            marker.lineTo(markerX, 777);
+            marker.lineTo(markerX - 14, 744);
+            marker.closePath();
+            g.setColor(brighter(tierColor, 0.52f));
+            g.fill(marker);
+        }
+
+        g.setFont(fTiny);
+        g.setColor(MUTED);
+        g.drawString("0", POWER_BAR_X, 798);
+        drawCentered(g, "5,000", fTiny, MUTED, POWER_BAR_X + POWER_BAR_W / 2, 798, 120);
+        drawRightFit(g, "10,000", fTiny, 17f, POWER_BAR_X + POWER_BAR_W, 798, 130, MUTED);
+
+        String description = truncate(g, singleLine(p.description), fTiny, 1042);
+        if (!description.isEmpty()) {
+            g.setFont(fTiny);
+            g.setColor(MUTED);
+            g.drawString(description, 84, 820);
+        }
+    }
+
+    private void drawSealPanel(Graphics2D g, ProfessionData p, Color tierColor) {
+        g.setColor(SEAL_BACKGROUND);
+        g.fillRoundRect(1212, 158, 632, 604, 16, 16);
         g.setColor(BORDER);
-        g.setStroke(new BasicStroke(1f));
-        g.drawLine(P, fy, P + rw, fy);
+        g.setStroke(new BasicStroke(2f));
+        g.drawRoundRect(1212, 158, 632, 604, 16, 16);
+        g.setColor(BORDER);
+        g.setStroke(new BasicStroke(2f));
+        g.drawLine(1234, 181, 1820, 181);
 
-        String today = LocalDate.now().format(DateTimeFormatter.ofPattern("yyyy.MM.dd"));
-        Font f = new Font(Font.SANS_SERIF, Font.PLAIN, 12);
-        g.setFont(f);
-        FontMetrics ffm = g.getFontMetrics();
-        g.setColor(TICK);
-        g.drawString("USER #" + p.userId, P, fy + 18);
-        g.drawString(today, P + rw - ffm.stringWidth(today), fy + 18);
-    }
+        int tileX = 1340;
+        int tileY = 190;
+        g.setColor(SEAL_BACKGROUND);
+        g.fillRoundRect(tileX, tileY, 376, 376, 14, 14);
 
-    // ============================================================
-    // Helpers
-    // ============================================================
-
-    private int calcDescLines(String desc) {
-        if (desc == null || desc.isEmpty()) return 1;
-        int maxChars = (W - 2 * P) / 18;
-        int lines = 0, cur = 0;
-        for (int i = 0; i < desc.length(); i++) {
-            cur++;
-            if (desc.charAt(i) == '。' || desc.charAt(i) == '，' || desc.charAt(i) == '、'
-                    || desc.charAt(i) == '；' || cur >= maxChars) { lines++; cur = 0; }
+        BufferedImage seal = sealImage(p.tier);
+        if (seal != null) {
+            g.drawImage(seal, tileX + 8, tileY + 8, 360, 360, null);
+        } else {
+            drawFallbackSeal(g, tileX + 8, tileY + 8, 360, tierColor);
         }
-        if (cur > 0) lines++;
-        return Math.max(1, lines);
+
+        String rarity = safe(p.rarity, TIER_LABELS[tierIndex(p.tier)]);
+        drawCentered(g, rarity, fLabel.deriveFont(82f), tierColor, 1528, 641, 576);
+        drawCentered(g, p.tier + "阶品质", fSmall.deriveFont(27f), SUBTEXT, 1528, 690, 480);
+        g.setColor(BORDER);
+        g.setStroke(new BasicStroke(2f));
+        g.drawLine(1320, 720, 1736, 720);
     }
 
-    private void drawWrapped(Graphics2D g, String text, int x, int y, int maxW, int lineH) {
-        if (text == null || text.isEmpty()) return;
-        FontMetrics fm = g.getFontMetrics();
-        StringBuilder line = new StringBuilder();
-        int cy = y;
-        for (int i = 0; i < text.length(); i++) {
-            char ch = text.charAt(i);
-            String trial = line.toString() + ch;
-            if (fm.stringWidth(trial) > maxW && line.length() > 0) {
-                g.drawString(line.toString(), x, cy + lineH); cy += lineH;
-                line = new StringBuilder(String.valueOf(ch));
+    private void drawTierLegend(Graphics2D g) {
+        g.setColor(BORDER);
+        g.setStroke(new BasicStroke(2f));
+        g.drawLine(76, 827, 1844, 827);
+        g.setFont(fLabel);
+        g.setColor(new Color(0xE1E7E3));
+        g.drawString("五阶品质", 82, 886);
+        g.setFont(fTiny);
+        g.setColor(MUTED);
+        g.drawString("色彩与印章", 82, 923);
+
+        for (int i = 0; i < SEAL_RESOURCES.length; i++) {
+            int tier = i + 1;
+            int iconX = 316 + i * 299;
+            int labelX = iconX + 128;
+            BufferedImage seal = sealImage(tier);
+            if (seal != null) {
+                g.drawImage(seal, iconX, 854, 112, 112, null);
             } else {
-                line.append(ch);
+                drawFallbackSeal(g, iconX, 854, 112, TIER_COLORS[i]);
             }
-            if (ch == '。' || ch == '，' || ch == '、' || ch == '；') {
-                g.drawString(line.toString(), x, cy + lineH); cy += lineH;
-                line = new StringBuilder();
+
+            Color color = TIER_COLORS[i];
+            drawFit(g, tier + "阶 · " + TIER_LABELS[i], fSmall.deriveFont(29f),
+                    20f, 240, labelX, 891, color);
+            g.setFont(fSmall);
+            g.setColor(MUTED);
+            g.drawString(TIER_MATERIALS[i], labelX, 932);
+        }
+    }
+
+    private void drawFooter(Graphics2D g, ProfessionData p) {
+        g.setColor(BORDER);
+        g.setStroke(new BasicStroke(2f));
+        g.drawLine(76, 990, 1844, 990);
+        drawFit(g, "USER #" + safe(p.userId, "unknown"), fTiny, 16f, 800, 82, 1024, MUTED);
+    }
+
+    private void drawPowerIcon(Graphics2D g, int x, int y, Color tierColor) {
+        g.setColor(mix(BG, tierColor, 0.24f));
+        g.fillRoundRect(x, y, 38, 38, 10, 10);
+        Path2D bolt = new Path2D.Float();
+        bolt.moveTo(x + 22, y + 5);
+        bolt.lineTo(x + 10, y + 21);
+        bolt.lineTo(x + 19, y + 21);
+        bolt.lineTo(x + 15, y + 33);
+        bolt.lineTo(x + 29, y + 16);
+        bolt.lineTo(x + 20, y + 16);
+        bolt.closePath();
+        g.setColor(brighter(tierColor, 0.28f));
+        g.fill(bolt);
+    }
+
+    private static BufferedImage sealImage(int tier) {
+        int index = tierIndex(tier);
+        BufferedImage image = SEALS[index];
+        if (image != null) return image;
+
+        synchronized (SEALS) {
+            image = SEALS[index];
+            if (image != null) return image;
+            try (InputStream input = ProfessionCardTemplate.class.getClassLoader()
+                    .getResourceAsStream(SEAL_RESOURCES[index])) {
+                if (input == null) return null;
+                BufferedImage source = ImageIO.read(input);
+                if (source == null) return null;
+
+                image = new BufferedImage(SEAL_CACHE_SIZE, SEAL_CACHE_SIZE, BufferedImage.TYPE_INT_RGB);
+                Graphics2D g = image.createGraphics();
+                try {
+                    g.setColor(BG);
+                    g.fillRect(0, 0, SEAL_CACHE_SIZE, SEAL_CACHE_SIZE);
+                    g.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
+                            RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+                    g.drawImage(source, 0, 0, SEAL_CACHE_SIZE, SEAL_CACHE_SIZE, null);
+                } finally {
+                    g.dispose();
+                }
+                SEALS[index] = image;
+                return image;
+            } catch (IOException e) {
+                return null;
             }
         }
-        if (line.length() > 0) g.drawString(line.toString(), x, cy + lineH);
     }
 
-    private void drawPillStroke(Graphics2D g, int x, int y, int w, int h, Color c) {
-        g.setColor(c);
-        g.setStroke(new BasicStroke(1.2f));
-        g.drawRoundRect(x, y, w, h, h / 2, h / 2);
+    private static void drawFallbackSeal(Graphics2D g, int x, int y, int size, Color color) {
+        g.setColor(withAlpha(color, 110));
+        g.setStroke(new BasicStroke(Math.max(2f, size / 70f)));
+        g.drawOval(x + size / 12, y + size / 12, size * 5 / 6, size * 5 / 6);
+        g.drawOval(x + size / 5, y + size / 5, size * 3 / 5, size * 3 / 5);
+        g.setColor(color);
+        g.setFont(new Font(Font.SERIF, Font.BOLD, size / 2));
+        drawCentered(g, "✦", g.getFont(), color, x + size / 2, y + size * 3 / 5, size);
     }
 
-    private void drawPillFilled(Graphics2D g, int x, int y, int w, int h, Color c) {
-        g.setColor(new Color(c.getRed(), c.getGreen(), c.getBlue(), 18));
-        g.fillRoundRect(x, y, w, h, h / 2, h / 2);
-        g.setColor(c);
-        g.setStroke(new BasicStroke(1f));
-        g.drawRoundRect(x, y, w, h, h / 2, h / 2);
+    private static int tierIndex(int tier) {
+        return Math.max(0, Math.min(TIER_COLORS.length - 1, tier - 1));
     }
 
-    private Color tierColor(int tier) {
-        return switch (tier) {
-            case 5 -> T5; case 4 -> T4; case 3 -> T3; case 2 -> T2;
-            default -> T1;
-        };
+    private static Color tierColor(int tier) {
+        return TIER_COLORS[tierIndex(tier)];
     }
 
-    private static String bestTierLabel(int tier) {
-        return switch (tier) {
-            case 5 -> "五阶·登峰造极"; case 4 -> "四阶·炉火纯青";
-            case 3 -> "三阶·融会贯通"; case 2 -> "二阶·登堂入室";
-            default -> "一阶·初窥门径";
-        };
+    private static Font fittedFont(Graphics2D g, String text, Font base, int maxWidth, float minSize) {
+        Font font = base;
+        while (font.getSize2D() > minSize
+                && g.getFontMetrics(font).stringWidth(text) > maxWidth) {
+            font = font.deriveFont(Math.max(minSize, font.getSize2D() - 2f));
+        }
+        return font;
     }
 
-    private static String formatNumber(int n) {
-        if (n >= 10000) return String.format("%.1fw", n / 1000.0 / 10);
-        return String.valueOf(n);
+    private static void drawFit(Graphics2D g, String text, Font base, float minSize,
+                                int maxWidth, int x, int y, Color color) {
+        if (text == null || text.isEmpty()) return;
+        Font font = fittedFont(g, text, base, maxWidth, minSize);
+        g.setFont(font);
+        g.setColor(color);
+        g.drawString(text, x, y);
     }
 
-    private static Color brighter(Color c, float f) {
+    private static void drawRightFit(Graphics2D g, String text, Font base, float minSize,
+                                     int rightX, int y, int maxWidth, Color color) {
+        if (text == null || text.isEmpty()) return;
+        Font font = fittedFont(g, text, base, maxWidth, minSize);
+        g.setFont(font);
+        g.setColor(color);
+        g.drawString(text, rightX - g.getFontMetrics(font).stringWidth(text), y);
+    }
+
+    private static void drawCentered(Graphics2D g, String text, Font font, Color color,
+                                     int centerX, int y, int maxWidth) {
+        if (text == null || text.isEmpty()) return;
+        Font fitted = fittedFont(g, text, font, maxWidth, 18f);
+        g.setFont(fitted);
+        g.setColor(color);
+        g.drawString(text, centerX - g.getFontMetrics(fitted).stringWidth(text) / 2, y);
+    }
+
+    private static String truncate(Graphics2D g, String text, Font font, int maxWidth) {
+        if (text == null || text.isEmpty()) return "";
+        g.setFont(font);
+        FontMetrics metrics = g.getFontMetrics();
+        if (metrics.stringWidth(text) <= maxWidth) return text;
+        String suffix = "…";
+        int end = text.length();
+        while (end > 0 && metrics.stringWidth(text.substring(0, end) + suffix) > maxWidth) end--;
+        return end == 0 ? suffix : text.substring(0, end) + suffix;
+    }
+
+    private static String singleLine(String text) {
+        return text == null ? "" : text.replace('\n', ' ').replace('\r', ' ').trim();
+    }
+
+    private static String safe(String text, String fallback) {
+        return text == null || text.isBlank() ? fallback : text;
+    }
+
+    private static String formatNumber(int value) {
+        return String.format(Locale.US, "%,d", value);
+    }
+
+    private static Color withAlpha(Color color, int alpha) {
+        return new Color(color.getRed(), color.getGreen(), color.getBlue(), alpha);
+    }
+
+    private static Color mix(Color a, Color b, float weight) {
+        float inverse = 1f - weight;
         return new Color(
-                Math.min(255, (int)(c.getRed() + (255 - c.getRed()) * f)),
-                Math.min(255, (int)(c.getGreen() + (255 - c.getGreen()) * f)),
-                Math.min(255, (int)(c.getBlue() + (255 - c.getBlue()) * f)));
+                (int) (a.getRed() * inverse + b.getRed() * weight),
+                (int) (a.getGreen() * inverse + b.getGreen() * weight),
+                (int) (a.getBlue() * inverse + b.getBlue() * weight));
+    }
+
+    private static Color brighter(Color color, float amount) {
+        return mix(color, Color.WHITE, amount);
     }
 }
