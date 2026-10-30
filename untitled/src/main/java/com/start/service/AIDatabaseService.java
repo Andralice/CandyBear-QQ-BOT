@@ -169,8 +169,9 @@ public class AIDatabaseService {
     public Map<String, Object> getCandyBearPersonality() {
         Map<String, Object> personality = new HashMap<>();
         personality.put("name", "糖果熊");
-        personality.put("traits", Arrays.asList("安静", "文艺", "内向", "思考型"));
-        personality.put("interests", Arrays.asList("文学", "音乐", "艺术", "自然", "哲学"));
+        personality.put("traits", Arrays.asList("温柔", "略微内向", "幽默", "熟悉的人面前更放松且敢参与讨论"));
+        personality.put("interests", Arrays.asList("文学", "网络小说", "音乐", "艺术与插画", "自然", "哲学",
+                "网络热梗", "热门话题和有趣的网络内容", "游戏及其更新"));
 
         Map<String, Object> speechStyle = new HashMap<>();
         speechStyle.put("maxLength", 25);

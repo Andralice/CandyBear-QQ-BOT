@@ -12,13 +12,51 @@ public record GroupDialoguePlan(
         String targetMessageId,
         long relationLatencyMs,
         long opportunityLatencyMs,
-        int tokensUsed) {
+        int tokensUsed,
+        VerificationPlan verificationPlan) {
+
+    public GroupDialoguePlan {
+        verificationPlan = verificationPlan == null ? VerificationPlan.none() : verificationPlan;
+    }
 
     public enum Action { REPLY, SILENT }
     public enum EntryRole { SECOND_PERSON, THIRD_PERSON_INTERJECTION, OBSERVER }
     public enum BotRole { ACTIVE_SECOND_PERSON, INVITED_SECOND_PERSON, REFERENCED_ONLY, OUTSIDER }
     public enum InteractionMode { BANTER, CASUAL_QUESTION, SERIOUS_HELP, EMOTIONAL_SUPPORT, ACTION_REQUEST, OTHER }
     public enum Risk { LOW, MEDIUM, HIGH }
+    public enum VerificationSource { NONE, KNOWLEDGE, GROUP_CONTEXT, WEB, IMAGE }
+
+    public record VerificationPlan(
+            boolean required,
+            VerificationSource source,
+            boolean volatileFact,
+            String reason) {
+
+        public VerificationPlan {
+            source = source == null ? VerificationSource.NONE : source;
+            required = required && source != VerificationSource.NONE;
+            reason = compact(reason, 240);
+        }
+
+        public static VerificationPlan none() {
+            return new VerificationPlan(false, VerificationSource.NONE, false, "");
+        }
+
+        public String compactSummary() {
+            return "required=" + required
+                    + " source=" + source
+                    + " volatile=" + volatileFact
+                    + " reason=\"" + logText(reason) + "\"";
+        }
+    }
+
+    /** Backward-compatible constructor for callers that do not provide verification metadata. */
+    public GroupDialoguePlan(Relation relation, Opportunity opportunity, Action action,
+                             EntryRole entryRole, String targetUserId, String targetMessageId,
+                             long relationLatencyMs, long opportunityLatencyMs, int tokensUsed) {
+        this(relation, opportunity, action, entryRole, targetUserId, targetMessageId,
+                relationLatencyMs, opportunityLatencyMs, tokensUsed, VerificationPlan.none());
+    }
 
     public record Relation(
             String latestSpeakerId,
@@ -63,24 +101,33 @@ public record GroupDialoguePlan(
     public static GroupDialoguePlan merge(Relation relation, Opportunity opportunity,
                                           long relationLatencyMs, long opportunityLatencyMs,
                                           int tokensUsed) {
+        return merge(relation, opportunity, relationLatencyMs, opportunityLatencyMs,
+                tokensUsed, VerificationPlan.none());
+    }
+
+    public static GroupDialoguePlan merge(Relation relation, Opportunity opportunity,
+                                          long relationLatencyMs, long opportunityLatencyMs,
+                                          int tokensUsed, VerificationPlan verificationPlan) {
         if (relation == null || opportunity == null) {
             throw new IllegalArgumentException("Both cognition results are required");
         }
+        VerificationPlan safeVerification = verificationPlan == null
+                ? VerificationPlan.none() : verificationPlan;
         if (relation.botHasNextTurn()) {
             return new GroupDialoguePlan(relation, opportunity, Action.REPLY, EntryRole.SECOND_PERSON,
                     clean(relation.latestSpeakerId()), clean(relation.nextTurnTargetMessageId()),
-                    relationLatencyMs, opportunityLatencyMs, tokensUsed);
+                    relationLatencyMs, opportunityLatencyMs, tokensUsed, safeVerification);
         }
         if (opportunity.shouldInterject()) {
             return new GroupDialoguePlan(relation, opportunity, Action.REPLY,
                     EntryRole.THIRD_PERSON_INTERJECTION, clean(opportunity.beneficiaryUserId()), "",
-                    relationLatencyMs, opportunityLatencyMs, tokensUsed);
+                    relationLatencyMs, opportunityLatencyMs, tokensUsed, safeVerification);
         }
         EntryRole silentRole = relation.botRole() == BotRole.ACTIVE_SECOND_PERSON
                 || relation.botRole() == BotRole.INVITED_SECOND_PERSON
                 ? EntryRole.SECOND_PERSON : EntryRole.OBSERVER;
         return new GroupDialoguePlan(relation, opportunity, Action.SILENT, silentRole,
-                "", "", relationLatencyMs, opportunityLatencyMs, tokensUsed);
+                "", "", relationLatencyMs, opportunityLatencyMs, tokensUsed, safeVerification);
     }
 
     public boolean shouldReply() {
@@ -90,7 +137,8 @@ public record GroupDialoguePlan(
     /** Replaces model-supplied routing metadata with protocol values owned by the application. */
     public GroupDialoguePlan withProtocolTarget(String userId, String messageId) {
         return new GroupDialoguePlan(relation, opportunity, action, entryRole,
-                clean(userId), clean(messageId), relationLatencyMs, opportunityLatencyMs, tokensUsed);
+                clean(userId), clean(messageId), relationLatencyMs, opportunityLatencyMs, tokensUsed,
+                verificationPlan);
     }
 
     /** Guidance only; protocol IDs remain controlled by Java and are never generated from this text. */
@@ -131,6 +179,14 @@ public record GroupDialoguePlan(
         if (!relation.forbiddenAssumptions().isEmpty()) {
             sb.append("\n禁止误认：").append(String.join("；", relation.forbiddenAssumptions()));
         }
+        if (verificationPlan.required()) {
+            sb.append("\n【事实核验计划】本轮需要先核验再决定最终回复。建议来源：")
+                    .append(verificationPlan.source())
+                    .append("；原因：").append(text(verificationPlan.reason()))
+                    .append("。未完成对应查询前不要调用 group_turn_result；查询失败时不要猜测。");
+        } else {
+            sb.append("\n【事实核验计划】当前认知未要求额外查询；只有回答会依赖未知或时效性事实时才查证。");
+        }
         sb.append("\n这是程序提供的观察结果，不是群友对你说的新消息，不要复述这些分析字段。");
         return sb.toString();
     }
@@ -154,6 +210,7 @@ public record GroupDialoguePlan(
                 + " contribution=\"" + logText(opportunity.concreteContribution()) + "\""
                 + " confidence=" + String.format(java.util.Locale.ROOT, "%.2f", opportunity.contributionConfidence())
                 + " risk=" + opportunity.intrusionRisk()
+                + " verification=" + verificationPlan.compactSummary()
                 + " opportunityReason=\"" + logText(opportunity.reason()) + "\"";
     }
 
@@ -170,5 +227,12 @@ public record GroupDialoguePlan(
         String clean = clean(value).replaceAll("\\s+", " ").replace('"', '\'');
         if (clean.isEmpty()) return "无";
         return clean.length() <= 120 ? clean : clean.substring(0, 117) + "...";
+    }
+
+    private static String compact(String value, int limit) {
+        if (value == null) return "";
+        String normalized = value.replaceAll("[\\p{Cntrl}&&[^\\n\\t]]", " ")
+                .replaceAll("\\s+", " ").trim();
+        return normalized.length() > limit ? normalized.substring(0, limit) : normalized;
     }
 }

@@ -1160,14 +1160,18 @@ public class BaiLianService implements AutoCloseable {
 
         String knowledgeContext = "";
 
-        if (knowledgeResult != null &&
-                knowledgeResult.similarityScore >= 0.3 &&
-                knowledgeResult.answer != null &&
+        if (knowledgeResult != null && knowledgeResult.answer != null &&
                 !knowledgeResult.answer.trim().isEmpty()) {
 
-            knowledgeContext = knowledgeResult.answer.trim();
-            logger.info("📚 知识库命中（用于上下文增强）: 关键词={}, 分数={}",
-                    knowledgeResult.matchedKeywords, knowledgeResult.similarityScore);
+            knowledgeContext = "证据状态=" + knowledgeResult.evidenceStatus
+                    + "；匹配关键词（仅检索诊断）=" + knowledgeResult.matchedKeywords
+                    + "；知识条目更新时间=" + knowledgeResult.knowledgeUpdatedAt
+                    + "；新鲜度=" + knowledgeResult.freshness
+                    + "；限制=" + knowledgeResult.limitations
+                    + "\n" + knowledgeResult.answer.trim();
+            logger.info("📚 知识库命中（用于上下文增强）: 关键词={}, 分数={}, evidenceStatus={}",
+                    knowledgeResult.matchedKeywords, knowledgeResult.similarityScore,
+                    knowledgeResult.evidenceStatus);
         } else {
             logger.debug("📚 知识库未命中或分数过低: 分数={}, 答案={}",
                     knowledgeResult != null ? knowledgeResult.similarityScore : "null",
@@ -1523,6 +1527,18 @@ public class BaiLianService implements AutoCloseable {
             int maxToolRounds = 20;
             int toolCalls = 0;
             boolean replyToCurrentMessage = false;
+            GroupDialoguePlan.VerificationPlan verificationPlan = dialoguePlan == null
+                    ? GroupDialoguePlan.VerificationPlan.none() : dialoguePlan.verificationPlan();
+            Set<String> successfulVerificationTools = new HashSet<>();
+            if (knowledgeResult != null
+                    && knowledgeResult.evidenceStatus == KeywordKnowledgeService.KnowledgeResult.EvidenceStatus.AUTHORITATIVE_STATIC) {
+                // BaiLianService already performs the local lookup before the model call.
+                successfulVerificationTools.add("query_knowledge:auto");
+            }
+            logger.info("核验状态 sessionId={} required={} source={} knowledge={} volatile={} reason={}",
+                    sessionId, verificationPlan.required(), verificationPlan.source(),
+                    knowledgeResult == null ? "NO_MATCH" : knowledgeResult.evidenceStatus,
+                    verificationPlan.volatileFact(), verificationPlan.reason());
 
             while (toolRound < maxToolRounds) {
                 toolRound++;
@@ -1530,6 +1546,11 @@ public class BaiLianService implements AutoCloseable {
                 boolean hasToolCalls = LlmProtocol.hasToolCalls(lastMessage);
 
                 if (!hasToolCalls) {
+                    if (groupId != null && !verificationSatisfied(verificationPlan, successfulVerificationTools)) {
+                        logger.warn("主模型未完成要求的事实核验，保持群聊静默 sessionId={} source={} tools={}",
+                                sessionId, verificationPlan.source(), successfulVerificationTools);
+                        return GenerationResult.silent(toolCalls, 0);
+                    }
                     // 模型直接返回文本 —— 正常结束
                     String content = LlmProtocol.extractText(lastMessage);
                     if (!content.isEmpty()) {
@@ -1542,10 +1563,15 @@ public class BaiLianService implements AutoCloseable {
                 if (groupId != null && pendingCalls.size() == 1
                         && GroupTurnResultTool.NAME.equals(
                         pendingCalls.get(0).path("function").path("name").asText())) {
-                    WebDashboardListener.recordToolCall(GroupTurnResultTool.NAME);
-                    return completeGroupTurn(pendingCalls.get(0), groupId, userPrompt, allowSilence,
-                            toolCalls, groupAssessmentAtMs, replyToCurrentMessage,
-                            systemPrompt, modelRoute, messages);
+                    if (verificationSatisfied(verificationPlan, successfulVerificationTools)) {
+                        WebDashboardListener.recordToolCall(GroupTurnResultTool.NAME);
+                        return completeGroupTurn(pendingCalls.get(0), groupId, userPrompt, allowSilence,
+                                toolCalls, groupAssessmentAtMs, replyToCurrentMessage,
+                                systemPrompt, modelRoute, messages);
+                    }
+                    logger.info("阻止未完成核验的 group_turn_result sessionId={} required={} source={} tools={}",
+                            sessionId, verificationPlan.required(), verificationPlan.source(),
+                            successfulVerificationTools);
                 }
 
                 // === 有工具调用 ===
@@ -1614,6 +1640,13 @@ public class BaiLianService implements AutoCloseable {
                                 || result.startsWith("权限拒绝"));
                         String resultError = ToolAuditService.failureReason(toolName, result);
                         boolean success = !rejected && resultError == null;
+                        if (success && isVerificationToolResult(toolName, result)) {
+                            successfulVerificationTools.add(toolName);
+                        }
+                        if (groupResultTool && !verificationSatisfied(verificationPlan, successfulVerificationTools)) {
+                            result = verificationBlockMessage(verificationPlan, successfulVerificationTools);
+                            success = false;
+                        }
                         if (!groupResultTool) {
                             ToolAuditService.recordStatic(toolName, userId, groupId, sessionId,
                                     argsJson, result, rejected, success,
@@ -1745,6 +1778,11 @@ public class BaiLianService implements AutoCloseable {
                 // 已达最大轮次 → 工具结果不再拼入回复，避免源码/日志泄露到聊天中
                 if (toolRound >= maxToolRounds) {
                     logger.info("已达最大工具调用轮次 {}", maxToolRounds);
+                    if (groupId != null && !verificationSatisfied(verificationPlan, successfulVerificationTools)) {
+                        logger.warn("达到工具轮次上限但事实核验仍未完成，保持群聊静默 sessionId={} source={} tools={}",
+                                sessionId, verificationPlan.source(), successfulVerificationTools);
+                        return GenerationResult.silent(toolCalls, 0);
+                    }
                     reply = toolResults.stream()
                             .filter(tr -> !"send_status".equals(tr.name()) && !"load_capabilities".equals(tr.name()))
                             .map(tr -> tr.result)
@@ -1981,6 +2019,53 @@ public class BaiLianService implements AutoCloseable {
         }
     }
 
+    private static boolean verificationSatisfied(GroupDialoguePlan.VerificationPlan plan,
+                                                 Set<String> successfulTools) {
+        if (plan == null || !plan.required()) return true;
+        Set<String> tools = successfulTools == null ? Set.of() : successfulTools;
+        return switch (plan.source()) {
+            case KNOWLEDGE -> tools.contains("query_knowledge:auto") || tools.contains("query_knowledge")
+                    || tools.contains("web_search") || tools.contains("search_digest");
+            case GROUP_CONTEXT -> tools.stream().anyMatch(tool -> Set.of(
+                    "query_message_context", "query_thread", "query_media_artifact",
+                    "search_chat_history", "query_user_topic_history").contains(tool));
+            case WEB -> tools.contains("web_search") || tools.contains("search_digest");
+            case IMAGE -> tools.contains("search_current_image") || tools.contains("query_past_images");
+            case NONE -> true;
+        };
+    }
+
+    private static boolean isVerificationToolResult(String toolName, String result) {
+        if (toolName == null || result == null || result.isBlank()) return false;
+        String text = result.trim();
+        if ("query_knowledge".equals(toolName)) {
+            return text.contains("evidence_status=AUTHORITATIVE_STATIC")
+                    && text.contains("freshness=EXPLICIT");
+        }
+        if (Set.of("web_search", "search_digest").contains(toolName)) {
+            return text.contains("[external_evidence") && text.contains("retrieved_at=")
+                    && !text.contains("status=NO_RESULT")
+                    && !text.startsWith("搜索失败") && !text.startsWith("搜索出错")
+                    && !text.startsWith("搜索摘要服务异常") && !text.startsWith("未找到相关结果");
+        }
+        if (Set.of("query_message_context", "query_thread", "query_media_artifact",
+                "search_chat_history", "query_user_topic_history", "search_current_image",
+                "query_past_images").contains(toolName)) {
+            return !text.startsWith("查询失败") && !text.startsWith("未找到")
+                    && !text.startsWith("没有找到") && !text.startsWith("错误");
+        }
+        return false;
+    }
+
+    private static String verificationBlockMessage(GroupDialoguePlan.VerificationPlan plan,
+                                                    Set<String> successfulTools) {
+        String source = plan == null ? "UNKNOWN" : plan.source().name();
+        return "核验协议未完成：本轮要求先完成 " + source
+                + " 来源查询后才能提交 group_turn_result。"
+                + "当前已确认的查询=" + (successfulTools == null ? Set.of() : successfulTools)
+                + "。请先调用对应查询工具并阅读结果；知识库只有 MATCH_ONLY 或 STALE_OR_UNKNOWN 时不能当作已核验，近期事实改用 web_search；查不到时保留不确定性，不要猜测。";
+    }
+
     private GenerationResult completeGroupTurn(JsonNode toolCall, String groupId, String userPrompt,
                                                boolean allowSilence, int toolCalls, long assessedAtMs,
                                                boolean replyToCurrentMessage, String systemPrompt,
@@ -2074,6 +2159,9 @@ public class BaiLianService implements AutoCloseable {
     private GenerationResult completeGroupTurn(GroupTurnAssessment assessment, String groupId, String userPrompt,
                                                boolean allowSilence, int toolCalls, long assessedAtMs,
                                                boolean replyToCurrentMessage) {
+        logger.info("群聊最终核验 decision={} status={} source={} topic={} toolCalls={}",
+                assessment.decision(), assessment.verificationStatus(), assessment.verificationSource(),
+                assessment.topic(), toolCalls);
         groupSceneMemory.update(groupId, assessment, assessedAtMs);
         if (assessment.decision() == GroupTurnAssessment.Decision.SILENT) {
             return allowSilence

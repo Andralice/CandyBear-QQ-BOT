@@ -97,12 +97,14 @@ public class KeywordKnowledgeService {
         int priority;
         Set<String> keywords;
         String category;
+        Timestamp updatedAt;
 
-        KnowledgeItem(long id, String patternStr, String answer, int priority, String category) {
+        KnowledgeItem(long id, String patternStr, String answer, int priority, String category, Timestamp updatedAt) {
             this.id = id;
             this.answer = answer;
             this.priority = priority;
             this.category = category;
+            this.updatedAt = updatedAt;
 
             this.patterns = new ArrayList<>();
             if (patternStr != null && !patternStr.trim().isEmpty()) {
@@ -264,7 +266,7 @@ public class KeywordKnowledgeService {
         try (Connection conn = dataSource.getConnection();
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery(
-                     "SELECT id, question_pattern, answer_template, priority, category " +
+                     "SELECT id, question_pattern, answer_template, priority, category, updated_at " +
                              "FROM knowledge_base WHERE is_active = TRUE ORDER BY priority DESC")) {
 
             keywordCache.clear();
@@ -276,7 +278,8 @@ public class KeywordKnowledgeService {
                         rs.getString("question_pattern"),
                         rs.getString("answer_template"),
                         rs.getInt("priority"),
-                        rs.getString("category")
+                        rs.getString("category"),
+                        rs.getTimestamp("updated_at")
                 );
                 fullCache.add(item);
                 for (String kw : item.keywords) {
@@ -393,6 +396,15 @@ public class KeywordKnowledgeService {
         res.similarityScore = best.score;
         res.matchedKeywords = new ArrayList<>(best.matchedKeywords);
         res.category = best.item.category;
+        // Keep the existing retrieval threshold, but expose a separate quality
+        // state so a weak lexical hit cannot be mistaken for verified evidence.
+        // A lexical score only ranks matches. It cannot prove authority or freshness.
+        res.matchQuality = KnowledgeResult.MatchQuality.LEXICAL_MATCH;
+        res.evidenceStatus = KnowledgeResult.EvidenceStatus.MATCH_ONLY;
+        res.source = "keyword_knowledge_base";
+        res.knowledgeUpdatedAt = best.item.updatedAt == null ? "unknown" : best.item.updatedAt.toInstant().toString();
+        res.freshness = "UNKNOWN";
+        res.limitations = "仅表示关键词匹配；没有记录权威来源、事实核验时间或有效期，不能替代近期事实的外部核验";
         return res;
     }
 
@@ -565,7 +577,7 @@ public class KeywordKnowledgeService {
             // { pattern, answer, category, priority }
             {"糖果熊 人设|糖果熊 你是谁|糖果熊 介绍|糖果熊 自我|你是糖果熊吗",
              "已确认背景（供模型理解，不是现成回复）：角色名=糖果熊；角色背景=按人的生活经历设定；系统身份=聊天机器人；年龄=17岁；在读高二。"
-             + "兴趣包括动漫、游戏、音乐和小说；常玩三角洲行动、洛克王国、崩铁。"
+             + "性格温柔、略微内向，本质幽默；面对熟悉的人更放松，也敢参与讨论。兴趣广泛，包括动漫、游戏、音乐、文学和网络小说，也会关注网络热梗、热门话题、有趣的帖子或事件，以及游戏和游戏更新。常玩三角洲行动、洛克王国、崩铁；兴趣不等于对所有相关内容都熟悉。"
              + "偏好作家有村上春树、余华，常听周杰伦、陈奕迅和日系ACG。"
              + "偏好秋天和多肉葡萄；数学相对不擅长，语文和英语较好。"
              + "只取与当前问题相关的事实，用自然措辞回答，不逐项复述。",
@@ -586,12 +598,12 @@ public class KeywordKnowledgeService {
              "糖果熊人设", "7"},
 
             {"糖果熊 家庭|糖果熊 爸妈|糖果熊 父母|你家|你爸妈",
-             "家庭参考：父母都是普通上班族，对她关心；偶尔会唠叨学习。独生女。涉及家庭时只说对方问到的部分，不补充未确认的细节。",
+             "家庭参考：家境不错；家庭因素对她的生活有一定影响，但具体原因尚未设定，不得自行补充。家庭情况只在对方确实问到且与当前话题相关时简要回应，不主动倾诉或一次性透露全部情况。",
              "糖果熊人设", "6"},
 
             {"糖果熊 学校|糖果熊 上学|糖果熊 学习|你在哪上学|你上学",
-             "学习参考：在读高二，数学相对不擅长，语文和英语较好；日常包含上课、作业和考试。"
-             + "因为健康情况并非每天到校，具体出勤以生活记录为准；不要把设定扩写成当前发生的事件。",
+             "学习参考：在读高二，数学相对不擅长，语文和英语较好。因为身体不好，她不常去学校，有较多时间放在网络、休息和广泛兴趣上，日常不只围绕学习。"
+             + "具体出勤以生活记录为准；不要把设定扩写成当前发生的事件，也不要自行补充病情或家庭原因。",
              "糖果熊人设", "7"},
 
             {"糖果熊 背景|糖果熊 故事|糖果熊 经历",
@@ -742,18 +754,28 @@ public class KeywordKnowledgeService {
     }
 
     public static class KnowledgeResult {
+        public enum MatchQuality { NONE, LEXICAL_MATCH }
+        public enum EvidenceStatus { MATCH_ONLY, AUTHORITATIVE_STATIC, FRESH_EXTERNAL, STALE_OR_UNKNOWN, NO_MATCH }
+
         public KnowledgeItem matchedItem;
         public long id;
         public String answer;
         public double similarityScore;
         public List<String> matchedKeywords;
         public String category;
+        public MatchQuality matchQuality = MatchQuality.NONE;
+        public EvidenceStatus evidenceStatus = EvidenceStatus.NO_MATCH;
+        public String source = "";
+        public String knowledgeUpdatedAt = "unknown";
+        public String freshness = "UNKNOWN";
+        public String limitations = "";
 
         @Override
         public String toString() {
             return "KnowledgeResult{" +
                     "answer='" + (answer != null && answer.length() > 50 ? answer.substring(0, 50) + "..." : answer) + '\'' +
                     ", score=" + similarityScore +
+                    ", evidenceStatus=" + evidenceStatus +
                     ", category='" + category + '\'' +
                     ", keywords=" + matchedKeywords +
                     '}';

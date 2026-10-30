@@ -536,30 +536,28 @@ public class Main extends WebSocketClient {
     }
 
     private JsonNode sendWithReceipt(String action, ObjectNode params, int timeoutSeconds) {
-        try {
-            CompletableFuture<JsonNode> future = callOneBotApi(action, params, Math.max(10, timeoutSeconds * 2L));
-            JsonNode response = future.get(timeoutSeconds, TimeUnit.SECONDS);
-            if (response == null) {
-                logger.warn("⚠️ OneBot API {} 回执为空（超时或连接异常）", action);
-                return null;
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            try {
+                CompletableFuture<JsonNode> future = callOneBotApi(action, params, Math.max(10, timeoutSeconds * 2L));
+                JsonNode response = future.get(timeoutSeconds, TimeUnit.SECONDS);
+                if (response != null && "ok".equals(response.path("status").asText())
+                        && response.path("retcode").asInt() == 0) {
+                    return response;
+                }
+                if (response == null) {
+                    logger.warn("⚠️ OneBot API {} 回执为空（第 {}/2 次）", action, attempt);
+                } else {
+                    logger.warn("⚠️ OneBot API {} 回执失败: status={}, retcode={}, msg={}, wording={}（第 {}/2 次）",
+                            action, response.path("status").asText(), response.path("retcode").asInt(),
+                            response.path("msg").asText(), response.path("wording").asText(), attempt);
+                }
+            } catch (java.util.concurrent.TimeoutException e) {
+                logger.warn("⏰ OneBot API {} 回执超时（{}s，第 {}/2 次）", action, timeoutSeconds, attempt);
+            } catch (Exception e) {
+                logger.error("❌ OneBot API {} 发送异常（第 {}/2 次）: {}", action, attempt, e.toString());
             }
-            String status = response.path("status").asText();
-            int retcode = response.path("retcode").asInt();
-            if (!"ok".equals(status) || retcode != 0) {
-                String msg = response.path("msg").asText();
-                String wording = response.path("wording").asText();
-                logger.warn("⚠️ OneBot API {} 回执失败: status={}, retcode={}, msg={}, wording={}",
-                        action, status, retcode, msg, wording);
-                return null;
-            }
-            return response;
-        } catch (java.util.concurrent.TimeoutException e) {
-            logger.warn("⏰ OneBot API {} 回执超时（{}s）", action, timeoutSeconds);
-            return null;
-        } catch (Exception e) {
-            logger.error("❌ OneBot API {} 发送异常: {}", action, e.toString());
-            return null;
         }
+        return null;
     }
 
     // ===== 消息发送便捷方法 =====

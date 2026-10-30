@@ -230,7 +230,7 @@ public class BotConfig {
             groupCognitionModel = resolveOrEmpty(props.getProperty("group-cognition.model", ""));
             if (groupCognitionModel.isBlank()) groupCognitionModel = auxiliaryModel;
             groupCognitionTimeoutMs = parseInt(
-                    resolveOrEmpty(props.getProperty("group-cognition.timeout-ms", "20000")), 20000);
+                    resolveOrEmpty(props.getProperty("group-cognition.timeout-ms", "25000")), 25000);
             groupCognitionReasoningEffort = resolveOrEmpty(
                     props.getProperty("group-cognition.reasoning-effort", ""));
             groupCognitionProtocol = resolveOrEmpty(

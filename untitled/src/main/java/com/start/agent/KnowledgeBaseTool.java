@@ -22,7 +22,7 @@ public class KnowledgeBaseTool implements Tool {
 
     @Override
     public String getDescription() {
-        return "查询内部知识库，回答关于居住地和兴趣的问题，例如：'美食'、'烤肉'、'音乐'、'追番'、'书籍'、'城市'";
+        return "查询已有知识库。遇到当前语境不能解释的名词、术语、网络梗，或需要核实稳定事实时先查这里；返回的 MATCH_ONLY 只是关键词线索，不代表来源、正确性或新鲜度，需要时再根据资料类型查群聊记录或联网搜索。";
     }
 
     // ✅ 新增：定义工具所需的参数结构（JSON Schema）
@@ -49,14 +49,18 @@ public class KnowledgeBaseTool implements Tool {
 
         KeywordKnowledgeService.KnowledgeResult result = knowledgeService.query(keyword.trim());
 
-        if (result != null &&
-                result.answer != null &&
-                !result.answer.trim().isEmpty() &&
-                result.similarityScore >= 0.3) {
+        if (result != null && result.answer != null && !result.answer.trim().isEmpty()) {
 
-            return "[id=" + result.id + "] " + result.answer.trim();
+            return "[match_quality=" + result.matchQuality
+                    + ", evidence_status=" + result.evidenceStatus
+                    + ", id=" + result.id
+                    + ", source=" + result.source
+                    + ", knowledge_updated_at=" + result.knowledgeUpdatedAt
+                    + ", freshness=" + result.freshness
+                    + ", limitations=" + result.limitations + "]\n"
+                    + result.answer.trim();
         }
 
-        return "未找到相关信息";
+        return "[match_quality=NONE, evidence_status=NO_MATCH] 未找到相关信息";
     }
 }

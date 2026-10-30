@@ -1,0 +1,11 @@
+[Unit]
+Description=Remove stale CandyBear screenshot temporary files
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/sbin/candybear-clean-temp.sh
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/tmp

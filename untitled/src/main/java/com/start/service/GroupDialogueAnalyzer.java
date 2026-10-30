@@ -19,9 +19,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 
-/** Runs discourse-relation and third-party-value judgments in parallel. */
+/** Makes one structured group-turn and interjection decision from the public transcript. */
 public final class GroupDialogueAnalyzer {
     private static final Logger logger = LoggerFactory.getLogger("com.start.cognition");
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -46,11 +47,12 @@ public final class GroupDialogueAnalyzer {
 
     private static final String OPPORTUNITY_SYSTEM = """
             你是糖果熊的群聊兴趣与参与判断器。只判断：在最新一句没有明确把糖果熊当作第二人时，糖果熊是否会因为自己的性格、兴趣、长期事实或当前可确认的知识而自然想参与；不要生成最终回复。
-            糖果熊的性格：安静、文艺、内向、思考型；偏好文学、音乐、艺术、自然、哲学，也会关注群里真实出现的游戏和网络话题。她不是每个话题都感兴趣，但有兴趣时可以用一句简短、具体、像群友的反应加入。
-            should_interject 可以在以下任一条件成立且证据足够时为 true：话题与糖果熊的兴趣或已知事实有明确交集；群友分享了她能理解或补充的内容；这是自然的接梗、问候、情绪回应或轻松闲聊，糖果熊会有真实反应。不能要求群友先卡住、提问或等待帮助。
-            仍然必须为 false 的情况：明确 @ 或回复其他人且内容明显只对其他人说；私密或敏感的两人对话；群友已经明确拒绝插话；糖果熊没有可靠知识或具体感受可说；只能靠猜测图片、人物、经历或事实；插话会打断正在进行的严肃交流。
-            普通闲聊不自动为 false；先判断糖果熊是否有兴趣和自然反应，再判断是否需要保持安静。intrusion_risk=HIGH 时必须为 false；MEDIUM 可以在贡献具体且简短时考虑；contribution_confidence 至少为 0.55。
-            open_need 可以为空。concrete_contribution 必须写出糖果熊此刻实际能贡献的兴趣点、事实或情绪反应，用于验证不是只靠关键词触发。beneficiary_user_id 有明确对象时填写，否则留空。
+            糖果熊是高中女生，因为身体不好不常去学校，日常有较多时间接触网络和发展兴趣；家境不错，家庭因素影响生活，但不要自行编造具体原因或让她在群聊里主动倾诉。她温柔、略内向，本质幽默；面对熟悉的群友会放松并敢于参与讨论。
+            她兴趣广泛，包括文学、网络小说、音乐、艺术、网络热梗、热门话题和有趣的网络内容，也会关注真实出现的游戏及更新。兴趣不等于专业知识或亲身经历；不熟悉的话题可以根据可见内容表现好奇或问一句，不能装作了解。
+            只判断：在最新一句没有明确把糖果熊当作第二人时，她是否会自然想参与；不要生成最终回复。关系判断中的 OUTSIDER、没有 @ 糖果熊、没有明确邀请，本身都不能作为拒绝普通群聊插话的理由。
+            should_interject 可以在以下任一条件成立且证据足够时为 true：话题与她的兴趣、已知事实或真实好奇有联系；群友分享了她能理解或补充的内容；这是自然的接梗、面向全群的问候、情绪回应或轻松闲聊，她会有真实反应。可以只表达简短兴趣、关心、玩笑或基于当前内容的好奇，不需要先证明能提供专业知识，也不必等群友卡住或求助。
+            仍然必须为 false 的情况：明确 @ 或回复其他人且内容明显只对其他人说；私密或敏感的两人对话；群友已经明确拒绝插话；只能靠猜测图片、人物、经历或事实；插话会打断正在进行的严肃交流。intrusion_risk=HIGH 时必须为 false；MEDIUM 可以在回应具体且简短时考虑。
+            open_need 可以为空。concrete_contribution 可以是糖果熊此刻真实、简短的兴趣反应、情绪回应、玩笑或基于可见内容的问题；不能只因话题关键词命中而编造知识或经历。轻松、低风险的自然回应可按较低置信度参与，但 contribution_confidence 至少为 0.30。beneficiary_user_id 有明确对象时填写，否则留空。
             """;
 
     private static final JsonNode RELATION_FORMAT = parseConstant("""
@@ -90,6 +92,14 @@ public final class GroupDialogueAnalyzer {
               "required":["open_need","humans_explicitly_stalled","already_being_handled","concrete_contribution","contribution_confidence","intrusion_risk","should_interject","beneficiary_user_id","reason"]
             }}}
             """);
+    private static final JsonNode COGNITION_FORMAT = combineFormats();
+    private static final String COGNITION_SYSTEM = RELATION_SYSTEM + "\n" + OPPORTUNITY_SYSTEM
+            + "\n必须在同一个 JSON 结果中同时回答以上两组字段；关系判断和参与判断要分别基于证据，不得互相代替。"
+            + "\n还要判断事实核验需求：只有当未知事实会改变当前回复、话题涉及近期变化、陌生名词或图片身份时才 required=true。"
+            + "\n普通接梗、主观感受、关系回应和上下文已经足够的问题，required=false。"
+            + "\nsource=KNOWLEDGE 表示先查已有知识库；GROUP_CONTEXT 表示查群消息或历史；WEB 表示公开且可能变化的事实；IMAGE 表示图片身份或内容必须查证。"
+            + "\n不要因为关键词陌生就强行要求搜索，也不要把查证计划写进最终群消息。";
+    private static final int MAX_RETRIES = 2;
 
     private final GroupCognitionMode mode;
     private final Set<Long> enabledGroups;
@@ -218,24 +228,37 @@ public final class GroupDialogueAnalyzer {
     }
 
     public CompletableFuture<GroupDialoguePlan> analyzeAsync(List<BaiLianService.PublicMessage> messages) {
+        return analyzeAsync(messages, false);
+    }
+
+    public CompletableFuture<GroupDialoguePlan> analyzeAsync(
+            List<BaiLianService.PublicMessage> messages, boolean activeSession) {
         String transcript = buildTranscript(messages);
-        CompletableFuture<Part> relation = call(RELATION_SYSTEM, transcript, RELATION_FORMAT, "relation");
-        CompletableFuture<Part> opportunity = call(OPPORTUNITY_SYSTEM, transcript, OPPORTUNITY_FORMAT, "opportunity");
-        return relation.thenCombine(opportunity, (r, o) -> {
+        return call(COGNITION_SYSTEM, transcript, COGNITION_FORMAT, "cognition")
+                .thenApply(part -> {
             GroupDialoguePlan.Relation normalizedRelation = applyTurnEvidenceConstraint(
-                    parseRelation(r.content()), messages);
+                    parseRelation(part.content()), messages, activeSession);
             GroupDialoguePlan plan = GroupDialoguePlan.merge(
-                    normalizedRelation, parseOpportunity(o.content()),
-                    r.latencyMs(), o.latencyMs(), r.tokensUsed() + o.tokensUsed());
+                    normalizedRelation, parseOpportunity(part.content()),
+                    part.latencyMs(), part.latencyMs(), part.tokensUsed(),
+                    parseVerification(part.content()));
             return applyProtocolTarget(plan, messages);
+        }).whenComplete((plan, error) -> {
+            if (error != null) {
+                Throwable cause = rootCause(error);
+                logger.warn("group cognition failed stage=analysis type={} reason={}",
+                        cause.getClass().getSimpleName(), safeMessage(cause));
+            }
         });
     }
 
     public GroupDialoguePlan analyze(List<BaiLianService.PublicMessage> messages) {
         try {
-            return analyzeAsync(messages).get(timeoutMs + 2_000L, TimeUnit.MILLISECONDS);
+            return analyzeAsync(messages).get(timeoutMs * (MAX_RETRIES + 1L) + 1_000L, TimeUnit.MILLISECONDS);
         } catch (Exception e) {
-            logger.warn("group cognition failed; legacy path remains active: {}", rootMessage(e));
+            Throwable cause = rootCause(e);
+            logger.warn("group cognition failed stage=wait type={} reason={}",
+                    cause.getClass().getSimpleName(), safeMessage(cause));
             return null;
         }
     }
@@ -246,10 +269,13 @@ public final class GroupDialogueAnalyzer {
         bot.put("user_id", String.valueOf(BotConfig.getBotQq()));
         bot.put("nickname", BotConfig.getBotName());
         ObjectNode personality = bot.putObject("personality");
-        personality.putArray("traits").add("安静").add("文艺").add("内向").add("思考型");
-        personality.putArray("interests").add("文学").add("音乐").add("艺术")
-                .add("自然").add("哲学").add("群内真实出现的游戏和网络话题");
-        personality.put("participation_rule", "有兴趣或有可靠知识时可以自然参与；没有事实和具体感受时保持安静");
+        personality.putArray("traits").add("温柔").add("略微内向").add("幽默")
+                .add("面对熟悉的人更放松并敢参与讨论");
+        personality.putArray("interests").add("文学与网络小说").add("音乐").add("艺术与插画")
+                .add("网络热梗和有趣的事").add("热门话题").add("游戏和游戏更新")
+                .add("自然").add("哲学");
+        personality.put("background", "高中女生；身体原因不常去学校，有较多时间接触网络和兴趣；家境不错，具体家庭原因未知");
+        personality.put("participation_rule", "对感兴趣或觉得有趣的普通群聊可以自然简短参与，不要求先有专业知识或被直接叫到；不熟悉时只表达好奇或询问可见内容，不编造事实和经历");
         ArrayNode array = root.putArray("messages");
         if (messages == null || messages.isEmpty()) return root.toString();
 
@@ -320,7 +346,7 @@ public final class GroupDialogueAnalyzer {
             tool.put("description", "返回 " + toolName + " 的群聊认知结果，不要输出普通文本");
             tool.put("input_schema", responseFormat.path("json_schema").path("schema"));
             body = LlmProtocol.buildRequestBody(
-                    llmProtocol, model, systemPrompt, messages, List.of(tool), 420, "");
+                    llmProtocol, model, systemPrompt, messages, List.of(tool), 700, "");
             body.put("temperature", 0.0);
             body.put("tool_choice", Map.of("type", "tool", "name", toolName));
         } else {
@@ -330,8 +356,7 @@ public final class GroupDialogueAnalyzer {
             openAiMessages.addObject().put("role", "system").put("content", systemPrompt);
             openAiMessages.addObject().put("role", "user").put("content", transcript);
             openAiBody.put("temperature", 0.0);
-            openAiBody.put("top_p", 1.0);
-            openAiBody.put("max_tokens", 420);
+            openAiBody.put("max_tokens", 700);
             if (!reasoningEffort.isBlank()) openAiBody.put("reasoning_effort", reasoningEffort);
             if (!thinkingType.isBlank()) openAiBody.putObject("thinking").put("type", thinkingType);
             openAiBody.put("seed", 42);
@@ -355,12 +380,16 @@ public final class GroupDialogueAnalyzer {
                 .POST(HttpRequest.BodyPublishers.ofString(MAPPER.valueToTree(body).toString()))
                 .build();
 
-        long started = System.nanoTime();
+        return sendWithRetry(request, taskName, System.nanoTime(), 0);
+    }
+
+    private CompletableFuture<Part> sendWithRetry(HttpRequest request, String taskName,
+                                                   long startedNanos, int attempt) {
         return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
                 .thenApply(response -> {
-                    long latencyMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+                    long latencyMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
                     if (response.statusCode() != 200) {
-                        throw new IllegalStateException(taskName + " HTTP " + response.statusCode());
+                        throw new CognitionHttpException(response.statusCode());
                     }
                     try {
                         JsonNode root = MAPPER.readTree(response.body());
@@ -385,9 +414,91 @@ public final class GroupDialogueAnalyzer {
                         }
                         return new Part(parseStructuredJson(content), latencyMs, tokens);
                     } catch (Exception e) {
-                        throw new IllegalStateException(taskName + " response parse failed", e);
+                        throw new CognitionParseException(taskName + " response parse failed", e);
                     }
-                });
+                }).handle((part, error) -> {
+                    if (error == null) return CompletableFuture.completedFuture(part);
+                    Throwable cause = rootCause(error);
+                    if (!isRetryable(cause) || attempt >= MAX_RETRIES) {
+                        return CompletableFuture.<Part>failedFuture(cause);
+                    }
+                    logger.warn("group cognition retry task={} attempt={} type={} reason={}",
+                            taskName, attempt + 1, cause.getClass().getSimpleName(), safeMessage(cause));
+                    return CompletableFuture.runAsync(() -> {},
+                                    CompletableFuture.delayedExecutor(500, TimeUnit.MILLISECONDS))
+                            .thenCompose(ignored -> sendWithRetry(request, taskName, startedNanos, attempt + 1));
+                }).thenCompose(stage -> stage);
+    }
+
+    private static boolean isRetryable(Throwable error) {
+        Throwable cause = rootCause(error);
+        if (cause instanceof java.net.http.HttpTimeoutException
+                || cause instanceof java.net.ConnectException
+                || cause instanceof java.io.IOException) return true;
+        if (cause instanceof CognitionParseException) return true;
+        return cause instanceof CognitionHttpException http && (http.statusCode == 429 || http.statusCode >= 500);
+    }
+
+    private static Throwable rootCause(Throwable error) {
+        Throwable cause = error;
+        while ((cause instanceof CompletionException || cause instanceof java.util.concurrent.ExecutionException)
+                && cause.getCause() != null) cause = cause.getCause();
+        return cause;
+    }
+
+    private static String safeMessage(Throwable error) {
+        String message = error.getMessage();
+        if (message == null || message.isBlank()) return "no details";
+        String sanitized = message.replaceAll("[\\r\\n\\t]+", " ");
+        return sanitized.substring(0, Math.min(240, sanitized.length()));
+    }
+
+    private static JsonNode combineFormats() {
+        ObjectNode format = MAPPER.createObjectNode();
+        format.put("type", "json_schema");
+        ObjectNode jsonSchema = format.putObject("json_schema");
+        jsonSchema.put("name", "group_cognition");
+        jsonSchema.put("strict", true);
+        ObjectNode schema = jsonSchema.putObject("schema");
+        schema.put("type", "object");
+        schema.put("additionalProperties", false);
+        ObjectNode properties = schema.putObject("properties");
+        RELATION_FORMAT.path("json_schema").path("schema").path("properties")
+                .fields().forEachRemaining(entry -> properties.set(entry.getKey(), entry.getValue().deepCopy()));
+        OPPORTUNITY_FORMAT.path("json_schema").path("schema").path("properties")
+                .fields().forEachRemaining(entry -> properties.set(entry.getKey(), entry.getValue().deepCopy()));
+        ArrayNode required = schema.putArray("required");
+        RELATION_FORMAT.path("json_schema").path("schema").path("required")
+                .forEach(value -> required.add(value.asText()));
+        OPPORTUNITY_FORMAT.path("json_schema").path("schema").path("required")
+                .forEach(value -> required.add(value.asText()));
+        properties.putObject("verification_required").put("type", "boolean");
+        ObjectNode source = properties.putObject("verification_source");
+        source.put("type", "string");
+        source.putArray("enum").add("NONE").add("KNOWLEDGE")
+                .add("GROUP_CONTEXT").add("WEB").add("IMAGE");
+        properties.putObject("volatile_fact").put("type", "boolean");
+        properties.putObject("verification_reason").put("type", "string");
+        required.add("verification_required");
+        required.add("verification_source");
+        required.add("volatile_fact");
+        required.add("verification_reason");
+        return format;
+    }
+
+    private static final class CognitionHttpException extends RuntimeException {
+        private final int statusCode;
+
+        private CognitionHttpException(int statusCode) {
+            super("HTTP " + statusCode);
+            this.statusCode = statusCode;
+        }
+    }
+
+    private static final class CognitionParseException extends RuntimeException {
+        private CognitionParseException(String message, Throwable cause) {
+            super(message, cause);
+        }
     }
 
     private static String structuredResponseText(JsonNode message, String taskName) {
@@ -467,6 +578,21 @@ public final class GroupDialogueAnalyzer {
                 node.path("reason").asText(""));
     }
 
+    static GroupDialoguePlan.VerificationPlan parseVerification(JsonNode node) {
+        GroupDialoguePlan.VerificationSource source;
+        try {
+            source = GroupDialoguePlan.VerificationSource.valueOf(
+                    node.path("verification_source").asText("NONE").trim().toUpperCase());
+        } catch (IllegalArgumentException ignored) {
+            source = GroupDialoguePlan.VerificationSource.NONE;
+        }
+        return new GroupDialoguePlan.VerificationPlan(
+                node.path("verification_required").asBoolean(false),
+                source,
+                node.path("volatile_fact").asBoolean(false),
+                node.path("verification_reason").asText(""));
+    }
+
     static GroupDialoguePlan applyProtocolTarget(GroupDialoguePlan plan,
                                                   List<BaiLianService.PublicMessage> messages) {
         if (plan == null || messages == null || messages.isEmpty() || !plan.shouldReply()) return plan;
@@ -486,6 +612,12 @@ public final class GroupDialogueAnalyzer {
      */
     static GroupDialoguePlan.Relation applyTurnEvidenceConstraint(
             GroupDialoguePlan.Relation relation, List<BaiLianService.PublicMessage> messages) {
+        return applyTurnEvidenceConstraint(relation, messages, false);
+    }
+
+    static GroupDialoguePlan.Relation applyTurnEvidenceConstraint(
+            GroupDialoguePlan.Relation relation, List<BaiLianService.PublicMessage> messages,
+            boolean activeSession) {
         if (relation == null || !relation.botHasNextTurn() || messages == null || messages.isEmpty()) {
             return relation;
         }
@@ -507,6 +639,11 @@ public final class GroupDialogueAnalyzer {
         String botId = String.valueOf(BotConfig.getBotQq());
         boolean latestRepliesToBot = botId.equals(resolveReplySender(messages, latest.replyToMessageId));
         if (latestMentionsBot || latestRepliesToBot) return relation;
+        boolean recentBotTurnInActiveSession = activeSession && messages.stream()
+                .anyMatch(message -> botId.equals(message.userId)
+                        && message.timestamp <= latest.timestamp
+                        && latest.timestamp - message.timestamp <= TimeUnit.MINUTES.toMillis(10));
+        if (recentBotTurnInActiveSession) return relation;
 
         String reason = cleanReason(relation.turnReason());
         reason = (reason.isEmpty() ? "" : reason + "；")

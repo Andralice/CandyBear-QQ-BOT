@@ -31,9 +31,11 @@ public final class GroupTurnResultTool implements Tool {
                         "interest", Map.of("type", "string", "description", "糖果熊确有内容可贡献时的一句话兴趣切入点，否则为空"),
                         "open_need", Map.of("type", "string", "description", "仍未解决且与主题有关的问题或信息缺口，否则为空"),
                         "keep_scene", Map.of("type", "boolean", "description", "该主题是否值得在短期内带入下一轮复核"),
-                        "reason", Map.of("type", "string", "description", "简短说明是否回应及采用当前消息条数的依据；仅供内部判断")
+                        "reason", Map.of("type", "string", "description", "简短说明是否回应及采用当前消息条数的依据；仅供内部判断"),
+                        "verification_status", Map.of("type", "string", "description", "本轮核验状态，如 NOT_REQUIRED、KNOWLEDGE_CONFIRMED、WEB_CONFIRMED、FAILED"),
+                        "verification_source", Map.of("type", "string", "description", "实际使用的核验来源，如 NONE、query_knowledge、web_search、group_context、image")
                 ),
-                "required", new String[]{"decision", "messages", "topic", "interest", "open_need", "keep_scene", "reason"},
+                "required", new String[]{"decision", "messages", "topic", "interest", "open_need", "keep_scene", "reason", "verification_status", "verification_source"},
                 "additionalProperties", false);
     }
 
@@ -74,6 +76,8 @@ public final class GroupTurnResultTool implements Tool {
                 decision == GroupTurnAssessment.Decision.REPLY ? messages : java.util.List.of(),
                 root.path("topic").asText(""), root.path("interest").asText(""),
                 root.path("open_need").asText(""), root.path("keep_scene").asBoolean(false),
-                root.path("reason").asText(""));
+                root.path("reason").asText(""),
+                root.path("verification_status").asText("NOT_REQUIRED"),
+                root.path("verification_source").asText("NONE"));
     }
 }

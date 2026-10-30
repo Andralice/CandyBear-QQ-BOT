@@ -108,6 +108,8 @@ public class AIHandler implements MessageHandler {
     private final ConcurrentHashMap<String, Long> pendingCognitionIds = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ScheduledFuture<?>> pendingCognitionTasks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, String> lastColdAssessmentMessageIds = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, String> lastActiveSessionReviewMessageIds = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> lastActiveSessionReviewAt = new ConcurrentHashMap<>();
     private final AtomicLong proactiveSequence = new AtomicLong();
     private final AtomicLong cognitionSequence = new AtomicLong();
     private final AtomicBoolean coldGroupMonitorStarted = new AtomicBoolean();
@@ -279,8 +281,6 @@ public class AIHandler implements MessageHandler {
         GroupCognitionMode cognitionMode = dialogueAnalyzer.modeFor(gid);
         List<BaiLianService.PublicMessage> publicHistory = aiService.getPublicGroupHistorySnapshot(gid, 12);
 
-        // A new group message means an earlier interjection candidate is no longer timely.
-        cancelPendingProactive(gid);
         cancelPendingCognition(gid, uid);
 
         if (cognitionMode == GroupCognitionMode.SHADOW && !plainText.isBlank()) {
@@ -627,6 +627,13 @@ public class AIHandler implements MessageHandler {
             if (pendingCognitionIds.getOrDefault(cognitionKey, -1L) != candidateId) return;
             List<BaiLianService.PublicMessage> snapshot = aiService.getPublicGroupHistorySnapshot(gid, 12);
             if (snapshot.isEmpty()) return;
+            if (!idleAssessment && shouldDeferToActiveSessionReview(gid, conv, ats, snapshot)) {
+                pendingCognitionIds.remove(cognitionKey, candidateId);
+                pendingCognitionTasks.remove(cognitionKey);
+                logDecision(gid, uid, "COGNITION", "DEFERRED", "active_session_minute_review", 0, 0,
+                        0);
+                return;
+            }
             if (idleAssessment && (!moodService.isGroupCold(gid)
                     || !latestObservedMessageId(snapshot).equals(latestPendingMessageId(conv))
                     || isKnownBotMessage(snapshot.get(snapshot.size() - 1)))) return;
@@ -656,20 +663,13 @@ public class AIHandler implements MessageHandler {
                                            long started, GroupDialoguePlan plan, Throwable error,
                                            boolean idleAssessment) {
         String cognitionKey = cognitionKey(gid, uid);
-        if (!pendingCognitionIds.remove(cognitionKey, candidateId)) return;
-        pendingCognitionTasks.remove(cognitionKey);
+        if (candidateId != 0 && !pendingCognitionIds.remove(cognitionKey, candidateId)) return;
+        if (candidateId != 0) pendingCognitionTasks.remove(cognitionKey);
 
         ConversationState current = conversationManager.get(gid, uid);
-        List<BaiLianService.PublicMessage> latestSnapshot = aiService.getPublicGroupHistorySnapshot(gid, 12);
-        String latestId = idleAssessment
-                ? latestObservedMessageId(latestSnapshot) : latestHumanMessageId(latestSnapshot);
-        boolean sameLatestMessage = expectedLatestMessageId.equals(latestId);
-        if (current == null || current != conv || current.getMessageRevision() != expectedRevision
-                || !sameLatestMessage) {
-            logDecision(gid, uid, "COGNITION", "SILENT", "stale_candidate", 0, 0,
-                    System.currentTimeMillis() - started);
-            return;
-        }
+        // A candidate remains valid while the group moves on; use the latest
+        // per-user buffer so the generated reply can include newer messages.
+        ConversationState activeConv = current == null ? conv : current;
         if (idleAssessment && interpreter.isNegativeCooldown(gid)) {
             logDecision(gid, uid, "COGNITION", "SILENT", "negative_feedback", 0,
                     plan == null ? 0 : plan.tokensUsed(), System.currentTimeMillis() - started);
@@ -677,16 +677,18 @@ public class AIHandler implements MessageHandler {
         }
 
         if (error != null || plan == null) {
-            if (legacyResult.event() == ConversationEvent.PROBABILISTIC
-                    || legacyResult.event() == ConversationEvent.IMPLICIT_CANDIDATE) {
-                COGNITION_LOGGER.warn("enforce fail-closed gid={} uid={} reason=analysis_failed", gid, uid);
-                logDecision(gid, uid, "COGNITION", "SILENT", "analysis_failed", 0, 0,
-                        System.currentTimeMillis() - started);
-                return;
+            Throwable cause = error == null ? new IllegalStateException("empty cognition plan") : error;
+            while ((cause instanceof java.util.concurrent.CompletionException
+                    || cause instanceof java.util.concurrent.ExecutionException) && cause.getCause() != null) {
+                cause = cause.getCause();
             }
-            COGNITION_LOGGER.warn("enforce fallback gid={} uid={} reason=analysis_failed", gid, uid);
-            handleLegacyDecision(bot, groupId, gid, uid, nickname, ats, plainText,
-                    conv, legacyResult, false, null);
+            String detail = cause.getMessage() == null ? "no details" : cause.getMessage()
+                    .replaceAll("[\\r\\n\\t]+", " ");
+            if (detail.length() > 240) detail = detail.substring(0, 240);
+            COGNITION_LOGGER.warn("enforce fail-closed gid={} uid={} type={} reason={}",
+                    gid, uid, cause.getClass().getSimpleName(), detail);
+            logDecision(gid, uid, "COGNITION", "SILENT", "analysis_failed", 0, 0,
+                    System.currentTimeMillis() - started);
             return;
         }
 
@@ -696,7 +698,7 @@ public class AIHandler implements MessageHandler {
                     0, plan.tokensUsed(), System.currentTimeMillis() - started);
             return;
         }
-        if (idleAssessment && !conv.hasContent()) {
+        if (idleAssessment && !activeConv.hasContent()) {
             conversationManager.remove(gid, uid);
             logDecision(gid, uid, "COGNITION", "SILENT", "no_generation_context", 0,
                     plan.tokensUsed(), System.currentTimeMillis() - started);
@@ -733,7 +735,7 @@ public class AIHandler implements MessageHandler {
         ConversationInterpreter.InterpretResult cognitiveResult =
                 ConversationInterpreter.InterpretResult.of(event, plainText);
         handleLegacyDecision(bot, groupId, gid, uid, nickname, ats, plainText,
-                conv, cognitiveResult, false, plan);
+                activeConv, cognitiveResult, false, plan);
     }
 
     /** Persist shadow outcomes for sampling and aggregate reports; this never changes routing or replies. */
@@ -820,7 +822,7 @@ public class AIHandler implements MessageHandler {
                 && !opportunity.alreadyBeingHandled()
                 && opportunity.concreteContribution() != null
                 && !opportunity.concreteContribution().isBlank()
-                && opportunity.contributionConfidence() >= 0.55
+                && opportunity.contributionConfidence() >= 0.30
                 && opportunity.intrusionRisk() != GroupDialoguePlan.Risk.HIGH;
     }
 
@@ -928,21 +930,10 @@ public class AIHandler implements MessageHandler {
     private boolean abortIfSupersededByAnotherHuman(String gid, String userId,
                                                      ConversationEvent event, long startMs,
                                                      DecisionContext context, GenerationResult result) {
+        if (event == ConversationEvent.COGNITIVE_CONTINUE
+                || event == ConversationEvent.COGNITIVE_INTERJECTION) return false;
         if (!isOptionalReplySupersededByLatestHuman(event, userId,
                 aiService.getPublicGroupHistorySnapshot(gid, 12))) return false;
-        logDecision(gid, userId, event.name(), "SILENT", "stale_group_turn", 0, 0,
-                System.currentTimeMillis() - startMs, context, result);
-        conversationManager.remove(gid, userId);
-        return true;
-    }
-
-    private boolean abortIfInterjectionStale(String gid, String userId, ConversationEvent event,
-                                             ConversationState state, long startMs,
-                                             DecisionContext context, GenerationResult result) {
-        if (event != ConversationEvent.COGNITIVE_INTERJECTION) return false;
-        String expectedMessageId = latestPendingMessageId(state);
-        String latestMessageId = latestObservedMessageId(aiService.getPublicGroupHistorySnapshot(gid, 12));
-        if (!expectedMessageId.isBlank() && expectedMessageId.equals(latestMessageId)) return false;
         logDecision(gid, userId, event.name(), "SILENT", "stale_group_turn", 0, 0,
                 System.currentTimeMillis() - startMs, context, result);
         conversationManager.remove(gid, userId);
@@ -1170,16 +1161,19 @@ public class AIHandler implements MessageHandler {
         for (String gid : moodService.getTrackedGroupIds()) {
             try {
                 GroupCognitionMode mode = dialogueAnalyzer.modeFor(gid);
-                if ((mode != GroupCognitionMode.SHADOW && mode != GroupCognitionMode.ENFORCE)
-                        || !moodService.isGroupCold(gid)
-                        || interpreter.isNegativeCooldown(gid)) continue;
+                if (mode != GroupCognitionMode.SHADOW && mode != GroupCognitionMode.ENFORCE) continue;
+                if (mode == GroupCognitionMode.ENFORCE && !interpreter.isNegativeCooldown(gid)) {
+                    reviewActiveSessions(bot, gid);
+                }
+                if (!moodService.isGroupCold(gid) || interpreter.isNegativeCooldown(gid)) continue;
 
                 List<BaiLianService.PublicMessage> snapshot = aiService.getPublicGroupHistorySnapshot(gid, 12);
                 if (snapshot.isEmpty()) continue;
                 BaiLianService.PublicMessage latest = snapshot.get(snapshot.size() - 1);
                 String lastAssessmentMessageId = lastColdAssessmentMessageIds.get(gid);
                 if (latest.messageId.isBlank() || isKnownBotMessage(latest)
-                        || latest.messageId.equals(lastAssessmentMessageId)) continue;
+                        || latest.messageId.equals(lastAssessmentMessageId)
+                        || belongsToActiveSession(gid, latest.messageId)) continue;
 
                 if (mode == GroupCognitionMode.SHADOW) {
                     lastColdAssessmentMessageIds.put(gid, latest.messageId);
@@ -1209,6 +1203,118 @@ public class AIHandler implements MessageHandler {
         }
     }
 
+    private boolean shouldDeferToActiveSessionReview(
+            String gid, ConversationState conv, List<Long> ats,
+            List<BaiLianService.PublicMessage> recent) {
+        if (ats != null && ats.contains(BotConfig.getBotQq())) return false;
+        if (conv != null && isReplyToBot(conv.getReplyToMessageId(), recent)) return false;
+        List<String> pendingIds = conv == null ? List.of() : conv.getPendingMessageIds();
+        if (pendingIds.isEmpty()) return false;
+        return sessionManager.activeForGroup(gid).stream()
+                .filter(session -> isActiveSession(session)
+                        && session.lastBotMessageAt() > 0)
+                .anyMatch(session -> pendingIds.stream().anyMatch(session.evidenceMessageIds()::contains));
+    }
+
+    private boolean belongsToActiveSession(String gid, String messageId) {
+        if (messageId == null || messageId.isBlank()) return false;
+        return sessionManager.activeForGroup(gid).stream()
+                .filter(session -> isActiveSession(session) && session.lastBotMessageAt() > 0)
+                .anyMatch(session -> session.evidenceMessageIds().contains(messageId));
+    }
+
+    private void reviewActiveSessions(Main bot, String gid) {
+        List<BaiLianService.PublicMessage> recent = aiService.getPublicGroupHistorySnapshot(gid, 12);
+        if (recent.isEmpty()) return;
+        int remainingCalls = 2;
+        for (GroupConversationSession session : sessionManager.activeForGroup(gid)) {
+            if (remainingCalls == 0) break;
+            if (!isActiveSession(session) || session.lastBotMessageAt() <= 0) continue;
+            List<BaiLianService.PublicMessage> sessionMessages = recent.stream()
+                    .filter(message -> session.evidenceMessageIds().contains(message.messageId)
+                            || isRecentSessionBotReply(session, message))
+                    .toList();
+            if (sessionMessages.isEmpty()) continue;
+
+            String cursor = lastActiveSessionReviewMessageIds.get(session.sessionId());
+            long lastReviewedAt = lastActiveSessionReviewAt.getOrDefault(session.sessionId(), 0L);
+            int cursorIndex = -1;
+            if (cursor != null) {
+                for (int i = 0; i < sessionMessages.size(); i++) {
+                    if (cursor.equals(sessionMessages.get(i).messageId)) cursorIndex = i;
+                }
+            }
+            List<BaiLianService.PublicMessage> newHumanMessages = new ArrayList<>();
+            for (int i = cursorIndex + 1; i < sessionMessages.size(); i++) {
+                BaiLianService.PublicMessage message = sessionMessages.get(i);
+                if (message.timestamp > session.lastBotMessageAt()
+                        && (cursorIndex >= 0 || message.timestamp > lastReviewedAt)
+                        && !isKnownBotMessage(message) && !message.messageId.isBlank()) {
+                    newHumanMessages.add(message);
+                }
+            }
+            if (newHumanMessages.isEmpty()) continue;
+
+            // One check can inspect two separate speakers/foci; repeated messages by
+            // the same person stay together in their existing conversation buffer.
+            LinkedHashMap<String, BaiLianService.PublicMessage> latestBySpeaker = new LinkedHashMap<>();
+            for (int i = newHumanMessages.size() - 1; i >= 0 && latestBySpeaker.size() < remainingCalls; i--) {
+                BaiLianService.PublicMessage message = newHumanMessages.get(i);
+                if (!message.userId.isBlank()) latestBySpeaker.putIfAbsent(message.userId, message);
+            }
+            List<BaiLianService.PublicMessage> focusMessages = new ArrayList<>(latestBySpeaker.values());
+            Collections.reverse(focusMessages);
+            int scheduled = 0;
+            for (BaiLianService.PublicMessage focus : focusMessages) {
+                ConversationState existing = conversationManager.get(gid, focus.userId);
+                if (existing != null && existing.isSubmitted()) continue;
+                ConversationState conv = existing != null ? existing
+                        : conversationManager.getOrCreatePending(gid, focus.userId, UNTRIGGERED_BUFFER_TTL_MS);
+                if (!conv.getPendingMessageIds().contains(focus.messageId)) {
+                    conv.addMessage(focus.content, focus.messageId);
+                    conv.setReplyToMessageId(focus.replyToMessageId);
+                    conv.incrementRevision();
+                }
+                int focusIndex = sessionMessages.indexOf(focus);
+                if (focusIndex < 0) continue;
+                List<BaiLianService.PublicMessage> focusContext =
+                        List.copyOf(sessionMessages.subList(0, focusIndex + 1));
+                long started = System.currentTimeMillis();
+                long revision = conv.getMessageRevision();
+                scheduled++;
+                dialogueAnalyzer.analyzeAsync(focusContext, true).whenComplete((plan, error) ->
+                        groupExecutor.execute(gid, () -> completeCognitionDecision(
+                                bot, Long.parseLong(gid), gid, focus.userId, focus.nickname,
+                                focus.atUserIds, focus.content, conv,
+                                ConversationInterpreter.InterpretResult.NOTHING,
+                                0, revision, latestHumanMessageId(focusContext), started,
+                                plan, error, false)));
+            }
+            if (scheduled > 0) {
+                remainingCalls -= scheduled;
+                String latestReviewedId = newHumanMessages.get(newHumanMessages.size() - 1).messageId;
+                lastActiveSessionReviewMessageIds.put(session.sessionId(), latestReviewedId);
+                lastActiveSessionReviewAt.put(session.sessionId(),
+                        newHumanMessages.get(newHumanMessages.size() - 1).timestamp);
+                COGNITION_LOGGER.info("active session review session={} gid={} foci={} through_msg={}",
+                        session.sessionId(), gid, scheduled, latestReviewedId);
+            }
+        }
+    }
+
+    private static boolean isActiveSession(GroupConversationSession session) {
+        GroupConversationSession.LifecycleState state = session.lifecycleState();
+        return state == GroupConversationSession.LifecycleState.ACTIVE
+                || state == GroupConversationSession.LifecycleState.WAITING_FOR_REPLY
+                || state == GroupConversationSession.LifecycleState.PAUSED;
+    }
+
+    private static boolean isRecentSessionBotReply(GroupConversationSession session,
+                                                   BaiLianService.PublicMessage message) {
+        if (!isKnownBotMessage(message) || session.lastBotMessageAt() <= 0) return false;
+        return Math.abs(message.timestamp - session.lastBotMessageAt()) <= TimeUnit.SECONDS.toMillis(30);
+    }
+
     private static final HttpClient auditHttpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofMillis(5000))
             .build();
@@ -1233,8 +1339,7 @@ public class AIHandler implements MessageHandler {
             ConversationState state = conversationManager.get(gid, userId);
             // 显式 @ 即使没有正文也已经提交给模型；普通空 buffer 仍然直接丢弃。
             if (state == null || (!state.hasContent() && !state.isSubmitted())) return;
-            if (abortIfSupersededByAnotherHuman(gid, userId, event, startMs)
-                    || abortIfInterjectionStale(gid, userId, event, state, startMs, null, null)) return;
+            if (abortIfSupersededByAnotherHuman(gid, userId, event, startMs)) return;
 
             GroupDialoguePlan dialoguePlan = precomputedPlan;
             GroupCognitionMode cognitionMode = dialogueAnalyzer.modeFor(gid);
@@ -1374,8 +1479,7 @@ public class AIHandler implements MessageHandler {
                     conversationManager.remove(gid, userId);
                     return;
                 }
-                if (abortIfSupersededByAnotherHuman(gid, userId, event, startMs, dc, genResult)
-                        || abortIfInterjectionStale(gid, userId, event, state, startMs, dc, genResult)) return;
+                if (abortIfSupersededByAnotherHuman(gid, userId, event, startMs, dc, genResult)) return;
 
                 // 检查 LLM 调用期间是否有新消息到达
                 if (state.getMessageRevision() == startRevision) {
@@ -1402,8 +1506,7 @@ public class AIHandler implements MessageHandler {
             List<String> structuredMessages = genResult == null || genResult.groupAssessment() == null
                     ? List.of() : genResult.groupAssessment().messages();
             long elapsed = System.currentTimeMillis() - startMs;
-            if (abortIfSupersededByAnotherHuman(gid, userId, event, startMs, dc, genResult)
-                    || abortIfInterjectionStale(gid, userId, event, state, startMs, dc, genResult)) return;
+            if (abortIfSupersededByAnotherHuman(gid, userId, event, startMs, dc, genResult)) return;
             Long outboundReplyToMessageId = genResult != null && genResult.replyToCurrentMessage()
                     && event != ConversationEvent.COGNITIVE_INTERJECTION
                     ? latestPendingReplyMessageId(state) : null;

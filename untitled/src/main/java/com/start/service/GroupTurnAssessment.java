@@ -10,7 +10,9 @@ public record GroupTurnAssessment(
         String interest,
         String openNeed,
         boolean keepScene,
-        String reason) {
+        String reason,
+        String verificationStatus,
+        String verificationSource) {
 
     public enum Decision { REPLY, SILENT }
 
@@ -24,11 +26,26 @@ public record GroupTurnAssessment(
         interest = compact(interest, 240);
         openNeed = compact(openNeed, 240);
         reason = compact(reason, 240);
+        verificationStatus = compact(verificationStatus, 80);
+        verificationSource = compact(verificationSource, 80);
         keepScene = keepScene && !topic.isBlank();
     }
 
+    /** Backward-compatible constructor for model/replay callers using the old envelope. */
+    public GroupTurnAssessment(Decision decision, List<String> messages, String topic,
+                               String interest, String openNeed, boolean keepScene, String reason) {
+        this(decision, messages, topic, interest, openNeed, keepScene, reason,
+                "NOT_REQUIRED", "NONE");
+    }
+
     public GroupTurnAssessment withMessages(List<String> replacement) {
-        return new GroupTurnAssessment(decision, replacement, topic, interest, openNeed, keepScene, reason);
+        return new GroupTurnAssessment(decision, replacement, topic, interest, openNeed, keepScene, reason,
+                verificationStatus, verificationSource);
+    }
+
+    public GroupTurnAssessment withVerification(String status, String source) {
+        return new GroupTurnAssessment(decision, messages, topic, interest, openNeed, keepScene, reason,
+                status, source);
     }
 
     private static String compact(String value, int limit) {

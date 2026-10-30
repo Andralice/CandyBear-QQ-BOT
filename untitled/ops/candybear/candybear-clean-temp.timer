@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily CandyBear temporary screenshot cleanup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+RandomizedDelaySec=5min
+Persistent=true
+Unit=candybear-clean-temp.service
+
+[Install]
+WantedBy=timers.target

@@ -2,6 +2,8 @@ package com.start.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
@@ -49,9 +51,8 @@ class GroupDialogueAnalyzerProtocolTest {
             apiKeys.add(exchange.getRequestHeaders().getFirst("x-api-key"));
             authorizationHeaders.add(exchange.getRequestHeaders().getFirst("Authorization"));
             String toolName = request.path("tools").path(0).path("name").asText();
-            sendJson(exchange, toolName.equals("group_relation")
-                    ? relationAnthropicResponse()
-                    : opportunityAnthropicResponse());
+            assertEquals("group_cognition", toolName);
+            sendJson(exchange, cognitionAnthropicResponse());
         });
 
         GroupDialogueAnalyzer analyzer = new GroupDialogueAnalyzer(
@@ -65,7 +66,7 @@ class GroupDialogueAnalyzerProtocolTest {
         assertEquals(GroupDialoguePlan.EntryRole.THIRD_PERSON_INTERJECTION, plan.entryRole());
         assertEquals("u2", plan.targetUserId());
         assertEquals(38, plan.tokensUsed());
-        assertEquals(2, requests.size());
+        assertEquals(1, requests.size());
         for (int i = 0; i < requests.size(); i++) {
             JsonNode request = requests.get(i);
             assertEquals("native-key", apiKeys.get(i));
@@ -88,9 +89,7 @@ class GroupDialogueAnalyzerProtocolTest {
             requests.add(request);
             authorizationHeaders.add(exchange.getRequestHeaders().getFirst("Authorization"));
             apiKeys.add(exchange.getRequestHeaders().getFirst("x-api-key"));
-            boolean relation = request.path("messages").get(0).path("content").asText()
-                    .contains("话语关系");
-            sendJson(exchange, relation ? relationOpenAiResponse() : opportunityOpenAiResponse());
+            sendJson(exchange, cognitionOpenAiResponse());
         });
 
         GroupDialogueAnalyzer analyzer = new GroupDialogueAnalyzer(
@@ -101,7 +100,7 @@ class GroupDialogueAnalyzerProtocolTest {
                 new BaiLianService.PublicMessage("m1", "u2", "小雨", "大家卡住了")));
 
         assertTrue(plan.shouldReply());
-        assertEquals(2, requests.size());
+        assertEquals(1, requests.size());
         for (int i = 0; i < requests.size(); i++) {
             JsonNode request = requests.get(i);
             assertEquals("openai-model", request.path("model").asText());
@@ -119,9 +118,7 @@ class GroupDialogueAnalyzerProtocolTest {
         server.createContext("/v1/chat/completions", exchange -> {
             JsonNode request = JSON.readTree(exchange.getRequestBody());
             requests.add(request);
-            boolean relation = request.path("messages").get(0).path("content").asText()
-                    .contains("话语关系");
-            sendJson(exchange, relation ? relationOpenAiResponse() : opportunityOpenAiResponse());
+            sendJson(exchange, cognitionOpenAiResponse());
         });
 
         GroupDialogueAnalyzer analyzer = new GroupDialogueAnalyzer(
@@ -132,7 +129,7 @@ class GroupDialogueAnalyzerProtocolTest {
                 new BaiLianService.PublicMessage("m1", "u2", "小雨", "大家卡住了")));
 
         assertTrue(plan.shouldReply());
-        assertEquals(2, requests.size());
+        assertEquals(1, requests.size());
         assertTrue(requests.get(0).path("tools").isArray());
         assertEquals("function", requests.get(0).path("tool_choice").path("type").asText());
     }
@@ -162,32 +159,38 @@ class GroupDialogueAnalyzerProtocolTest {
         assertFalse(root.path("messages").get(0).has("image_content"));
     }
 
-    private static String relationAnthropicResponse() {
+    private static String cognitionAnthropicResponse() {
         return """
-                {"type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu-r","name":"group_relation","input":{
+                {"type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu-c","name":"group_cognition","input":{
                   "latest_speaker_id":"u2","latest_addressee_ids":[],"latest_topic":"卡住","reply_chain":"u2在群里发言",
                   "bot_role":"OUTSIDER","bot_has_next_turn":false,"next_turn_target_user_id":"","next_turn_target_message_id":"",
-                  "turn_reason":"没有直接指向糖果熊","forbidden_assumptions":[]}}],"usage":{"input_tokens":10,"output_tokens":8}}
-                """;
-    }
-
-    private static String opportunityAnthropicResponse() {
-        return """
-                {"type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu-o","name":"group_opportunity","input":{
+                  "turn_reason":"没有直接指向糖果熊","interaction_mode":"OTHER","forbidden_assumptions":[],
                   "open_need":"需要具体帮助","humans_explicitly_stalled":true,"already_being_handled":false,
                   "concrete_contribution":"给出可执行建议","contribution_confidence":0.9,"intrusion_risk":"LOW",
-                  "should_interject":true,"beneficiary_user_id":"u2","reason":"群友明确卡住"}}],"usage":{"input_tokens":11,"output_tokens":9}}
+                  "should_interject":true,"beneficiary_user_id":"u2","reason":"群友明确卡住"}}],"usage":{"input_tokens":21,"output_tokens":17}}
                 """;
     }
 
-    private static String relationOpenAiResponse() {
-        return "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"latest_speaker_id\\\":\\\"u2\\\",\\\"latest_addressee_ids\\\":[],\\\"latest_topic\\\":\\\"卡住\\\",\\\"reply_chain\\\":\\\"u2在群里发言\\\",\\\"bot_role\\\":\\\"OUTSIDER\\\",\\\"bot_has_next_turn\\\":false,\\\"next_turn_target_user_id\\\":\\\"\\\",\\\"next_turn_target_message_id\\\":\\\"\\\",\\\"turn_reason\\\":\\\"没有直接指向糖果熊\\\",\\\"forbidden_assumptions\\\":[]}\"}}]}";
+    private static String cognitionOpenAiResponse() {
+        ObjectNode decision = JSON.createObjectNode();
+        decision.put("latest_speaker_id", "u2").putArray("latest_addressee_ids");
+        decision.put("latest_topic", "卡住").put("reply_chain", "u2在群里发言");
+        decision.put("bot_role", "OUTSIDER").put("bot_has_next_turn", false);
+        decision.put("next_turn_target_user_id", "").put("next_turn_target_message_id", "");
+        decision.put("turn_reason", "没有直接指向糖果熊").put("interaction_mode", "OTHER");
+        decision.putArray("forbidden_assumptions");
+        decision.put("open_need", "需要具体帮助").put("humans_explicitly_stalled", true);
+        decision.put("already_being_handled", false).put("concrete_contribution", "给出可执行建议");
+        decision.put("contribution_confidence", 0.9).put("intrusion_risk", "LOW");
+        decision.put("should_interject", true).put("beneficiary_user_id", "u2");
+        decision.put("reason", "群友明确卡住");
+        ObjectNode message = JSON.createObjectNode();
+        message.put("role", "assistant").put("content", decision.toString());
+        ObjectNode response = JSON.createObjectNode();
+        ArrayNode choices = response.putArray("choices");
+        choices.addObject().set("message", message);
+        return response.toString();
     }
-
-    private static String opportunityOpenAiResponse() {
-        return "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"open_need\\\":\\\"需要具体帮助\\\",\\\"humans_explicitly_stalled\\\":true,\\\"already_being_handled\\\":false,\\\"concrete_contribution\\\":\\\"给出可执行建议\\\",\\\"contribution_confidence\\\":0.9,\\\"intrusion_risk\\\":\\\"LOW\\\",\\\"should_interject\\\":true,\\\"beneficiary_user_id\\\":\\\"u2\\\",\\\"reason\\\":\\\"群友明确卡住\\\"}\"}}]}";
-    }
-
     private static void sendJson(HttpExchange exchange, String body) throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "application/json");

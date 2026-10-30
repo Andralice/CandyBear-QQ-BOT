@@ -1,0 +1,15 @@
+/opt/qq-bot/qq-bot.log {
+    daily
+    maxsize 100M
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    olddir /mnt/candybear/store/backups/logs
+    prerotate
+        /usr/bin/mountpoint -q /mnt/candybear/store || exit 1
+        test -d /mnt/candybear/store/backups/logs || exit 1
+    endscript
+}
