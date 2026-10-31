@@ -228,13 +228,19 @@ public final class GroupDialogueAnalyzer {
     }
 
     public CompletableFuture<GroupDialoguePlan> analyzeAsync(List<BaiLianService.PublicMessage> messages) {
-        return analyzeAsync(messages, false);
+        return analyzeAsync("", messages, false);
     }
 
     public CompletableFuture<GroupDialoguePlan> analyzeAsync(
             List<BaiLianService.PublicMessage> messages, boolean activeSession) {
+        return analyzeAsync("", messages, activeSession);
+    }
+
+    /** 带群号的分析入口，确保异步模型审计能关联到具体群。 */
+    public CompletableFuture<GroupDialoguePlan> analyzeAsync(
+            String groupId, List<BaiLianService.PublicMessage> messages, boolean activeSession) {
         String transcript = buildTranscript(messages);
-        return call(COGNITION_SYSTEM, transcript, COGNITION_FORMAT, "cognition")
+        return call(COGNITION_SYSTEM, transcript, COGNITION_FORMAT, "cognition", groupId)
                 .thenApply(part -> {
             GroupDialoguePlan.Relation normalizedRelation = applyTurnEvidenceConstraint(
                     parseRelation(part.content()), messages, activeSession);
@@ -253,8 +259,13 @@ public final class GroupDialogueAnalyzer {
     }
 
     public GroupDialoguePlan analyze(List<BaiLianService.PublicMessage> messages) {
+        return analyze("", messages);
+    }
+
+    public GroupDialoguePlan analyze(String groupId, List<BaiLianService.PublicMessage> messages) {
         try {
-            return analyzeAsync(messages).get(timeoutMs * (MAX_RETRIES + 1L) + 1_000L, TimeUnit.MILLISECONDS);
+            return analyzeAsync(groupId, messages, false)
+                    .get(timeoutMs * (MAX_RETRIES + 1L) + 1_000L, TimeUnit.MILLISECONDS);
         } catch (Exception e) {
             Throwable cause = rootCause(e);
             logger.warn("group cognition failed stage=wait type={} reason={}",
@@ -331,7 +342,7 @@ public final class GroupDialogueAnalyzer {
     }
 
     private CompletableFuture<Part> call(String systemPrompt, String transcript,
-                                         JsonNode responseFormat, String taskName) {
+                                         JsonNode responseFormat, String taskName, String groupId) {
         String toolName = "relation".equals(taskName) ? "group_relation" : "group_opportunity";
         List<Map<String, Object>> messages = new ArrayList<>();
         if (!llmProtocol.isAnthropic()) {
@@ -380,12 +391,17 @@ public final class GroupDialogueAnalyzer {
                 .POST(HttpRequest.BodyPublishers.ofString(MAPPER.valueToTree(body).toString()))
                 .build();
 
-        return sendWithRetry(request, taskName, System.nanoTime(), 0);
+        AuditModelUsageService.CallContext context = new AuditModelUsageService.CallContext(
+                latestMessageIdFromTranscript(transcript), groupId, latestUserIdFromTranscript(transcript), "",
+                "group_cognition_" + taskName);
+        return sendWithRetry(request, taskName, System.nanoTime(), 0, context);
     }
 
     private CompletableFuture<Part> sendWithRetry(HttpRequest request, String taskName,
-                                                   long startedNanos, int attempt) {
-        return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+                                                   long startedNanos, int attempt,
+                                                   AuditModelUsageService.CallContext context) {
+        return AuditModelUsageService.sendAsync(httpClient, request, "group_cognition_" + taskName,
+                        model, context, attempt + 1)
                 .thenApply(response -> {
                     long latencyMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
                     if (response.statusCode() != 200) {
@@ -426,8 +442,30 @@ public final class GroupDialogueAnalyzer {
                             taskName, attempt + 1, cause.getClass().getSimpleName(), safeMessage(cause));
                     return CompletableFuture.runAsync(() -> {},
                                     CompletableFuture.delayedExecutor(500, TimeUnit.MILLISECONDS))
-                            .thenCompose(ignored -> sendWithRetry(request, taskName, startedNanos, attempt + 1));
+                            .thenCompose(ignored -> sendWithRetry(request, taskName, startedNanos,
+                                    attempt + 1, context));
                 }).thenCompose(stage -> stage);
+    }
+
+    private static String latestMessageIdFromTranscript(String transcript) {
+        return extractTranscriptField(transcript, "message_id");
+    }
+
+    private static String latestUserIdFromTranscript(String transcript) {
+        return extractTranscriptField(transcript, "sender_id");
+    }
+
+    /** Transcript is JSON produced locally; extract only scalar IDs for usage linkage. */
+    private static String extractTranscriptField(String transcript, String field) {
+        if (transcript == null || transcript.isBlank()) return "";
+        try {
+            JsonNode root = MAPPER.readTree(transcript);
+            JsonNode messages = root.path("messages");
+            if (!messages.isArray() || messages.isEmpty()) return "";
+            return messages.get(messages.size() - 1).path(field).asText("");
+        } catch (Exception ignored) {
+            return "";
+        }
     }
 
     private static boolean isRetryable(Throwable error) {

@@ -3,6 +3,7 @@ package com.start.agent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.start.config.BotConfig;
+import com.start.service.AuditModelUsageService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -93,7 +94,8 @@ public class DigestTool implements Tool {
                     .build();
 
             long start = System.currentTimeMillis();
-            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = AuditModelUsageService.send(
+                    HTTP, request, "digest", model);
             long elapsed = System.currentTimeMillis() - start;
 
             if (response.statusCode() != 200) {

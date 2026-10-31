@@ -11,6 +11,7 @@ import com.start.agent.QueryImagesTool;
 import com.start.config.BotConfig;
 import com.start.config.DatabaseConfig;
 import com.start.service.BaiLianService;
+import com.start.service.AuditModelUsageService;
 import com.start.service.BotMoodService;
 import com.start.service.ConversationEvent;
 import com.start.service.ConversationInterpreter;
@@ -330,7 +331,7 @@ public class AIHandler implements MessageHandler {
                     sessionSummaryService.schedule(closed, summaryHistory);
                 }
             }
-            SceneState scene = aiService.processThreadMessage(gid, uid, plainText);
+            SceneState scene = aiService.processThreadMessage(gid, uid, plainText, messageId);
             String threadId = resolveSessionThreadId(scene, uid, !plainText.isBlank());
             boolean replyToBot = isReplyToBot(replyId, publicHistory);
             boolean botMentioned = ats.contains(BotConfig.getBotQq());
@@ -597,7 +598,7 @@ public class AIHandler implements MessageHandler {
             List<BaiLianService.PublicMessage> snapshot = aiService.getPublicGroupHistorySnapshot(gid, 12);
             if (snapshot.isEmpty()) return;
             String expectedLatestMessageId = latestHumanMessageId(snapshot);
-            dialogueAnalyzer.analyzeAsync(snapshot).whenComplete((plan, error) -> {
+            dialogueAnalyzer.analyzeAsync(gid, snapshot, false).whenComplete((plan, error) -> {
                 if (!pendingCognitionIds.remove(cognitionKey, candidateId)) return;
                 if (!expectedLatestMessageId.equals(latestHumanMessageId(
                         aiService.getPublicGroupHistorySnapshot(gid, 12)))) return;
@@ -641,7 +642,7 @@ public class AIHandler implements MessageHandler {
                     ? latestObservedMessageId(snapshot) : latestHumanMessageId(snapshot);
             long started = System.currentTimeMillis();
             try {
-                dialogueAnalyzer.analyzeAsync(snapshot).whenComplete((plan, error) ->
+                dialogueAnalyzer.analyzeAsync(gid, snapshot, false).whenComplete((plan, error) ->
                         groupExecutor.execute(gid, () -> completeCognitionDecision(
                                 bot, groupId, gid, uid, nickname, ats, plainText, conv, legacyResult,
                                 candidateId, expectedRevision, expectedLatestMessageId, started,
@@ -1177,7 +1178,7 @@ public class AIHandler implements MessageHandler {
 
                 if (mode == GroupCognitionMode.SHADOW) {
                     lastColdAssessmentMessageIds.put(gid, latest.messageId);
-                    dialogueAnalyzer.analyzeAsync(snapshot).whenComplete((plan, error) ->
+                    dialogueAnalyzer.analyzeAsync(gid, snapshot, false).whenComplete((plan, error) ->
                             recordShadowCognition(gid, latest.userId, latest.messageId, latest.content, plan, error));
                     continue;
                 }
@@ -1282,7 +1283,7 @@ public class AIHandler implements MessageHandler {
                 long started = System.currentTimeMillis();
                 long revision = conv.getMessageRevision();
                 scheduled++;
-                dialogueAnalyzer.analyzeAsync(focusContext, true).whenComplete((plan, error) ->
+                dialogueAnalyzer.analyzeAsync(gid, focusContext, true).whenComplete((plan, error) ->
                         groupExecutor.execute(gid, () -> completeCognitionDecision(
                                 bot, Long.parseLong(gid), gid, focus.userId, focus.nickname,
                                 focus.atUserIds, focus.content, conv,
@@ -1344,7 +1345,7 @@ public class AIHandler implements MessageHandler {
             GroupDialoguePlan dialoguePlan = precomputedPlan;
             GroupCognitionMode cognitionMode = dialogueAnalyzer.modeFor(gid);
             if (dialoguePlan == null && cognitionMode.injectsPerspective()) {
-                dialoguePlan = dialogueAnalyzer.analyze(aiService.getPublicGroupHistorySnapshot(gid, 12));
+                dialoguePlan = dialogueAnalyzer.analyze(gid, aiService.getPublicGroupHistorySnapshot(gid, 12));
                 if (dialoguePlan != null) {
                     COGNITION_LOGGER.info("assist gid={} uid={} event={} {}",
                             gid, userId, event, dialoguePlan.compactSummary());
@@ -1461,7 +1462,11 @@ public class AIHandler implements MessageHandler {
                         .build();
 
                 aiService.setSuppressSessionWrite(true);
-                try {
+                String sourceMessageId = state.getPendingMessageIds().isEmpty() ? ""
+                        : state.getPendingMessageIds().get(state.getPendingMessageIds().size() - 1);
+                try (AuditModelUsageService.ContextScope ignored = AuditModelUsageService.pushContext(
+                        new AuditModelUsageService.CallContext(sourceMessageId, gid, userId,
+                                session.sessionId(), "BaiLianService.generate"))) {
                     genResult = aiService.generate(session);
                 } finally {
                     aiService.setSuppressSessionWrite(false);
@@ -1606,7 +1611,8 @@ public class AIHandler implements MessageHandler {
                     .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
                     .build();
 
-            HttpResponse<String> resp = auditHttpClient.send(req, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> resp = AuditModelUsageService.send(
+                    auditHttpClient, req, "message_relation", BotConfig.getAuditModel());
             if (resp.statusCode() == 200) {
                 JsonNode json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(resp.body());
                 String content = json.path("choices").get(0).path("message").path("content").asText("S").trim();

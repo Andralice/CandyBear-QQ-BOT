@@ -125,7 +125,17 @@ public class ErrorMonitorService {
 
         if (lastLogPath == null || !lastLogPath.equals(logFile)) {
             lastLogPath = logFile;
-            lastFilePos = 0;
+            try {
+                // 进程重启后不要从文件头重扫历史日志。监控线程启动前已有的
+                // ERROR 属于旧事件，重新审计只会制造重复巡检报告；从当前文件
+                // 末尾建立基线，后续扫描只处理本次运行期间追加的内容。
+                lastFilePos = Files.size(logFile);
+                logger.debug("ErrorMonitor 已建立日志基线: file={}, offset={}", logFile, lastFilePos);
+            } catch (IOException e) {
+                logger.warn("ErrorMonitor 建立日志基线失败: {}", e.getMessage());
+                lastFilePos = 0;
+            }
+            return;
         }
         try {
             long fileSize = Files.size(logFile);
@@ -271,7 +281,14 @@ public class ErrorMonitorService {
                         .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                         .build();
 
-                HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+                HttpResponse<String> resp = AuditModelUsageService.send(
+                        httpClient, req, "error_monitor", BotConfig.getAuditModel(), attempt + 1);
+
+                if (resp.statusCode() == 401 || resp.statusCode() == 403) {
+                    deferAuditErrors(auditErrors);
+                    logger.warn("审计 API 鉴权失败: HTTP {}，跳过重试", resp.statusCode());
+                    return;
+                }
 
                 if (isQuotaError(resp.statusCode(), resp.body())) {
                     logger.warn("审计 API 疑似配额问题 (attempt {}/{}): HTTP {} body={}",
@@ -514,6 +531,9 @@ public class ErrorMonitorService {
 
     private static boolean isQuotaError(int statusCode, String body) {
         if (statusCode == 402) return true;
+        // OpenAI-compatible gateways may include a billing_usage object in successful 200 responses.
+        // Never classify a successful response as a quota error based on words in its JSON body.
+        if (statusCode < 400) return false;
         if (body == null) return false;
         String lower = body.toLowerCase();
         if (lower.contains("insufficient") || lower.contains("quota") || lower.contains("balance")

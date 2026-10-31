@@ -190,7 +190,7 @@ database.password=${DB_PASSWORD}
 | 主模型看图 | `bailian.multimodal.enabled` | 默认关闭；开启后当前原图进入主模型请求 |
 | Agnes 媒体 | `agnes.enabled`、`agnes.api-key`、`agnes.*` | 默认关闭；代码会先按配置检查免费定价，再提供图片/视频工具 |
 | 语音 | `tts.*`、`volc.tts.*` | 默认使用配置的 TTS 服务；火山 TTS 默认关闭 |
-| Dashboard | 环境变量 `DASHBOARD_HOST`、`DASHBOARD_PORT`、`DASHBOARD_TOKEN`，或 JVM 系统属性 `dashboard.host` 等 | 默认监听 `127.0.0.1:8765`；非回环地址必须配置 Token |
+| Dashboard | 环境变量 `DASHBOARD_HOST`、`DASHBOARD_PORT`、`DASHBOARD_TOKEN`，或 JVM 系统属性 `dashboard.host` 等 | 默认监听 `127.0.0.1:8767`；非回环地址必须配置 Token |
 | 网页搜索 | `web.search.url`、`web.search.backend` | 由 `WebSearchTool` 使用 |
 | 审计模型 | `audit.api-key`、`audit.base-url`、`audit.model`、`audit.timeout-ms` | 用于部分审计/监控路径，不等同于主聊天模型 |
 | Working Memory | `working_memory.default_expire_hours` | 默认 24 小时 |
@@ -216,7 +216,7 @@ Linux/macOS 使用同样的 Maven 命令；Windows 也可以把 `mvn` 替换为 
 
 ## Dashboard
 
-默认地址为 `http://127.0.0.1:8765/`。面板展示决策轨迹、群指标、工具调用排行和表情包审阅；决策记录保存在进程内存中，最多保留 300 条。
+默认地址为 `http://127.0.0.1:8767/`。面板展示决策轨迹、群指标、工具调用排行和表情包审阅；决策记录保存在进程内存中，最多保留 300 条。
 
 可用 HTTP 路径：
 

@@ -891,6 +891,7 @@ public class Main extends WebSocketClient {
         if (baiLianService != null) baiLianService.close();
         if (dashboardListener != null) dashboardListener.stop();
         ToolAuditService.shutdown();
+        AuditModelUsageService.shutdown();
         try {
             if (!isClosed()) close();
         } catch (Exception e) {

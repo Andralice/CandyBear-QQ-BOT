@@ -213,6 +213,7 @@ public class CandyBearLifeRepository implements Repository {
 
     private CandyBearLifeState mapLifeState(ResultSet rs) throws SQLException {
         CandyBearLifeState s = new CandyBearLifeState();
+        s.setId(rs.getLong("id"));
         s.setSchool(rs.getString("school"));
         s.setGrade(rs.getString("grade"));
         s.setFriends(rs.getString("friends"));

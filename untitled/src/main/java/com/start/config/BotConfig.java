@@ -325,7 +325,7 @@ public class BotConfig {
             auditApiKey = resolveOrEmpty(props.getProperty("audit.api-key", ""));
             if (auditApiKey.isBlank()) auditApiKey = auxiliaryApiKey;
             auditBaseUrl = resolveOrEmpty(props.getProperty("audit.base-url", "https://www.wyy22.com/v1/chat/completions"));
-            auditModel = resolveOrEmpty(props.getProperty("audit.model", "gpt-5.6-luna"));
+            auditModel = resolveOrEmpty(props.getProperty("audit.model", "gpt-6-luna"));
             // 审计模型允许较长推理时间，默认等待 120 秒；可由 AUDIT_TIMEOUT_MS 覆盖。
             auditTimeoutMs = parseInt(resolveOrEmpty(props.getProperty("audit.timeout-ms", "120000")), 120000);
 

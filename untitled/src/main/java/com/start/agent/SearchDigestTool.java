@@ -3,6 +3,7 @@ package com.start.agent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.start.config.BotConfig;
+import com.start.service.AuditModelUsageService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -130,7 +131,8 @@ public class SearchDigestTool implements Tool {
                     .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body)))
                     .build();
 
-            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = AuditModelUsageService.send(
+                    HTTP, request, "search_digest", model);
 
             if (response.statusCode() != 200) {
                 // 回退：直接返回原始搜索结果

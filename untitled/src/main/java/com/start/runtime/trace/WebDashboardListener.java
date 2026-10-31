@@ -42,7 +42,8 @@ public class WebDashboardListener implements RuntimeListener {
     private static final Logger logger = LoggerFactory.getLogger(WebDashboardListener.class);
     private static final ObjectMapper mapper = new ObjectMapper();
 
-    private static final int DEFAULT_PORT = 8765;
+    // 8765 由同机 Work-book 网关占用，糖果熊使用独立端口避免启动冲突。
+    private static final int DEFAULT_PORT = 8767;
     private static final int DEFAULT_REPLAY_PORT = 8766;
     private static final int MAX_DECISIONS = 300;
     private static final String REPLAY_SCOPE =

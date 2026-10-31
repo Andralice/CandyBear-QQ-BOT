@@ -121,7 +121,8 @@ public final class MacroReviewService {
         if (apiKey.isBlank() || requestUrl.isBlank() || model.isBlank()) {
             throw new IllegalStateException("MACRO_REVIEW_NOT_CONFIGURED");
         }
-        ReviewResult firstPass = callModel(buildPayload(messages, previousFacts, previousReview));
+        AuditModelUsageService.CallContext usageContext = usageContext(groupId, messages);
+        ReviewResult firstPass = callModel(buildPayload(messages, previousFacts, previousReview), usageContext);
         JsonNode requests = firstPass.result().path("tool_requests");
         if (!requests.isArray() || requests.isEmpty() || messageRepository == null) return firstPass;
 
@@ -138,7 +139,7 @@ public final class MacroReviewService {
         secondPayload.set("first_pass", firstPass.result());
         secondPayload.set("tool_results", toolResults);
         secondPayload.putArray("tool_requests");
-        ReviewResult finalPass = callModel(secondPayload.toString());
+        ReviewResult finalPass = callModel(secondPayload.toString(), usageContext);
         ObjectNode finalResult = finalPass.result().isObject()
                 ? (ObjectNode) finalPass.result().deepCopy() : MAPPER.createObjectNode();
         finalResult.set("tool_trace", toolResults);
@@ -148,6 +149,10 @@ public final class MacroReviewService {
     }
 
     private ReviewResult callModel(String payload) throws Exception {
+        return callModel(payload, AuditModelUsageService.CallContext.empty());
+    }
+
+    private ReviewResult callModel(String payload, AuditModelUsageService.CallContext usageContext) throws Exception {
         ObjectNode body = MAPPER.createObjectNode();
         body.put("model", model);
         ArrayNode requestMessages = body.putArray("messages");
@@ -163,7 +168,8 @@ public final class MacroReviewService {
                 .header("Authorization", "Bearer " + apiKey)
                 .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
                 .build();
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = AuditModelUsageService.send(
+                httpClient, request, "macro_review", model, usageContext, 1);
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
             throw new IllegalStateException("MACRO_REVIEW_HTTP_" + response.statusCode());
         }
@@ -173,6 +179,18 @@ public final class MacroReviewService {
         JsonNode parsed = parseJsonObject(content);
         LlmProtocol.TokenUsage usage = LlmProtocol.extractUsage(root, LlmProtocol.Type.OPENAI);
         return new ReviewResult(parsed, model, PROMPT_VERSION, usage.inputTokens(), usage.outputTokens());
+    }
+
+    private static AuditModelUsageService.CallContext usageContext(
+            String groupId, List<Map<String, Object>> messages) {
+        String messageId = "";
+        String userId = "";
+        if (messages != null && !messages.isEmpty()) {
+            Map<String, Object> latest = messages.get(messages.size() - 1);
+            messageId = String.valueOf(latest.getOrDefault("message_id", latest.getOrDefault("id", "")));
+            userId = String.valueOf(latest.getOrDefault("sender_id", latest.getOrDefault("user_id", "")));
+        }
+        return new AuditModelUsageService.CallContext(messageId, groupId, userId, "", "macro_review");
     }
 
     private ObjectNode executeTool(String groupId, JsonNode request, Set<String> participants) {

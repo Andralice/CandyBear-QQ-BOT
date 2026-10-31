@@ -75,7 +75,7 @@ AGENT_MAX_RETRIES=2
 # 审计/日志总结服务（OpenAI 兼容 API）
 AUDIT_API_KEY=
 AUDIT_BASE_URL=https://www.wyy22.com/v1/chat/completions
-AUDIT_MODEL=gpt-5.6-luna
+AUDIT_MODEL=gpt-6-luna
 AUDIT_TIMEOUT_MS=120000
 
 # 群认知与宏观审查默认关闭；需要时再显式指定群号和模式
@@ -109,7 +109,7 @@ DEBUG=false
 # Web Dashboard / 表情包审阅面板
 # 仅本机访问可使用 127.0.0.1；对外监听时必须配置 Token
 DASHBOARD_HOST=127.0.0.1
-DASHBOARD_PORT=8765
+DASHBOARD_PORT=8767
 DASHBOARD_TOKEN=replace-with-a-long-random-token
 
 # 独立回放测试：java -jar untitled-1.0-SNAPSHOT.jar --replay-only

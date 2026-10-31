@@ -2,6 +2,7 @@ package com.start.agent;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.start.config.BotConfig;
+import com.start.service.AuditModelUsageService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -238,7 +239,8 @@ public class WebFetchTool implements Tool {
                     .POST(HttpRequest.BodyPublishers.ofString(json))
                     .build();
 
-            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = AuditModelUsageService.send(
+                    HTTP, request, "web_fetch", model);
 
             if (response.statusCode() != 200) {
                 logger.warn("WebFetch 副AI 返回 {}: {}", response.statusCode(),

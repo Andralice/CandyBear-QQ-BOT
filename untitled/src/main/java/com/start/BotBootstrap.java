@@ -80,6 +80,8 @@ public final class BotBootstrap {
 
         // 工具审计：单例注入，异步写库
         ToolAuditService.init(new ToolAuditLogRepository(DatabaseConfig.getDataSource()));
+        // 审计模型调用统计：异步记录成功、失败、token 和缓存命中率
+        AuditModelUsageService.init(DatabaseConfig.getDataSource());
         // 工具授权服务：集中权限 + 频率限流
         ToolAuthorizationService.init();
 

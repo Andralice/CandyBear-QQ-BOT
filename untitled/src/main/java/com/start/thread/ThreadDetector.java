@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.start.config.BotConfig;
 import com.start.model.ConversationThread;
+import com.start.service.AuditModelUsageService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,6 +44,11 @@ public class ThreadDetector {
      */
     public ConversationThread detect(String groupId, String userId, String message,
                                       List<ConversationThread> activeThreads) {
+        return detect(groupId, userId, message, "", activeThreads);
+    }
+
+    public ConversationThread detect(String groupId, String userId, String message, String messageId,
+                                     List<ConversationThread> activeThreads) {
         if (activeThreads == null || activeThreads.isEmpty()) return null;
         if (message == null || message.isBlank()) return null;
 
@@ -83,7 +89,7 @@ public class ThreadDetector {
                 || (bestScore >= CLEAR_MATCH_THRESHOLD && (bestScore - secondBestScore) <= 0.1);
         if (ambiguous && bestMatch != null) {
             logger.debug("Ambiguous match score={} gap={}, trying LLM fallback", bestScore, bestScore - secondBestScore);
-            Long llmThreadId = classifyByLLM(message, activeThreads);
+            Long llmThreadId = classifyByLLM(message, groupId, userId, messageId, activeThreads);
             if (llmThreadId != null) return activeThreads.stream()
                     .filter(t -> t.getId().equals(llmThreadId)).findFirst().orElse(null);
         }
@@ -96,7 +102,8 @@ public class ThreadDetector {
      * 调用 audit LLM 判断消息属于哪个 Thread。
      * 返回 thread ID，或 null 表示新话题。
      */
-    private Long classifyByLLM(String message, List<ConversationThread> threads) {
+    private Long classifyByLLM(String message, String groupId, String userId, String messageId,
+                               List<ConversationThread> threads) {
         if (threads.isEmpty()) return null;
         try {
             StringBuilder topics = new StringBuilder();
@@ -127,7 +134,9 @@ public class ThreadDetector {
                     .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
                     .build();
 
-            HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> resp = AuditModelUsageService.send(
+                    httpClient, req, "thread_classification", BotConfig.getAuditModel(),
+                    new AuditModelUsageService.CallContext(messageId, groupId, userId, "", "thread_classification"), 1);
             if (resp.statusCode() == 200) {
                 JsonNode json = MAPPER.readTree(resp.body());
                 String content = json.path("choices").get(0).path("message").path("content").asText("0").trim();

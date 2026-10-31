@@ -59,6 +59,10 @@ public class ThreadManager {
      * @return 当前群的 Scene 视图
      */
     public SceneState processMessage(String groupId, String userId, String message, long botQq) {
+        return processMessage(groupId, userId, message, "", botQq);
+    }
+
+    public SceneState processMessage(String groupId, String userId, String message, String messageId, long botQq) {
         // 1. 推进生命周期（IDLE → RESOLVED）
         repo.markResolved(RESOLVE_MINUTES);
         repo.markIdle(IDLE_MINUTES);
@@ -67,7 +71,7 @@ public class ThreadManager {
         List<ConversationThread> activeThreads = repo.findActiveByGroup(groupId);
 
         // 3. 检测消息归属
-        ConversationThread matched = detector.detect(groupId, userId, message, activeThreads);
+        ConversationThread matched = detector.detect(groupId, userId, message, messageId, activeThreads);
 
         if (matched != null) {
             // 归入已有 Thread

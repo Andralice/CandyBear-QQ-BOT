@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 
 import com.start.config.BotConfig;
+import com.start.service.AuditModelUsageService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -243,8 +244,8 @@ public class AuditAgentTool implements Tool {
                     .POST(HttpRequest.BodyPublishers.ofString(json))
                     .build();
 
-            HttpResponse<String> response = HTTP.send(request,
-                    HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = AuditModelUsageService.send(
+                    HTTP, request, "audit_agent", model);
 
             if (response.statusCode() != 200) {
                 logger.warn("[AuditAgent] API 返回 {}: {}", response.statusCode(),

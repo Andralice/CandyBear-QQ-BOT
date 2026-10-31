@@ -116,6 +116,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 
@@ -222,9 +223,13 @@ public class BaiLianService implements AutoCloseable {
 
     /** AIHandler 调用：按群消息顺序逐条更新 Thread，避免时间节流丢失其他成员的发言。 */
     public SceneState processThreadMessage(String groupId, String userId, String message) {
+        return processThreadMessage(groupId, userId, message, "");
+    }
+
+    public SceneState processThreadMessage(String groupId, String userId, String message, String messageId) {
         if (groupId == null) return SceneState.EMPTY;
         try {
-            return getThreadManager().processMessage(groupId, userId, message, BOT_QQ);
+            return getThreadManager().processMessage(groupId, userId, message, messageId, BOT_QQ);
         } catch (Exception e) {
             logger.warn("Thread processing failed, groupId={}, userId={}", groupId, userId, e);
             return SceneState.EMPTY;
@@ -639,8 +644,9 @@ public class BaiLianService implements AutoCloseable {
             // The request timeout does not cap a provider that keeps a response body open.
             // Bound the whole probe and cancel the underlying exchange so one route cannot
             // hold the model-pool scheduler indefinitely.
-            CompletableFuture<HttpResponse<String>> pending =
-                    httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString());
+            CompletableFuture<HttpResponse<String>> pending = AuditModelUsageService.sendAsync(
+                    httpClient, request, "main_model_probe", candidate.model(),
+                    new AuditModelUsageService.CallContext("", "", "", "", "main_model_probe"), 1);
             HttpResponse<String> response;
             try {
                 response = pending.get(Math.max(1, timeoutMs), TimeUnit.MILLISECONDS);
@@ -716,10 +722,12 @@ public class BaiLianService implements AutoCloseable {
                         .timeout(Duration.ofMillis(this.bailianTimeoutMs))
                         .build();
                 int retries = mainModelPool.isEnabled() ? 0 : this.bailianMaxRetries;
+                AtomicInteger requestAttempt = new AtomicInteger();
                 long requestStartedAt = System.nanoTime();
                 HttpResponse<String> response = BailianRetryExecutor.executeHttp(
                         "主模型线路 " + route.id(),
-                        () -> httpClient.send(request, HttpResponse.BodyHandlers.ofString()),
+                        () -> AuditModelUsageService.send(httpClient, request, "main_chat_initial", route.model(),
+                                requestAttempt.incrementAndGet()),
                         retries);
                 long responseLatencyMs = TimeUnit.NANOSECONDS.toMillis(
                         System.nanoTime() - requestStartedAt);
@@ -846,7 +854,7 @@ public class BaiLianService implements AutoCloseable {
                         .build();
                 HttpResponse<String> response = BailianRetryExecutor.executeHttp(
                         "工具结果收尾线路 " + route.id(),
-                        () -> httpClient.send(request, HttpResponse.BodyHandlers.ofString()), 0);
+                        () -> AuditModelUsageService.send(httpClient, request, "main_chat_recovery", route.model()), 0);
                 if (response.statusCode() != 200) {
                     throw new RuntimeException("HTTP " + response.statusCode());
                 }
@@ -1019,7 +1027,11 @@ public class BaiLianService implements AutoCloseable {
         replayTools.add(new GroupTurnResultTool());
         List<Map<String, Object>> toolSpecs = LlmProtocol.buildToolSpecs(
                 candidate.protocol(), replayTools, ignored -> null);
-        ReplayModelResponse modelResponse = sendReplayRequest(candidate, systemPrompt, messages, toolSpecs);
+        AuditModelUsageService.CallContext replayContext = new AuditModelUsageService.CallContext(
+                String.valueOf(turn.localMessageId()), turn.groupId(), turn.userId(),
+                "replay_" + turn.localMessageId(), "replay_generation");
+        ReplayModelResponse modelResponse = sendReplayRequest(candidate, systemPrompt, messages, toolSpecs,
+                replayContext);
         JsonNode assistant = modelResponse.assistant();
         GroupTurnAssessment groupAssessment = null;
         boolean replyToCurrentMessage = false;
@@ -1054,7 +1066,7 @@ public class BaiLianService implements AutoCloseable {
             if (candidate.protocol().isAnthropic() && !anthropicResults.isEmpty()) {
                 messages.add(Map.of("role", "user", "content", anthropicResults));
             }
-            modelResponse = sendReplayRequest(candidate, systemPrompt, messages, toolSpecs);
+            modelResponse = sendReplayRequest(candidate, systemPrompt, messages, toolSpecs, replayContext);
             assistant = modelResponse.assistant();
         }
         String rawReply = LlmProtocol.extractText(assistant).trim();
@@ -1078,7 +1090,8 @@ public class BaiLianService implements AutoCloseable {
 
     private ReplayModelResponse sendReplayRequest(MainModelPool.Candidate candidate, String systemPrompt,
                                                   List<Map<String, Object>> messages,
-                                                  List<Map<String, Object>> toolSpecs) throws Exception {
+                                                  List<Map<String, Object>> toolSpecs,
+                                                  AuditModelUsageService.CallContext usageContext) throws Exception {
         Map<String, Object> body = LlmProtocol.buildRequestBody(candidate.protocol(), candidate.model(),
                 systemPrompt, messages, toolSpecs, 1024, baiLianReasoningEffort,
                 candidate.thinkingDisabled());
@@ -1089,7 +1102,8 @@ public class BaiLianService implements AutoCloseable {
                 .POST(HttpRequest.BodyPublishers.ofString(serialized))
                 .timeout(Duration.ofMillis(bailianTimeoutMs))
                 .build();
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = AuditModelUsageService.send(
+                httpClient, request, "replay_generation", candidate.model(), usageContext, 1);
         if (response.statusCode() != 200) {
             throw new IllegalStateException("replay model returned HTTP " + response.statusCode());
         }
@@ -1803,6 +1817,7 @@ public class BaiLianService implements AutoCloseable {
                 String nextBodyJson = objectMapper.writeValueAsString(nextBody);
                 JsonNode nextMsg = null;
                 try {
+                    AtomicInteger requestAttempt = new AtomicInteger();
                     HttpResponse<String> nextResp = BailianRetryExecutor.executeHttp(
                             "百炼 API 工具第" + toolRound + "轮",
                             () -> {
@@ -1812,7 +1827,8 @@ public class BaiLianService implements AutoCloseable {
                                         .POST(HttpRequest.BodyPublishers.ofString(nextBodyJson))
                                         .timeout(Duration.ofMillis(this.bailianTimeoutMs))
                                         .build();
-                                return httpClient.send(nextReq, HttpResponse.BodyHandlers.ofString());
+                                return AuditModelUsageService.send(httpClient, nextReq, "main_chat_tool_round",
+                                        modelName, requestAttempt.incrementAndGet());
                             },
                             this.bailianMaxRetries
                     );
@@ -1918,7 +1934,8 @@ public class BaiLianService implements AutoCloseable {
                             .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(retryBody)))
                             .timeout(Duration.ofMillis(this.bailianTimeoutMs))
                             .build();
-                    HttpResponse<String> retryResp = httpClient.send(retryReq, HttpResponse.BodyHandlers.ofString());
+                    HttpResponse<String> retryResp = AuditModelUsageService.send(
+                            httpClient, retryReq, "main_chat_format_retry", modelName);
                     if (retryResp.statusCode() == 200) {
                         JsonNode retryRoot = objectMapper.readTree(retryResp.body());
                         JsonNode retryMessage = LlmProtocol.normalizeAssistantResponse(
@@ -1944,6 +1961,16 @@ public class BaiLianService implements AutoCloseable {
         }
 
         if (groupId != null) {
+            // Group turns have a structured result protocol. Some models still follow
+            // the generic silence instruction and return the legacy control marker.
+            // Convert that marker to the same SILENT assessment without another API call.
+            if (isNoReplyMarker(reply) && allowSilence) {
+                GroupTurnAssessment silent = new GroupTurnAssessment(
+                        GroupTurnAssessment.Decision.SILENT, Collections.emptyList(),
+                        "", "", "", false, "model_no_reply", "NOT_REQUIRED", "NONE");
+                return completeGroupTurn(silent, groupId, userPrompt, true,
+                        toolCalls, groupAssessmentAtMs, replyToCurrentMessage);
+            }
             GroupTurnAssessment assessment;
             try {
                 assessment = GroupTurnResultTool.parse(reply, objectMapper);
@@ -2117,9 +2144,11 @@ public class BaiLianService implements AutoCloseable {
                     .timeout(Duration.ofMillis(this.bailianTimeoutMs))
                     .build();
             long startedAt = System.nanoTime();
+            AtomicInteger requestAttempt = new AtomicInteger();
             HttpResponse<String> response = BailianRetryExecutor.executeHttp(
                     "群聊最终决策格式修复 " + modelRoute.id(),
-                    () -> httpClient.send(request, HttpResponse.BodyHandlers.ofString()),
+                    () -> AuditModelUsageService.send(httpClient, request, "main_chat_group_decision_retry",
+                            modelRoute.model(), requestAttempt.incrementAndGet()),
                     this.bailianMaxRetries);
             if (response.statusCode() != 200) {
                 throw new RuntimeException("HTTP " + response.statusCode());
@@ -2928,6 +2957,11 @@ public class BaiLianService implements AutoCloseable {
 
     /** 简单调用聊天模型，返回纯文本响应（无工具、无会话、无状态注入） */
     public String generateRaw(String prompt) {
+        return generateRaw(prompt, null);
+    }
+
+    /** 带业务来源的辅助文本模型调用。 */
+    public String generateRaw(String prompt, AuditModelUsageService.CallContext usageContext) {
         if (auxiliaryApiKey == null || auxiliaryApiKey.isBlank()
                 || auxiliaryUrl == null || auxiliaryUrl.isBlank() || auxiliaryModel.isBlank()) {
             logger.warn("generateRaw 未配置后台 Luna 路由，跳过辅助调用");
@@ -2948,9 +2982,11 @@ public class BaiLianService implements AutoCloseable {
                     .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
                     .timeout(Duration.ofMillis(auxiliaryTimeoutMs))
                     .build();
+            AtomicInteger requestAttempt = new AtomicInteger();
             HttpResponse<String> response = BailianRetryExecutor.executeHttp(
                     "generateRaw Luna",
-                    () -> httpClient.send(request, HttpResponse.BodyHandlers.ofString()),
+                    () -> AuditModelUsageService.send(httpClient, request, "auxiliary_raw", auxiliaryModel,
+                            usageContext, requestAttempt.incrementAndGet()),
                     auxiliaryMaxRetries);
             if (response.statusCode() != 200) {
                 throw new RuntimeException("HTTP " + response.statusCode());
@@ -3010,7 +3046,8 @@ public class BaiLianService implements AutoCloseable {
                     .build();
 
             logger.info("⏳ 等待 API 响应...");
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = AuditModelUsageService.send(
+                    httpClient, request, "agent_generation", modelName);
 
             long elapsed = System.currentTimeMillis() - startTime;
             logger.info("⬅️ API 响应状态码: {}, 耗时: {}ms", response.statusCode(), elapsed);

@@ -925,6 +925,43 @@ public class DatabaseConfig {
                 "INDEX idx_audit_group (group_id, created_at)," +
                 "INDEX idx_audit_time (created_at)" +
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            // 审计模型每次 HTTP 调用的 token、缓存与失败记录（不保存 prompt/响应正文）
+            "CREATE TABLE IF NOT EXISTS audit_model_usage (" +
+                "id BIGINT AUTO_INCREMENT PRIMARY KEY," +
+                "scene VARCHAR(100) NOT NULL," +
+                "model_name VARCHAR(160)," +
+                "endpoint_host VARCHAR(255)," +
+                "message_id VARCHAR(128)," +
+                "group_id VARCHAR(128)," +
+                "user_id VARCHAR(128)," +
+                "session_id VARCHAR(255)," +
+                "function_name VARCHAR(160)," +
+                "attempt_no INT NOT NULL DEFAULT 1," +
+                "http_status INT NULL," +
+                "success BOOLEAN NOT NULL DEFAULT FALSE," +
+                "input_tokens INT NOT NULL DEFAULT 0," +
+                "output_tokens INT NOT NULL DEFAULT 0," +
+                "total_tokens INT NOT NULL DEFAULT 0," +
+                "cached_input_tokens INT NOT NULL DEFAULT 0," +
+                "cache_hit_rate DECIMAL(8,4) NULL," +
+                "latency_ms BIGINT NOT NULL DEFAULT 0," +
+                "error_type VARCHAR(100)," +
+                "error_message VARCHAR(1000)," +
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
+                "INDEX idx_amu_scene_time (scene, created_at)," +
+                "INDEX idx_amu_model_time (model_name, created_at)," +
+                "INDEX idx_amu_message_time (message_id, created_at)," +
+                "INDEX idx_amu_function_time (function_name, created_at)," +
+                "INDEX idx_amu_success_time (success, created_at)," +
+                "INDEX idx_amu_created (created_at)" +
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+            // 为已存在的审计表补齐业务关联字段。
+            "ALTER TABLE audit_model_usage ADD COLUMN message_id VARCHAR(128) NULL",
+            "ALTER TABLE audit_model_usage ADD COLUMN group_id VARCHAR(128) NULL",
+            "ALTER TABLE audit_model_usage ADD COLUMN user_id VARCHAR(128) NULL",
+            "ALTER TABLE audit_model_usage ADD COLUMN session_id VARCHAR(255) NULL",
+            "ALTER TABLE audit_model_usage ADD COLUMN function_name VARCHAR(160) NULL",
         };
 
         List<String> failures = new ArrayList<>();

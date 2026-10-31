@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.start.Main;
 import com.start.config.BotConfig;
 import com.start.service.BaiLianService;
+import com.start.service.AuditModelUsageService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -297,7 +298,8 @@ public class QueryFileTool implements Tool {
                     .build();
 
             long start = System.currentTimeMillis();
-            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = AuditModelUsageService.send(
+                    HTTP, request, "query_file", model);
             long elapsed = System.currentTimeMillis() - start;
 
             if (response.statusCode() != 200) {

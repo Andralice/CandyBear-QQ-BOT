@@ -65,7 +65,10 @@ public final class GroupConversationSessionSummaryService implements AutoCloseab
     private void generate(GroupConversationSession session, String evidence) {
         try {
             if (aiService == null) throw new IllegalStateException("AI service unavailable");
-            String raw = aiService.generateRaw(buildPrompt(session, evidence));
+            String sourceMessageId = session.evidenceMessageIds().stream().reduce((first, second) -> second).orElse("");
+            String raw = aiService.generateRaw(buildPrompt(session, evidence),
+                    new AuditModelUsageService.CallContext(sourceMessageId, session.groupId(), "", session.sessionId(),
+                            "session_summary"));
             SummaryDraft draft = parseDraft(raw, session);
             repository.saveCompleted(session, draft.summary(), draft.confirmed(),
                     draft.uncertain(), draft.unresolved(), evidence);
